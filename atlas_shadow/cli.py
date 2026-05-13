@@ -1,0 +1,265 @@
+"""cli — entry points for the make targets.
+
+Three top-level subcommands:
+
+- ``shadow-run``       — parse fixture → run Atlas → grade → write JSONL
+- ``shadow-grade``     — re-grade an existing pre-grade JSONL (rare; used
+                         to swap grader models without re-querying Atlas)
+- ``shadow-aggregate`` — write the cross-packet comparison report
+
+The shadow-run path is the main one. Out-of-band mode (`--commit <sha>`)
+invokes :mod:`atlas_shadow.ingest` first to spin up a fresh org at that
+commit, then routes the batch through that new org_id.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import click
+import yaml
+
+from . import aggregate as aggregate_mod
+from . import grader as grader_mod
+from . import parser as parser_mod
+from . import runner as runner_mod
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise click.ClickException(f"config not found: {path}")
+    with path.open("r", encoding="utf-8") as fp:
+        data = yaml.safe_load(fp) or {}
+    if not isinstance(data, dict):
+        raise click.ClickException(f"config must be a YAML mapping: {path}")
+    return data
+
+
+def _fixture_path(fixture: str) -> Path:
+    """Resolve a fixture name to a path in tests/fixtures/."""
+    here = Path(__file__).resolve().parent.parent
+    # Allow both bare names and absolute paths
+    candidate = here / "tests" / "fixtures" / f"{fixture}.jsonl"
+    if candidate.exists():
+        return candidate
+    candidate_md = here / "tests" / "fixtures" / f"{fixture}.md"
+    if candidate_md.exists():
+        return candidate_md
+    # Maybe it's already a path
+    p = Path(fixture)
+    if p.exists():
+        return p
+    raise click.ClickException(f"fixture not found: {fixture}")
+
+
+def _to_json(obj: Any) -> Any:
+    """Recursively convert dataclasses + primitives to JSON-safe types."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _to_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json(v) for v in obj]
+    if is_dataclass(obj):
+        return _to_json(asdict(obj))
+    if hasattr(obj, "__dict__"):
+        return _to_json(vars(obj))
+    return repr(obj)
+
+
+@click.group()
+def main() -> None:
+    """atlas-shadow CLI."""
+
+
+@main.command("shadow-run")
+@click.option("--fixture", required=True, help="Fixture name (without extension) or absolute path.")
+@click.option("--config", "config_path", default="shadow-config.yaml", show_default=True, type=click.Path(path_type=Path))
+@click.option("--commit", default=None, help="Out-of-band: ingest at this commit before running.")
+@click.option("--tool", default="auto", show_default=True, type=click.Choice(["answer", "find_code", "scan_search", "auto"]))
+@click.option("--domain-pack", default="code", show_default=True, help="Domain pack hint for find_code/scan_search.")
+@click.option("--no-grade", is_flag=True, help="Skip grader; write atlas-only responses.")
+@click.option("--limit", type=int, default=None, help="Run only the first N receipts (for cheap smoketests).")
+@click.option("--timeout", type=int, default=180, show_default=True, help="Per-query timeout in seconds.")
+def shadow_run(
+    fixture: str,
+    config_path: Path,
+    commit: Optional[str],
+    tool: str,
+    domain_pack: str,
+    no_grade: bool,
+    limit: Optional[int],
+    timeout: int,
+) -> None:
+    """Run the benchmark for FIXTURE and write atlas-qa-shadow.jsonl."""
+    config = _load_config(config_path)
+    fixture_path = _fixture_path(fixture)
+    receipts = parser_mod.parse_fixture(fixture_path)
+    if limit:
+        receipts = receipts[:limit]
+    if not receipts:
+        raise click.ClickException(f"no receipts parsed from {fixture_path}")
+
+    core_repo_path = Path(config["core_repo_path"]).expanduser()
+    grader_model = config.get("grader_model") or "claude-3-5-sonnet-20241022"
+    principal_id = config.get("default_principal_id")
+    code_revision_id = config.get("continuous_shadow_code_revision_id")
+
+    if commit:
+        # Out-of-band mode: ingest at <commit>, get a fresh org_id, run against it.
+        from . import ingest as ingest_mod
+
+        click.echo(f"[atlas-shadow] out-of-band ingest @ {commit}", err=True)
+        ingest_result = ingest_mod.ensure_org_for_commit(
+            commit_sha=commit,
+            core_repo_path=core_repo_path,
+            template_org_id=config.get("one_off_template_org_id"),
+        )
+        org_id = ingest_result["org_id"]
+        code_revision_id = ingest_result.get("code_revision_id") or code_revision_id
+        click.echo(
+            f"[atlas-shadow] ingest done: org_id={org_id} "
+            f"code_revision_id={code_revision_id} "
+            f"latency_ms={ingest_result.get('latency_ms')}",
+            err=True,
+        )
+    else:
+        org_id = config.get("continuous_shadow_org_id")
+        if not org_id:
+            raise click.ClickException(
+                "continuous_shadow_org_id missing in config; "
+                "either set it or pass --commit <sha> for out-of-band mode."
+            )
+
+    out_dir = Path("shadow-runs") / fixture
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "atlas-qa-shadow.jsonl"
+
+    def _progress(i: int, n: int, resp: runner_mod.ShadowResponse) -> None:
+        a = resp.atlas_response
+        click.echo(
+            f"[atlas-shadow] {i}/{n} {resp.question_id} "
+            f"tool={a.tool_used or '?'} rc={a.returncode} "
+            f"answer_len={len(a.answer_text or '')} "
+            f"latency_ms={a.atlas_latency_ms}",
+            err=True,
+        )
+
+    responses = runner_mod.run_batch(
+        receipts,
+        fixture_id=fixture,
+        org_id=str(org_id),
+        core_repo_path=core_repo_path,
+        tool=tool,
+        principal_id=principal_id,
+        domain_pack=domain_pack,
+        code_revision_id=code_revision_id,
+        timeout=timeout,
+        progress_cb=_progress,
+    )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    records: list[dict[str, Any]] = []
+    for receipt, resp in zip(receipts, responses):
+        grader_result: Optional[dict[str, Any]] = None
+        if not no_grade:
+            g = grader_mod.grade(
+                question=receipt.question,
+                oracle_excerpt=receipt.oracle_excerpt,
+                oracle_claim=receipt.oracle_claim,
+                atlas_answer_text=resp.atlas_response.answer_text,
+                model=grader_model,
+                api_key=api_key,
+            )
+            grader_result = _to_json(g)
+        record = {
+            "question_id": resp.question_id,
+            "question": resp.question,
+            "fixture_id": resp.fixture_id,
+            "class_label": receipt.class_label,
+            "oracle": {
+                "source_path": receipt.source_path,
+                "source_lines": receipt.source_lines,
+                "commit_sha": receipt.commit_sha,
+                "excerpt": receipt.oracle_excerpt,
+                "claim": receipt.oracle_claim,
+            },
+            "atlas_response": _to_json(resp.atlas_response),
+            "grader_response": grader_result,
+            "wall_time_ms": resp.wall_time_ms,
+            "captured_at": resp.captured_at,
+            "org_id": resp.org_id,
+            "tool_requested": resp.tool,
+        }
+        records.append(record)
+
+    with out_path.open("w", encoding="utf-8") as fp:
+        for r in records:
+            fp.write(json.dumps(r, sort_keys=True, default=str) + "\n")
+
+    click.echo(f"[atlas-shadow] wrote {len(records)} records to {out_path}", err=True)
+
+
+@main.command("shadow-grade")
+@click.option("--fixture", required=True)
+@click.option("--config", "config_path", default="shadow-config.yaml", show_default=True, type=click.Path(path_type=Path))
+def shadow_grade(fixture: str, config_path: Path) -> None:
+    """Re-grade an existing atlas-qa-shadow.jsonl in place.
+
+    Useful when swapping grader models or re-trying parse failures without
+    re-querying Atlas. Reads the existing file, regrades each row's
+    ``atlas_response.answer_text`` against ``oracle.excerpt`` + claim, and
+    overwrites the file.
+    """
+    config = _load_config(config_path)
+    grader_model = config.get("grader_model") or "claude-3-5-sonnet-20241022"
+    target = Path("shadow-runs") / fixture / "atlas-qa-shadow.jsonl"
+    if not target.exists():
+        raise click.ClickException(f"target not found: {target}")
+    rows: list[dict[str, Any]] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(json.loads(line))
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    for row in rows:
+        atlas = row.get("atlas_response") or {}
+        oracle = row.get("oracle") or {}
+        g = grader_mod.grade(
+            question=row.get("question", ""),
+            oracle_excerpt=oracle.get("excerpt", ""),
+            oracle_claim=oracle.get("claim", ""),
+            atlas_answer_text=atlas.get("answer_text", ""),
+            model=grader_model,
+            api_key=api_key,
+        )
+        row["grader_response"] = _to_json(g)
+    with target.open("w", encoding="utf-8") as fp:
+        for r in rows:
+            fp.write(json.dumps(r, sort_keys=True, default=str) + "\n")
+    click.echo(f"[atlas-shadow] re-graded {len(rows)} rows in {target}", err=True)
+
+
+@main.command("shadow-aggregate")
+@click.option("--config", "config_path", default="shadow-config.yaml", show_default=True, type=click.Path(path_type=Path))
+@click.option("--shadow-runs-dir", default="shadow-runs", show_default=True, type=click.Path(path_type=Path))
+@click.option("--out", "out_path", default="shadow-runs/_aggregate/comparison-report.md", show_default=True, type=click.Path(path_type=Path))
+def shadow_aggregate(config_path: Path, shadow_runs_dir: Path, out_path: Path) -> None:
+    """Write the cross-packet comparison report."""
+    _ = config_path  # currently unused; reserved for future grader-model-aware reports
+    summary = aggregate_mod.aggregate(shadow_runs_dir, out_path)
+    click.echo(
+        f"[atlas-shadow] wrote {summary['report_path']} "
+        f"(total_packets={summary['total_packets']})",
+        err=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

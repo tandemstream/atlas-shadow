@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# venv
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Shadow-runs output: per-fixture output dirs are NOT committed by default;
+# the dogfood-v2 evidence run is committed explicitly via `git add -f` in
+# shadow-PR-B.
+shadow-runs/*/
+!shadow-runs/.gitkeep
+!shadow-runs/_aggregate/
+
+# Local D4 ingest cache (sha → org_id mapping)
+.ingest-cache/
+.ingest-cache.json

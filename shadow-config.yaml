@@ -1,0 +1,44 @@
+# atlas-shadow runtime configuration
+#
+# Names the org(s) and grader model used by `make shadow-run`. No defaults
+# in Python code — this file is the single source of truth.
+
+# Default-mode target. Atlas-shadow queries Atlas under this org id (no
+# ingestion on the critical path). Per Phase 2 amendment 3, this is
+# pinned-but-stale: the dogfood org at commit 87aa9fa. A future
+# continuous-ingest packet will maintain a separate org with real-time
+# ingestion.
+#
+# Local dev note: the brief named "af6ef504-7492-4dbb-99cb-9437141bd029"
+# as the blessed dogfood UUID (from outputs/blessed/atlas_dogfood/
+# pass_a_v2_results.json), but the locally-ingested instance uses a
+# different UUID. Override per environment.
+continuous_shadow_org_id: "3ec689a0-678b-47ed-af17-a72e5adbfad8"
+
+# Optional template org id for out-of-band ingest setup. If unset, the D4
+# ingester creates a fresh org via `workspace run org-create NAME=<auto>`.
+one_off_template_org_id: null
+
+# Path to a working tandemstream/core checkout with the Atlas venv
+# bootstrapped (`workspace up` from the Atlas leaf has been run). The
+# runner shells out from `<core_repo_path>/products/tandem/packages/python/atlas`.
+core_repo_path: "/Users/ray/tandemstream/core--atlas"
+
+# LLM-as-judge model. With the Anthropic SDK backend, reads
+# ANTHROPIC_API_KEY from the environment. When the grader falls back to
+# the `claude` CLI (no API key), the value passed as --model must be
+# resolvable by Claude Code; "sonnet" / "opus" / "haiku" aliases work,
+# or an exact model id the CLI accepts. The CLI fallback engages
+# automatically when ANTHROPIC_API_KEY is unset; force it via
+# ATLAS_SHADOW_GRADER_BACKEND=claude_cli.
+grader_model: "sonnet"
+
+# Default principal id used by find_code/scan_search calls. Mirrors the
+# dogfood reference's DEFAULT_PRINCIPAL_ID. The wrapper has its own default
+# (this is just where atlas-shadow records its intended principal).
+default_principal_id: "00000000-0000-4000-8000-000000000222"
+
+# Pinned code revision id for the continuous shadow org (optional). When
+# set, the runner passes it as --code-revision-id to find_code/scan_search.
+# Resolved by the dogfood ingest script for the commit 87aa9fa.
+continuous_shadow_code_revision_id: "fe98af79-23a7-4718-bae4-fa3f349878c8"
