@@ -32,6 +32,13 @@ DEFAULTS: dict[str, Any] = {
     "scip_indexer_version": "scip-python@0.6.6",
     "pack_bundle_revision": "code@v1",
     "core_repo_url": "https://github.com/tandemstream/core.git",
+    # Repo URL passed to the dogfood ingest CLI's --repo-url flag — this
+    # becomes part of Atlas's idempotency cache key
+    # ``(org_id, repo_url, commit_sha, indexer_version)``. Distinct from
+    # ``core_repo_url`` above (which is the .git clone URL); the cache
+    # key is a plain string match so the canonical form (no .git suffix)
+    # is what downstream Atlas tools expect.
+    "repo_url": "https://github.com/tandemstream/core",
     "worker_idle_sleep_seconds": 5,
     "max_attempts_per_commit": 3,
     "scip_build_timeout_seconds": 1200,
@@ -56,6 +63,7 @@ class DaemonConfig:
     scip_indexer_version: str = DEFAULTS["scip_indexer_version"]
     pack_bundle_revision: str = DEFAULTS["pack_bundle_revision"]
     core_repo_url: str = DEFAULTS["core_repo_url"]
+    repo_url: str = DEFAULTS["repo_url"]
     worker_idle_sleep_seconds: int = DEFAULTS["worker_idle_sleep_seconds"]
     max_attempts_per_commit: int = DEFAULTS["max_attempts_per_commit"]
     scip_build_timeout_seconds: int = DEFAULTS["scip_build_timeout_seconds"]
@@ -118,6 +126,7 @@ def load_config(
         scip_indexer_version=str(merged["scip_indexer_version"]),
         pack_bundle_revision=str(merged["pack_bundle_revision"]),
         core_repo_url=str(merged["core_repo_url"]),
+        repo_url=str(merged["repo_url"]),
         worker_idle_sleep_seconds=int(merged["worker_idle_sleep_seconds"]),
         max_attempts_per_commit=int(merged["max_attempts_per_commit"]),
         scip_build_timeout_seconds=int(merged["scip_build_timeout_seconds"]),

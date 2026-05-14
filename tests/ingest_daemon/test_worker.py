@@ -69,10 +69,21 @@ def test_process_one_succeeded_writes_ledger_and_state(daemon_config, db_path, s
         captured["indexer_version"] = indexer_version
         return scip
 
-    def fake_run_ingest(*, core_repo_path, org_id, scip_path, source_root, timeout_seconds):
+    def fake_run_ingest(
+        *,
+        core_repo_path,
+        org_id,
+        scip_path,
+        source_root,
+        commit_sha,
+        repo_url,
+        timeout_seconds,
+    ):
         captured["ingest_org_id"] = org_id
         captured["ingest_scip_path"] = scip_path
         captured["ingest_source_root"] = source_root
+        captured["ingest_commit_sha"] = commit_sha
+        captured["ingest_repo_url"] = repo_url
         return {
             "org_id": org_id,
             "code_revision_id": "11111111-1111-1111-1111-111111111111",
@@ -93,6 +104,12 @@ def test_process_one_succeeded_writes_ledger_and_state(daemon_config, db_path, s
     assert outcome["status"] == "succeeded"
     assert outcome["code_revision_id"] == "11111111-1111-1111-1111-111111111111"
     assert captured["ingest_org_id"] == daemon_config.continuous_shadow_org_id
+    # D5 v2 follow-on: worker must thread the queue-row sha + the
+    # configured repo_url into _run_ingest so the dogfood CLI can drive
+    # Atlas's idempotency cache key on the real values (not the dogfood
+    # pin).
+    assert captured["ingest_commit_sha"] == claim["commit_sha"]
+    assert captured["ingest_repo_url"] == daemon_config.repo_url
 
     # Ledger row written.
     latest = ledger_mod.latest_succeeded(db_path)
@@ -198,6 +215,8 @@ def test_dogfood_ingest_argv_shape_is_stable(tmp_path):
         org_id="3ec689a0-678b-47ed-af17-a72e5adbfad8",
         scip_path=Path("/tmp/x.scip"),
         source_root=Path("/tmp/x"),
+        commit_sha="deadbeef" + "0" * 32,
+        repo_url="https://github.com/tandemstream/core",
     )
     # Position-independent assertions on the argv shape.
     assert argv[1] == "-m"
@@ -207,6 +226,10 @@ def test_dogfood_ingest_argv_shape_is_stable(tmp_path):
     assert pairs["--org-id"] == "3ec689a0-678b-47ed-af17-a72e5adbfad8"
     assert pairs["--scip-path"] == "/tmp/x.scip"
     assert pairs["--source-root"] == "/tmp/x"
+    # D5 v2 follow-on: --commit-sha + --repo-url must be passed through
+    # (core PR #209 added these flags to the dogfood CLI).
+    assert pairs["--commit-sha"] == "deadbeef" + "0" * 32
+    assert pairs["--repo-url"] == "https://github.com/tandemstream/core"
 
 
 def _parse_dogfood_argparse_flags(script_path: Path) -> set[str]:
@@ -264,6 +287,8 @@ def test_argv_matches_dogfood_argparse():
         org_id="some-uuid",
         scip_path=Path("/tmp/x.scip"),
         source_root=Path("/tmp/x"),
+        commit_sha="deadbeef" + "0" * 32,
+        repo_url="https://github.com/tandemstream/core",
     )
     used_flags = {tok for tok in argv if isinstance(tok, str) and tok.startswith("--")}
 
@@ -275,6 +300,21 @@ def test_argv_matches_dogfood_argparse():
         f"worker uses: {sorted(used_flags)}. "
         f"Update atlas_shadow/ingest_daemon/scip_builder.py::dogfood_ingest_argv "
         f"to match the dogfood script's argparse (and the runbook)."
+    )
+
+    # D5 v2 follow-on (core PR #209): the dogfood script MUST declare
+    # --commit-sha + --repo-url, and the daemon MUST pass them. The
+    # parity assertion is bidirectional — both sides must agree.
+    v2_flags = {"--commit-sha", "--repo-url"}
+    assert v2_flags <= declared_flags, (
+        f"Dogfood script is missing v2 flags {v2_flags - declared_flags}. "
+        f"Make sure tandemstream/core is at or past PR #209 "
+        f"(merge commit c713448) — the daemon depends on these flags "
+        f"to drive Atlas's idempotency cache key per real core SHA."
+    )
+    assert v2_flags <= used_flags, (
+        f"Daemon argv is missing v2 flags {v2_flags - used_flags}. "
+        f"Update atlas_shadow/ingest_daemon/scip_builder.py::dogfood_ingest_argv."
     )
 
 
