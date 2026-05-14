@@ -288,6 +288,183 @@ def run_dogfood_ingest_script(
 
 
 # ---------------------------------------------------------------------------
+# Rollback + cleanup helpers (PR follow-up: orphan-org prevention)
+# ---------------------------------------------------------------------------
+
+# Tables checked by `delete_org`'s pristine-check. A row in any of these
+# means the org received real ingest data and should NOT be auto-deleted —
+# manual review required. This is a conservative subset of the 64 tables
+# that have FKs to `orgs`; it covers the surfaces a successful ingest
+# populates.
+_PRISTINE_CHECK_TABLES = (
+    "code_revisions",
+    "code_chunk_refs",
+    "code_symbols",
+    "instructions",
+    "policy_entries",
+    "artifacts",
+)
+
+
+_DELETE_ORG_SCRIPT = """
+import os, sys, json
+sys.path.insert(0, '.')
+from core.atlas_env import load_atlas_env
+load_atlas_env()
+import psycopg2
+ORG = sys.argv[1]
+ADMIN_URL = (
+    os.environ.get("ATLAS_ADMIN_DB_URL")
+    or os.environ.get("ATLAS_DB_URL")
+    or "postgresql://atlas:atlas_dev@localhost:5432/atlas"
+)
+TABLES = {tables!r}
+conn = psycopg2.connect(ADMIN_URL)
+try:
+    with conn:
+        with conn.cursor() as cur:
+            non_pristine = []
+            for tbl in TABLES:
+                try:
+                    cur.execute("SELECT COUNT(*) FROM " + tbl + " WHERE org_id = %s", (ORG,))
+                    n = cur.fetchone()[0]
+                    if n > 0:
+                        non_pristine.append((tbl, n))
+                except psycopg2.errors.UndefinedTable:
+                    conn.rollback()
+                except psycopg2.errors.UndefinedColumn:
+                    conn.rollback()
+            if non_pristine:
+                print(json.dumps({{"deleted": False, "reason": "non-pristine", "non_pristine": non_pristine}}))
+                sys.exit(0)
+            cur.execute("DELETE FROM orgs WHERE org_id = %s RETURNING name", (ORG,))
+            row = cur.fetchone()
+            if row:
+                print(json.dumps({{"deleted": True, "name": row[0]}}))
+            else:
+                print(json.dumps({{"deleted": False, "reason": "not_found"}}))
+finally:
+    conn.close()
+""".format(tables=list(_PRISTINE_CHECK_TABLES))
+
+
+def delete_org(
+    *,
+    core_repo_path: Path,
+    org_id: str,
+    _subprocess_run=subprocess.run,
+) -> dict[str, Any]:
+    """Delete an Atlas org via direct SQL, gated on a pristine-check.
+
+    Used by ``ensure_org_for_commit`` to roll back a freshly-created org
+    after an ingest failure, and by ``purge-orphans`` to clean up orgs
+    left by crashes. Refuses to delete an org that has rows in any of
+    the ``_PRISTINE_CHECK_TABLES`` — those are surfaces a successful
+    ingest populates, so a non-zero count means the org received real
+    data and must be reviewed manually before deletion.
+
+    Returns a dict with shape:
+        {{"deleted": bool, "org_id": str, "reason": str?, "non_pristine": [(table, count), ...]?}}
+
+    Raises ``RuntimeError`` on subprocess / connection failures. Uses
+    the Atlas venv's Python + psycopg2 (no Atlas deps in atlas-shadow).
+    """
+    leaf = _atlas_leaf(core_repo_path)
+    venv_py = leaf / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        raise FileNotFoundError(
+            f"Atlas venv missing at {venv_py}; run `workspace up` from {leaf}."
+        )
+    proc = _subprocess_run(
+        [str(venv_py), "-c", _DELETE_ORG_SCRIPT, org_id],
+        cwd=str(leaf),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"delete_org subprocess failed (rc={proc.returncode}): stderr={proc.stderr}"
+        )
+    try:
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise RuntimeError(
+            f"could not parse delete_org JSON output: {exc}; stdout={proc.stdout[:500]}"
+        ) from exc
+    payload["org_id"] = org_id
+    return payload
+
+
+_LIST_SHADOW_ORGS_SCRIPT = """
+import os, sys, json
+sys.path.insert(0, '.')
+from core.atlas_env import load_atlas_env
+load_atlas_env()
+import psycopg2
+PREFIX = sys.argv[1] if len(sys.argv) > 1 else 'atlas_shadow_'
+ADMIN_URL = (
+    os.environ.get("ATLAS_ADMIN_DB_URL")
+    or os.environ.get("ATLAS_DB_URL")
+    or "postgresql://atlas:atlas_dev@localhost:5432/atlas"
+)
+conn = psycopg2.connect(ADMIN_URL)
+try:
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT org_id::text, name, created_at::text FROM orgs WHERE name LIKE %s ORDER BY created_at",
+                (PREFIX + "%",),
+            )
+            rows = [
+                {"org_id": r[0], "name": r[1], "created_at": r[2]}
+                for r in cur.fetchall()
+            ]
+            print(json.dumps(rows))
+finally:
+    conn.close()
+"""
+
+
+def list_shadow_orgs(
+    *,
+    core_repo_path: Path,
+    name_prefix: str = "atlas_shadow_",
+    _subprocess_run=subprocess.run,
+) -> list[dict[str, str]]:
+    """Return all orgs whose name starts with ``name_prefix`` (default
+    ``atlas_shadow_`` — the convention from ``_make_org_name``).
+
+    Used by ``purge-orphans`` to identify shadow-created orgs that
+    aren't tracked in the local ``.ingest-cache.json`` (e.g., from
+    crashes that escaped the auto-rollback path).
+    """
+    leaf = _atlas_leaf(core_repo_path)
+    venv_py = leaf / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        raise FileNotFoundError(
+            f"Atlas venv missing at {venv_py}; run `workspace up` from {leaf}."
+        )
+    proc = _subprocess_run(
+        [str(venv_py), "-c", _LIST_SHADOW_ORGS_SCRIPT, name_prefix],
+        cwd=str(leaf),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"list_shadow_orgs subprocess failed (rc={proc.returncode}): stderr={proc.stderr}"
+        )
+    try:
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise RuntimeError(
+            f"could not parse list_shadow_orgs JSON output: {exc}; stdout={proc.stdout[:500]}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry point used by cli.shadow_run --commit
 # ---------------------------------------------------------------------------
 
@@ -302,6 +479,7 @@ def ensure_org_for_commit(
     cwd: Optional[Path] = None,
     _create_org=create_org,
     _run_ingest=run_dogfood_ingest_script,
+    _delete_org=delete_org,
 ) -> dict[str, Any]:
     """Ensure a fresh Atlas org is ingested at ``commit_sha``; return the
     cache record.
@@ -319,6 +497,14 @@ def ensure_org_for_commit(
     Wall-time tripwires emit a stderr warning at >5min target and >10min
     flag thresholds. The runner doesn't abort — even slow ingests are
     valid; the warning surfaces them for postmortem analysis.
+
+    **Rollback (orphan-org prevention):** if step 4 fails AND we created
+    a fresh org in step 3 (i.e., ``template_org_id`` was not passed), we
+    attempt to delete that org via ``_delete_org()`` — gated by the
+    pristine-check inside ``delete_org``. The original ingest exception
+    always re-raises; rollback success/failure goes to stderr but does
+    NOT mask the cause. This prevents the orphan-org leak observed in
+    Phase 2.A smoke testing.
     """
     cache = load_cache(cwd)
     hit = cache.get(commit_sha)
@@ -333,16 +519,50 @@ def ensure_org_for_commit(
 
     if template_org_id:
         org_id = template_org_id
+        created_fresh = False
     else:
         name = _make_org_name(commit_sha)
         org_id = _create_org(core_repo_path=core_repo_path, name=name)
+        created_fresh = True
 
-    ingest_payload = _run_ingest(
-        core_repo_path=core_repo_path,
-        org_id=org_id,
-        scip_path=scip_path,
-        source_root=source_root,
-    )
+    try:
+        ingest_payload = _run_ingest(
+            core_repo_path=core_repo_path,
+            org_id=org_id,
+            scip_path=scip_path,
+            source_root=source_root,
+        )
+    except Exception as ingest_exc:
+        if created_fresh:
+            import sys as _sys
+
+            try:
+                rollback = _delete_org(
+                    core_repo_path=core_repo_path, org_id=org_id
+                )
+            except Exception as rollback_exc:
+                print(
+                    f"[atlas-shadow] WARN: rollback failed for fresh org "
+                    f"{org_id}: {rollback_exc}. Manual cleanup required "
+                    f"via `make purge-orphans` or `atlas_orgs list`.",
+                    file=_sys.stderr,
+                )
+            else:
+                if rollback.get("deleted"):
+                    print(
+                        f"[atlas-shadow] rollback: deleted fresh org "
+                        f"{org_id} ({rollback.get('name')}) after ingest "
+                        f"failure",
+                        file=_sys.stderr,
+                    )
+                else:
+                    print(
+                        f"[atlas-shadow] WARN: rollback declined for fresh "
+                        f"org {org_id}: {rollback.get('reason')}. Manual "
+                        f"review needed (the org has dependent rows).",
+                        file=_sys.stderr,
+                    )
+        raise
     elapsed_sec = time.perf_counter() - started
     latency_ms = int(elapsed_sec * 1000)
 

@@ -6,6 +6,10 @@
 #                      Pass COMMIT=<sha> to use out-of-band ingest mode (D4).
 #   shadow-grade     — re-grade an existing responses.jsonl in place
 #   shadow-aggregate — write shadow-runs/_aggregate/comparison-report.md
+#   purge-orphans    — list/delete leaked atlas_shadow_* orgs in Atlas's DB.
+#                      Pass DRY_RUN=1 for read-only inspection. Catches orgs
+#                      that escaped the auto-rollback in ensure_org_for_commit
+#                      (e.g., from crashes / kill signals).
 #   test             — pytest -v
 #   clean            — remove .venv and __pycache__
 
@@ -39,6 +43,12 @@ shadow-grade:
 shadow-aggregate:
 	$(PY) -m atlas_shadow.cli shadow-aggregate \
 	    --config $(SHADOW_CONFIG)
+
+.PHONY: purge-orphans
+purge-orphans:
+	$(PY) -m atlas_shadow.cli purge-orphans \
+	    --config $(SHADOW_CONFIG) \
+	    $(if $(DRY_RUN),--dry-run)
 
 .PHONY: test
 test:

@@ -65,11 +65,18 @@ Set `ANTHROPIC_API_KEY` for grader calls. The grader model is named in
 # Default run against the configured continuous-shadow org
 make shadow-run FIXTURE=dogfood-v2-questions
 
+# Out-of-band ingest mode (creates a fresh org at <sha>, queries against it)
+make shadow-run FIXTURE=dogfood-v2-questions COMMIT=87aa9fa
+
 # Inspect grade distribution
-jq -r '.grade' shadow-runs/dogfood-v2/atlas-qa-shadow.jsonl | sort | uniq -c
+jq -r '.grader_response.grade' shadow-runs/dogfood-v2-questions/atlas-qa-shadow.jsonl | sort | uniq -c
 
 # Cross-packet aggregate
 make shadow-aggregate
+
+# Recovery: find/delete leaked atlas_shadow_* orgs (--dry-run is recommended first)
+make purge-orphans DRY_RUN=1
+make purge-orphans
 ```
 
 Output paths:
@@ -77,6 +84,33 @@ Output paths:
 - `shadow-runs/<fixture-id>/atlas-qa-shadow.jsonl` — one record per question
   (graded by the LLM grader).
 - `shadow-runs/_aggregate/comparison-report.md` — cross-packet summary.
+
+### Out-of-band ingest: rollback + recovery contract
+
+`make shadow-run COMMIT=<sha>` creates a fresh Atlas org and runs the
+dogfood ingest script against it. The caller is responsible for
+pre-staging the SCIP blob at `/tmp/dogfood-v2-<sha>.scip` and the
+source checkout at `/tmp/dogfood-v2-playground-<sha>` (or pass explicit
+paths — see `atlas_shadow.ingest.ensure_org_for_commit`).
+
+**Rollback (automatic):** if the ingest script fails (missing SCIP,
+bad source root, DB connection drop, etc.) AND the org was created
+fresh by this invocation (not via `template_org_id`), the runner
+attempts to delete that org before re-raising the ingest exception.
+The rollback is gated by a pristine-check inside `delete_org` — if
+the org already has rows in any of `code_revisions`, `code_chunk_refs`,
+`code_symbols`, `instructions`, `policy_entries`, or `artifacts`, the
+rollback declines and emits a stderr warning instead. The org is left
+for manual review (these surfaces mean the ingest got partway through
+and the data may matter).
+
+**Recovery (manual):** `make purge-orphans` lists every
+`atlas_shadow_*`-prefixed org in Atlas's DB that's NOT in the local
+`.ingest-cache.json` (i.e., from crashes or kill signals that escaped
+the auto-rollback). With `DRY_RUN=1` it only reports; without, it
+deletes (subject to the same pristine-check). `--include-cached`
+also considers tracked orgs — use this only when the cache itself is
+known to be stale.
 
 ## Output schema
 

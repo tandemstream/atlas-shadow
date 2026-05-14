@@ -27,6 +27,7 @@ import yaml
 
 from . import aggregate as aggregate_mod
 from . import grader as grader_mod
+from . import ingest as ingest_mod
 from . import parser as parser_mod
 from . import runner as runner_mod
 
@@ -257,6 +258,101 @@ def shadow_aggregate(config_path: Path, shadow_runs_dir: Path, out_path: Path) -
     click.echo(
         f"[atlas-shadow] wrote {summary['report_path']} "
         f"(total_packets={summary['total_packets']})",
+        err=True,
+    )
+
+
+@main.command("purge-orphans")
+@click.option(
+    "--config",
+    "config_path",
+    default="shadow-config.yaml",
+    show_default=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, help="List orphans without deleting.")
+@click.option(
+    "--include-cached",
+    is_flag=True,
+    help=(
+        "Also consider cached entries for deletion. Without this flag, "
+        "purge only touches shadow orgs absent from .ingest-cache.json — "
+        "i.e., orphans from crashes that escaped the auto-rollback path."
+    ),
+)
+def purge_orphans(config_path: Path, dry_run: bool, include_cached: bool) -> None:
+    """Find and delete orphan ``atlas_shadow_*`` orgs in Atlas's DB.
+
+    Catches orgs that escaped the auto-rollback inside
+    ``ensure_org_for_commit`` (e.g., crashes / kill signals during an
+    ingest). Refuses to delete any org with rows in the ingest-touched
+    tables — those go on a "manual review" list instead.
+
+    Without ``--dry-run`` the command actually deletes orphans. Without
+    ``--include-cached`` it skips orgs the local cache recognizes (those
+    represent successful ingests and shouldn't be touched).
+    """
+    config = _load_config(config_path)
+    core_repo_path = Path(config["core_repo_path"]).expanduser()
+
+    cache = ingest_mod.load_cache()
+    cached_org_ids = {entry["org_id"] for entry in cache.values()}
+
+    shadow_orgs = ingest_mod.list_shadow_orgs(core_repo_path=core_repo_path)
+    if include_cached:
+        candidates = list(shadow_orgs)
+    else:
+        candidates = [o for o in shadow_orgs if o["org_id"] not in cached_org_ids]
+
+    if not candidates:
+        click.echo(
+            f"[atlas-shadow] no orphan shadow orgs detected "
+            f"(scanned {len(shadow_orgs)} matching 'atlas_shadow_*'; "
+            f"{len(cached_org_ids)} in cache).",
+            err=True,
+        )
+        return
+
+    click.echo(
+        f"[atlas-shadow] found {len(candidates)} orphan candidate(s):",
+        err=True,
+    )
+    for o in candidates:
+        click.echo(
+            f"  - {o['name']} {o['org_id']} (created={o.get('created_at')})",
+            err=True,
+        )
+
+    if dry_run:
+        click.echo("[atlas-shadow] --dry-run: no deletions.", err=True)
+        return
+
+    deleted = 0
+    kept = 0
+    errored = 0
+    for o in candidates:
+        try:
+            result = ingest_mod.delete_org(
+                core_repo_path=core_repo_path, org_id=o["org_id"]
+            )
+        except Exception as exc:
+            click.echo(f"  ERROR {o['org_id']}: {exc}", err=True)
+            errored += 1
+            continue
+        if result.get("deleted"):
+            click.echo(f"  DELETED {o['org_id']} ({result.get('name')})", err=True)
+            deleted += 1
+        else:
+            click.echo(
+                f"  KEPT {o['org_id']}: {result.get('reason')} "
+                f"non_pristine={result.get('non_pristine')}",
+                err=True,
+            )
+            kept += 1
+
+    click.echo(
+        f"[atlas-shadow] purge complete: deleted={deleted} "
+        f"kept={kept} errored={errored}",
         err=True,
     )
 
