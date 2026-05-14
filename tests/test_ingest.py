@@ -247,3 +247,204 @@ def test_run_dogfood_ingest_script_raises_on_nonzero_return(tmp_path):
             source_root=Path("/tmp/y"),
             _subprocess_run=_fake_run,
         )
+
+
+# ---------------------------------------------------------------------------
+# Rollback / orphan-org prevention (PR follow-up after 2.A smoke testing
+# observed a real orphan-org leak: a failed ingest left an `orgs` row
+# behind because create_org → run_ingest had no try/except).
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_org_for_commit_rolls_back_fresh_org_on_ingest_failure(tmp_path):
+    """When run_ingest raises AND we created the org (no template), we
+    MUST attempt to delete the fresh org via _delete_org. The original
+    ingest exception must still propagate (rollback never masks it)."""
+    create_calls = []
+    delete_calls = []
+
+    def _create_org(*, core_repo_path, name):
+        create_calls.append(name)
+        return "FRESH-ORG-UUID"
+
+    def _run_ingest(**kw):
+        raise RuntimeError("simulated ingest failure (missing SCIP file)")
+
+    def _delete_org(*, core_repo_path, org_id):
+        delete_calls.append(org_id)
+        return {"deleted": True, "name": "atlas_shadow_xxx", "org_id": org_id}
+
+    with pytest.raises(RuntimeError, match="simulated ingest failure"):
+        ingest_mod.ensure_org_for_commit(
+            commit_sha="failsha000000",
+            core_repo_path=Path("/fake/core"),
+            cwd=tmp_path,
+            _create_org=_create_org,
+            _run_ingest=_run_ingest,
+            _delete_org=_delete_org,
+        )
+
+    # Created exactly one org, deleted exactly one org, same UUID:
+    assert create_calls == ["atlas_shadow_failsha00000_" + create_calls[0].split("_")[-1]]
+    assert delete_calls == ["FRESH-ORG-UUID"]
+    # No cache record written (the ingest failed):
+    assert ingest_mod.load_cache(tmp_path) == {}
+
+
+def test_ensure_org_for_commit_skips_rollback_when_template_org_used(tmp_path):
+    """If template_org_id was passed (we did NOT create the org), a
+    failed ingest must NOT trigger _delete_org — we don't own that org."""
+    delete_calls = []
+
+    def _run_ingest(**kw):
+        raise RuntimeError("ingest failed")
+
+    def _delete_org(*, core_repo_path, org_id):
+        delete_calls.append(org_id)
+        return {"deleted": True}
+
+    with pytest.raises(RuntimeError, match="ingest failed"):
+        ingest_mod.ensure_org_for_commit(
+            commit_sha="templ000000",
+            core_repo_path=Path("/fake/core"),
+            template_org_id="USER-PROVIDED-ORG",
+            cwd=tmp_path,
+            _run_ingest=_run_ingest,
+            _delete_org=_delete_org,
+        )
+
+    # Did NOT call delete on the user-provided template org:
+    assert delete_calls == []
+
+
+def test_ensure_org_for_commit_swallows_rollback_failure_but_reraises_original(tmp_path, capsys):
+    """If _delete_org itself raises, the warning goes to stderr but the
+    ORIGINAL ingest exception still propagates — rollback failure must
+    never mask the cause of the ingest failure."""
+    def _create_org(**kw):
+        return "FRESH-2"
+
+    def _run_ingest(**kw):
+        raise RuntimeError("ingest boom — original cause")
+
+    def _delete_org(**kw):
+        raise RuntimeError("rollback also boom — should NOT propagate")
+
+    with pytest.raises(RuntimeError, match="ingest boom — original cause"):
+        ingest_mod.ensure_org_for_commit(
+            commit_sha="ohnosha000000",
+            core_repo_path=Path("/fake/core"),
+            cwd=tmp_path,
+            _create_org=_create_org,
+            _run_ingest=_run_ingest,
+            _delete_org=_delete_org,
+        )
+
+    err = capsys.readouterr().err
+    assert "rollback failed for fresh org FRESH-2" in err
+    assert "Manual cleanup required" in err
+
+
+def test_ensure_org_for_commit_warns_when_rollback_declined_non_pristine(tmp_path, capsys):
+    """If delete_org returns deleted=False with a non-pristine reason
+    (the org received real ingest data before the failure), the warning
+    surfaces — the org is NOT deleted, manual review needed."""
+    def _create_org(**kw):
+        return "FRESH-NP"
+
+    def _run_ingest(**kw):
+        raise RuntimeError("ingest partial failure")
+
+    def _delete_org(**kw):
+        return {
+            "deleted": False,
+            "reason": "non-pristine",
+            "non_pristine": [("code_revisions", 1)],
+            "org_id": "FRESH-NP",
+        }
+
+    with pytest.raises(RuntimeError, match="ingest partial failure"):
+        ingest_mod.ensure_org_for_commit(
+            commit_sha="partialsha00",
+            core_repo_path=Path("/fake/core"),
+            cwd=tmp_path,
+            _create_org=_create_org,
+            _run_ingest=_run_ingest,
+            _delete_org=_delete_org,
+        )
+
+    err = capsys.readouterr().err
+    assert "rollback declined for fresh org FRESH-NP" in err
+    assert "non-pristine" in err
+
+
+def test_delete_org_uses_atlas_venv_python_and_returns_parsed_json(tmp_path):
+    """delete_org shells out to the Atlas venv's python and parses the
+    JSON status the inline script emits."""
+    leaf = tmp_path / "products" / "tandem" / "packages" / "python" / "atlas"
+    (leaf / ".venv" / "bin").mkdir(parents=True)
+    venv_py = leaf / ".venv" / "bin" / "python"
+    venv_py.touch()
+
+    captured = {}
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["cwd"] = kw.get("cwd")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"deleted": true, "name": "atlas_shadow_foo"}\n',
+            stderr="",
+        )
+
+    result = ingest_mod.delete_org(
+        core_repo_path=tmp_path,
+        org_id="ORG-X",
+        _subprocess_run=_fake_run,
+    )
+
+    assert result == {"deleted": True, "name": "atlas_shadow_foo", "org_id": "ORG-X"}
+    # Argv shape: [<venv_py>, -c, <script>, <org_id>]
+    assert captured["cmd"][0] == str(venv_py)
+    assert captured["cmd"][1] == "-c"
+    assert captured["cmd"][-1] == "ORG-X"
+    assert "DELETE FROM orgs WHERE org_id" in captured["cmd"][2]
+
+
+def test_delete_org_raises_on_subprocess_failure(tmp_path):
+    leaf = tmp_path / "products" / "tandem" / "packages" / "python" / "atlas"
+    (leaf / ".venv" / "bin").mkdir(parents=True)
+    (leaf / ".venv" / "bin" / "python").touch()
+
+    def _fake_run(cmd, **kw):
+        return SimpleNamespace(returncode=2, stdout="", stderr="DB connection refused")
+
+    with pytest.raises(RuntimeError, match="delete_org subprocess failed"):
+        ingest_mod.delete_org(
+            core_repo_path=tmp_path,
+            org_id="ORG-Y",
+            _subprocess_run=_fake_run,
+        )
+
+
+def test_list_shadow_orgs_returns_parsed_list(tmp_path):
+    leaf = tmp_path / "products" / "tandem" / "packages" / "python" / "atlas"
+    (leaf / ".venv" / "bin").mkdir(parents=True)
+    (leaf / ".venv" / "bin" / "python").touch()
+
+    def _fake_run(cmd, **kw):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([
+                {"org_id": "aaaa", "name": "atlas_shadow_foo", "created_at": "2026-05-13"},
+                {"org_id": "bbbb", "name": "atlas_shadow_bar", "created_at": "2026-05-13"},
+            ]) + "\n",
+            stderr="",
+        )
+
+    rows = ingest_mod.list_shadow_orgs(
+        core_repo_path=tmp_path,
+        _subprocess_run=_fake_run,
+    )
+    assert len(rows) == 2
+    assert rows[0]["name"] == "atlas_shadow_foo"
