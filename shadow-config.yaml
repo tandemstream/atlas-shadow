@@ -41,4 +41,55 @@ default_principal_id: "00000000-0000-4000-8000-000000000222"
 # Pinned code revision id for the continuous shadow org (optional). When
 # set, the runner passes it as --code-revision-id to find_code/scan_search.
 # Resolved by the dogfood ingest script for the commit 87aa9fa.
+#
+# When the ingest daemon (D5) is running, .daemon-state.json overrides
+# this key with a fresher code_revision_id; the runner falls back to this
+# value when the state file is absent.
 continuous_shadow_code_revision_id: "fe98af79-23a7-4718-bae4-fa3f349878c8"
+
+# --- Continuous-ingest daemon (D5) settings -------------------------------
+#
+# Additive section read by atlas_shadow.ingest_daemon.config.load_config.
+# All keys have defaults; this block exists to document them and pin local
+# values. The daemon is OFF by default — start it with `make ingest-up`
+# (foreground) or `make ingest-up-detached` (background).
+ingest_daemon:
+  # Bind address + port for the FastAPI receiver. The GitHub webhook
+  # delivery should target http://<host>:<port>/webhook (typically behind
+  # an HTTPS tunnel for production; v1 is dev/local).
+  host: "127.0.0.1"
+  port: 8765
+
+  # Where the daemon keeps its SQLite DB. The schema is applied
+  # idempotently on `make ingest-bootstrap` or first `serve`.
+  db_path: "~/.atlas-shadow/ingest.db"
+
+  # Where the daemon clones tandemstream/core and produces SCIP blobs.
+  # Two subdirs are auto-created:
+  #   core/         — the long-lived clone (git fetch on each tick)
+  #   worktrees/    — per-commit worktrees for SCIP builds
+  #   scip/         — SCIP blobs ready for ingest
+  cache_dir: "~/.atlas-shadow/cache"
+
+  # Daemon-state file written atomically after each successful ingest.
+  # Relative paths are resolved against the directory of this config file
+  # (so this default sits next to shadow-config.yaml).
+  state_file: ".daemon-state.json"
+
+  # SCIP indexer version (informational; recorded in scip_uploads rows).
+  scip_indexer_version: "scip-python@0.6.6"
+  pack_bundle_revision: "code@v1"
+
+  # GitHub repo to clone + ingest.
+  core_repo_url: "https://github.com/tandemstream/core.git"
+
+  # Worker tunables.
+  worker_idle_sleep_seconds: 5
+  max_attempts_per_commit: 3
+  scip_build_timeout_seconds: 1200          # 20 min — generous for a cold tree
+  ingest_shell_out_timeout_seconds: 1800    # 30 min — covers chunker on a large pass
+
+# Note: the webhook HMAC secret is NOT in this file. The daemon reads
+# GITHUB_WEBHOOK_SECRET from the environment (load via `.env` + your
+# shell's `set -a; source .env; set +a` pattern). Refuses to start if
+# unset.
