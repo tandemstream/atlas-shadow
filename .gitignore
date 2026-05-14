@@ -30,3 +30,10 @@ shadow-runs/*/
 # Local D4 ingest cache (sha → org_id mapping)
 .ingest-cache/
 .ingest-cache.json
+
+# D5 continuous-ingest daemon runtime artifacts (per-machine; never committed).
+# Default state_file path from shadow-config.yaml is `.daemon-state.json`
+# next to that file; .log + .pid come from `make ingest-up-detached`.
+.daemon-state.json
+.ingest-daemon.log
+.ingest-daemon.pid

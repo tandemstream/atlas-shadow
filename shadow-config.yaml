@@ -3,17 +3,19 @@
 # Names the org(s) and grader model used by `make shadow-run`. No defaults
 # in Python code — this file is the single source of truth.
 
-# Default-mode target. Atlas-shadow queries Atlas under this org id (no
-# ingestion on the critical path). Per Phase 2 amendment 3, this is
-# pinned-but-stale: the dogfood org at commit 87aa9fa. A future
-# continuous-ingest packet will maintain a separate org with real-time
-# ingestion.
+# Default-mode target. Atlas-shadow queries Atlas under this org id. As
+# of D5 v2 (2026-05-14), this is a DEDICATED continuous-shadow org
+# (name=atlas_continuous_shadow, distinct prefix from atlas_shadow_*
+# per-commit orgs to avoid purge-orphans collision). Populated by the
+# ingest daemon in atlas_shadow.ingest_daemon; the daemon writes
+# .daemon-state.json with the freshest code_revision_id, and the runner
+# reads that file first, falling back to continuous_shadow_code_revision_id
+# below when the state file is absent.
 #
-# Local dev note: the brief named "af6ef504-7492-4dbb-99cb-9437141bd029"
-# as the blessed dogfood UUID (from outputs/blessed/atlas_dogfood/
-# pass_a_v2_results.json), but the locally-ingested instance uses a
-# different UUID. Override per environment.
-continuous_shadow_org_id: "3ec689a0-678b-47ed-af17-a72e5adbfad8"
+# Historical: prior to D5, this pointed at the dogfood org
+# 3ec689a0-678b-47ed-af17-a72e5adbfad8 (pinned-but-stale at commit
+# 87aa9fa). That org still exists for D4 out-of-band benchmark use.
+continuous_shadow_org_id: "393c7e00-d50e-45dd-a877-3bf62b9fdb2d"
 
 # Optional template org id for out-of-band ingest setup. If unset, the D4
 # ingester creates a fresh org via `workspace run org-create NAME=<auto>`.
@@ -38,14 +40,13 @@ grader_model: "sonnet"
 # (this is just where atlas-shadow records its intended principal).
 default_principal_id: "00000000-0000-4000-8000-000000000222"
 
-# Pinned code revision id for the continuous shadow org (optional). When
-# set, the runner passes it as --code-revision-id to find_code/scan_search.
-# Resolved by the dogfood ingest script for the commit 87aa9fa.
-#
-# When the ingest daemon (D5) is running, .daemon-state.json overrides
-# this key with a fresher code_revision_id; the runner falls back to this
-# value when the state file is absent.
-continuous_shadow_code_revision_id: "fe98af79-23a7-4718-bae4-fa3f349878c8"
+# Pinned code revision id for the continuous shadow org (optional fallback).
+# The ingest daemon writes .daemon-state.json with the freshest revision id
+# after each successful ingest; the runner reads that file first and only
+# falls back to this key when the state file is absent. Set to null so a
+# missing state file produces a clean error rather than silently routing
+# queries to a stale dogfood revision.
+continuous_shadow_code_revision_id: null
 
 # --- Continuous-ingest daemon (D5) settings -------------------------------
 #
