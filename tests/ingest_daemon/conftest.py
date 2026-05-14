@@ -41,6 +41,7 @@ def daemon_config(tmp_path: Path, db_path: Path, state_file: Path) -> DaemonConf
         scip_indexer_version=DEFAULTS["scip_indexer_version"],
         pack_bundle_revision=DEFAULTS["pack_bundle_revision"],
         core_repo_url=DEFAULTS["core_repo_url"],
+        repo_url=DEFAULTS["repo_url"],
         worker_idle_sleep_seconds=DEFAULTS["worker_idle_sleep_seconds"],
         max_attempts_per_commit=DEFAULTS["max_attempts_per_commit"],
         scip_build_timeout_seconds=DEFAULTS["scip_build_timeout_seconds"],

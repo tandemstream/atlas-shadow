@@ -102,6 +102,8 @@ def process_one(
             org_id=cfg.continuous_shadow_org_id,
             scip_path=scip_path,
             source_root=source_root,
+            commit_sha=commit_sha,
+            repo_url=cfg.repo_url,
             timeout_seconds=cfg.ingest_shell_out_timeout_seconds,
         )
     except Exception as exc:

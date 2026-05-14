@@ -132,6 +132,8 @@ def dogfood_ingest_argv(
     org_id: str,
     scip_path: Path,
     source_root: Path,
+    commit_sha: str,
+    repo_url: str,
 ) -> list[str]:
     """Assemble the argv for the dogfood ingest CLI subprocess.
 
@@ -139,13 +141,24 @@ def dogfood_ingest_argv(
         --org-id <uuid>
         --scip-path <path>
         --source-root <path>
+        --commit-sha <40-char-hex>     (v2 follow-on, core PR #209)
+        --repo-url <https://...>       (v2 follow-on, core PR #209)
 
-    The script's other settings (REPO_URL, INGEST_SHA, INDEXER_VERSION,
-    PACK_BUNDLE_REVISION) are module-level constants in the dogfood
-    script — NOT CLI flags. The daemon accepts that; Atlas treats each
-    ingest under the same constants but each distinct SCIP blob produces
-    a distinct ``code_revision_id`` (the daemon records that id in the
-    ledger + state file).
+    ``--commit-sha`` + ``--repo-url`` were added so the daemon can drive
+    Atlas's idempotency cache key
+    ``(org_id, repo_url, commit_sha, indexer_version)`` with the real
+    per-queue-row values. Without them every daemon ingest cache-hit on
+    the dogfood pinned SHA, returning the same pinned
+    ``code_revision_id`` (= ``fe98af79-23a7-4718-bae4-fa3f349878c8``)
+    regardless of which core SHA the daemon actually drove — proof of
+    mechanics but not of fresh-per-commit semantics. See D5 postmortem
+    § "One semantic gotcha worth surfacing for v2".
+
+    ``INDEXER_VERSION`` and ``PACK_BUNDLE_REVISION`` remain module-level
+    constants in the dogfood script — not CLI flags — because the
+    daemon's ``scip_indexer_version`` config setting is informational
+    (the locally-installed ``scip-python``'s version is what actually
+    indexes; the constant just records the version on the Atlas row).
 
     This argv shape is the contract asserted by
     ``tests/ingest_daemon/test_worker.py::test_argv_matches_dogfood_argparse``
@@ -162,6 +175,10 @@ def dogfood_ingest_argv(
         str(scip_path),
         "--source-root",
         str(source_root),
+        "--commit-sha",
+        commit_sha,
+        "--repo-url",
+        repo_url,
     ]
 
 
@@ -171,6 +188,8 @@ def run_dogfood_ingest(
     org_id: str,
     scip_path: Path,
     source_root: Path,
+    commit_sha: str,
+    repo_url: str,
     timeout_seconds: int = 1800,
     _subprocess_run: Callable = subprocess.run,
 ) -> dict[str, Any]:
@@ -179,6 +198,11 @@ def run_dogfood_ingest(
     Mirrors the structural pattern of
     ``atlas_shadow.ingest.run_dogfood_ingest_script`` (Phase 2 D4) so the
     two callers can share future fixes.
+
+    ``commit_sha`` and ``repo_url`` (v2 follow-on, core PR #209) are
+    passed through to the dogfood CLI's ``--commit-sha`` / ``--repo-url``
+    flags so each distinct queue row produces a distinct Atlas
+    ``code_revision_id`` (rather than cache-hitting the dogfood pin).
 
     Returns the parsed JSON payload (``org_id``, ``commit_sha``,
     ``code_revision_id``, ``latency_ms``, ``chunk_stats``, ``counts``,
@@ -195,6 +219,8 @@ def run_dogfood_ingest(
         org_id=org_id,
         scip_path=scip_path,
         source_root=source_root,
+        commit_sha=commit_sha,
+        repo_url=repo_url,
     )
     try:
         proc = _subprocess_run(

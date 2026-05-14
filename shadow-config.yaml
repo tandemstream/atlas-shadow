@@ -83,6 +83,14 @@ ingest_daemon:
   # GitHub repo to clone + ingest.
   core_repo_url: "https://github.com/tandemstream/core.git"
 
+  # Repo URL passed to the dogfood ingest CLI's --repo-url flag (D5 v2
+  # follow-on). This becomes part of Atlas's idempotency cache key
+  # (org_id, repo_url, commit_sha, indexer_version). Distinct from
+  # core_repo_url above (which has the .git suffix for git clone);
+  # the cache key is a plain string match and the canonical form (no
+  # .git) is what downstream Atlas tools expect.
+  repo_url: "https://github.com/tandemstream/core"
+
   # Worker tunables.
   worker_idle_sleep_seconds: 5
   max_attempts_per_commit: 3
