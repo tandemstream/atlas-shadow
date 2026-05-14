@@ -15,6 +15,13 @@ test failure rather than silent data corruption.
 Default-mode runs use `continuous_shadow_org_id` from `shadow-config.yaml`.
 Out-of-band runs (`--commit <sha>`) invoke `atlas_shadow.ingest` first and
 substitute the freshly-created org id.
+
+**D5 freshness handoff (amendment decision #1):** when the ingest daemon
+is running, it writes ``<atlas-shadow>/.daemon-state.json`` after each
+successful ingest. ``resolve_code_revision_id`` reads that file first
+and falls back to ``shadow-config.yaml:continuous_shadow_code_revision_id``
+when the file is missing or unparseable. Daemon doesn't need to be up at
+runner-call time — the file is the IPC.
 """
 
 from __future__ import annotations
@@ -30,6 +37,51 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .parser import Receipt
+
+
+def resolve_code_revision_id(
+    config: dict,
+    *,
+    config_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Resolve the active ``code_revision_id`` per amendment decision #1.
+
+    Read order:
+      1. ``<atlas-shadow>/.daemon-state.json`` (if present + parseable) —
+         use ``latest_code_revision_id``. The path is the ``state_file``
+         setting under ``config['ingest_daemon']`` (relative paths resolved
+         against ``config_path``'s parent dir, or cwd if not provided).
+      2. ``config['continuous_shadow_code_revision_id']`` — the pre-D5
+         pinned value (still authoritative when the daemon is off).
+      3. ``None`` — runner omits ``--code-revision-id`` entirely.
+
+    Args:
+      config: Parsed ``shadow-config.yaml`` (the dict from
+        ``cli._load_config``).
+      config_path: Path to ``shadow-config.yaml`` (used as the anchor for
+        resolving the relative ``state_file`` path). If None, the daemon
+        section's ``state_file`` is resolved against cwd.
+
+    Returns the resolved ``code_revision_id`` (str) or ``None``.
+    """
+    section = config.get("ingest_daemon") or {}
+    state_file_raw = section.get("state_file") or ".daemon-state.json"
+    state_path = Path(str(state_file_raw)).expanduser()
+    if not state_path.is_absolute():
+        base = Path(config_path).parent.expanduser() if config_path else Path.cwd()
+        state_path = (base / state_path).resolve()
+    if state_path.exists():
+        try:
+            with state_path.open("r", encoding="utf-8") as fp:
+                state = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            state = None
+        if isinstance(state, dict):
+            rev = state.get("latest_code_revision_id")
+            if rev:
+                return str(rev)
+    rev = config.get("continuous_shadow_code_revision_id")
+    return str(rev) if rev else None
 
 
 @dataclass(frozen=True)

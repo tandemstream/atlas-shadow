@@ -110,7 +110,11 @@ def shadow_run(
     core_repo_path = Path(config["core_repo_path"]).expanduser()
     grader_model = config.get("grader_model") or "claude-3-5-sonnet-20241022"
     principal_id = config.get("default_principal_id")
-    code_revision_id = config.get("continuous_shadow_code_revision_id")
+    # D5 freshness handoff: prefer ingest-daemon's state file when present,
+    # fall back to the pinned config value (amendment decision #1).
+    code_revision_id = runner_mod.resolve_code_revision_id(
+        config, config_path=Path(config_path)
+    )
 
     if commit:
         # Out-of-band mode: ingest at <commit>, get a fresh org_id, run against it.
