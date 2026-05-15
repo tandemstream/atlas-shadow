@@ -57,8 +57,8 @@ covered by the offline AGs.
 
 ## Diagnostics (if a step fails)
 
-- **Step 3 stuck on `in_progress` or never fires:** check `GITHUB_WEBHOOK_SECRET` matches the webhook config; check tunnel URL is reachable; check the daemon log for HMAC errors.
-- **Step 4 / 5 / 7 don't all happen:** the grader hit an exception. The check_run should be `neutral` (operational-error path); check `.ingest-daemon.log` for the traceback. The PR-comment payload may or may not have posted depending on where the failure was.
+- **Step 3 stuck on `pending` or never fires:** check `GITHUB_WEBHOOK_SECRET` matches the webhook config; check tunnel URL is reachable; check the daemon log for HMAC errors.
+- **Step 4 / 5 / 7 don't all happen:** the grader hit an exception. The commit status should be re-posted as `state=success` with a description starting `(operational error: ...)` — D-P2-5 soft-pass; Commit Status API has no `neutral` equivalent. Check `.ingest-daemon.log` for the traceback. The PR-comment payload may or may not have posted depending on where the failure was. If the status stays at `pending`, the daemon process likely crashed before the error-path final status post fired; manually unstick via `gh api -X POST /repos/{owner}/{repo}/statuses/{sha}` with `state=success` + `context=atlas-shadow-grading`.
 - **Step 6 doc-receipts column absent when expected:** Atlas DB URL probably isn't configured; T4a degraded to git_receipt_snapshot for every doc receipt (which is correct, but the column should still appear). Run `make grading-verify` again.
 - **Step 8 duplicate comments (not an update):** the marker isn't being matched. Look at the actual comment body — there should be an HTML comment `<!-- atlas-shadow-grading -->` at the top.
 - **Step 10 grades a non-packet PR:** `detect_packet_qna_log` is mis-matching paths. Check the PR's file list; the regex requires `<...>/docs/work/<packet>/02-qna-log.md`.
