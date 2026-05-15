@@ -44,6 +44,15 @@ DEFAULTS: dict[str, Any] = {
     "scip_build_timeout_seconds": 1200,
     "ingest_shell_out_timeout_seconds": 1800,
     "host": "127.0.0.1",
+    # Doc-ingest hook (P3 follow-up to P2 v1 — runs the doc-side
+    # counterpart to SCIP code ingest after every successful push so
+    # the doc corpus stays current with code. Atlas's file_memoization
+    # makes repeated runs cheap (only changed files re-embed); cold
+    # runs are slower (~10-15 min per 1000 files). Disable via
+    # ``doc_ingest_enabled: false`` if the operator wants code-only
+    # ingest.
+    "doc_ingest_enabled": True,
+    "doc_ingest_timeout_seconds": 1800,
     # T5 (P2 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1): grader
     # model + principal_id used by the PR-grading orchestrator. Mirror
     # the keys read by `atlas_shadow.cli` (which lives at atlas-shadow
@@ -76,6 +85,8 @@ class DaemonConfig:
     max_attempts_per_commit: int = DEFAULTS["max_attempts_per_commit"]
     scip_build_timeout_seconds: int = DEFAULTS["scip_build_timeout_seconds"]
     ingest_shell_out_timeout_seconds: int = DEFAULTS["ingest_shell_out_timeout_seconds"]
+    doc_ingest_enabled: bool = DEFAULTS["doc_ingest_enabled"]
+    doc_ingest_timeout_seconds: int = DEFAULTS["doc_ingest_timeout_seconds"]
     webhook_secret: Optional[str] = None
     # T5 (P2): PR-grading config. Read from the top-level YAML (mirroring
     # ``atlas_shadow.cli``), NOT from ``ingest_daemon:`` section, because
@@ -158,6 +169,8 @@ def load_config(
         max_attempts_per_commit=int(merged["max_attempts_per_commit"]),
         scip_build_timeout_seconds=int(merged["scip_build_timeout_seconds"]),
         ingest_shell_out_timeout_seconds=int(merged["ingest_shell_out_timeout_seconds"]),
+        doc_ingest_enabled=bool(merged["doc_ingest_enabled"]),
+        doc_ingest_timeout_seconds=int(merged["doc_ingest_timeout_seconds"]),
         webhook_secret=os.environ.get("GITHUB_WEBHOOK_SECRET"),
         grader_model=grader_model,
         default_principal_id=default_principal_id,
