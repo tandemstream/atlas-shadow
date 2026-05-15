@@ -155,8 +155,38 @@ def test_grade_one_packet_wires_noop_posters_and_returns_outcome():
 # ───────── _aggregate_run_totals ─────────────────────────────────────
 
 
+def _mk_summary_dict(
+    packet_id: str,
+    rows: list[tuple[str, str]],
+    *,
+    artifact_path: str = None,
+) -> dict:
+    """Build the dict-shape summary that ``run_pr_grading`` actually
+    returns in ``outcome['summaries']``.
+
+    ``rows`` is a list of (grade, qid) tuples. ``correct`` counts
+    full_match + partial_match — same definition GradingSummary uses.
+    """
+    correct = sum(1 for g, _ in rows if g in ("full_match", "partial_match"))
+    total = len(rows)
+    return {
+        "packet_id": packet_id,
+        "passed": (correct * 100 // total >= 60) if total else False,
+        "pass_pct": int(round(correct * 100 / total)) if total else 0,
+        "pass_count": correct,
+        "total": total,
+        "artifact_path": artifact_path,
+    }
+
+
 def _mk_summary(packet_id: str, rows: list[tuple[str, str]]) -> GradingSummary:
-    """Build a GradingSummary with rows as (grade, qid) tuples."""
+    """Build a GradingSummary dataclass instance.
+
+    Kept around for tests that exercise the dataclass fallback path in
+    ``_summary_total`` / ``_summary_pass_count`` — production code only
+    ever sees the dict shape via ``run_pr_grading``, but the helpers
+    accept both for resilience.
+    """
     grading_rows = [
         ReceiptGradingRow(
             question_id=qid,
@@ -179,20 +209,21 @@ def _mk_summary(packet_id: str, rows: list[tuple[str, str]]) -> GradingSummary:
 
 def test_aggregate_run_totals_sums_across_packets():
     """Totals are summed across every packet's summaries; pct rounds
-    to one decimal."""
+    to one decimal. Uses the dict-shape summaries that ``run_pr_grading``
+    actually returns (codex r1 fix)."""
     outcomes = [
         {
             "packet_slug": "p1",
             "status": "ok",
             "summaries": [
-                _mk_summary("p1", [("full_match", "q1"), ("full_match", "q2"), ("no_match", "q3")])
+                _mk_summary_dict("p1", [("full_match", "q1"), ("full_match", "q2"), ("no_match", "q3")])
             ],
         },
         {
             "packet_slug": "p2",
             "status": "ok",
             "summaries": [
-                _mk_summary("p2", [("partial_match", "q1"), ("no_match", "q2")])
+                _mk_summary_dict("p2", [("partial_match", "q1"), ("no_match", "q2")])
             ],
         },
     ]
@@ -206,6 +237,19 @@ def test_aggregate_run_totals_sums_across_packets():
     assert totals["per_packet_pct"]["p1"]["pct"] == round(200 / 3, 1)
     assert totals["per_packet_pct"]["p2"]["correct"] == 1
     assert totals["per_packet_pct"]["p2"]["pct"] == 50.0
+
+
+def test_aggregate_run_totals_accepts_dataclass_shape_too():
+    """Defensive: if a caller passes dataclass-shape summaries (the
+    pre-codex-r1-fix interface), aggregation should still work."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary("p1", [("full_match", "q1"), ("no_match", "q2")])],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_receipts"] == 2
+    assert totals["total_correct"] == 1
 
 
 def test_aggregate_run_totals_empty():
@@ -226,9 +270,29 @@ def test_aggregate_run_totals_handles_zero_receipt_packet():
 # ───────── write_packet_artifact + manifest + summary.md ─────────────
 
 
-def test_write_packet_artifact_serializes_gradingsummary(tmp_path: Path):
-    """asdict on GradingSummary captures all rows, plus we add the
-    derived aggregate props that asdict skips."""
+def test_write_packet_artifact_inlines_artifact_rows(tmp_path: Path):
+    """write_packet_artifact reads the artifact_path JSON written by
+    run_pr_grading (which has per-receipt rows) and inlines it into
+    the per-packet JSON under "artifact". Aggregate fields stay at top
+    level (codex r1 fix — the production summaries are dicts not
+    GradingSummary objects)."""
+    # Synthesize what grader_service.write_grading_artifact would write.
+    artifact_dir = tmp_path / "live-artifacts"
+    artifact_dir.mkdir()
+    artifact_file = artifact_dir / "pr-0-20260515T200000.000000Z-p1.json"
+    artifact_file.write_text(json.dumps({
+        "schema_version": "1.0",
+        "packet_id": "p1",
+        "rows": [
+            {"question_id": "q1", "grade": "full_match", "confidence": 0.95},
+            {"question_id": "q2", "grade": "no_match", "confidence": 0.4},
+        ],
+        "pass_count": 1,
+        "total": 2,
+        "pass_pct": 50,
+        "passed": False,
+    }))
+
     outcome = {
         "packet_slug": "p1",
         "status": "ok",
@@ -239,7 +303,8 @@ def test_write_packet_artifact_serializes_gradingsummary(tmp_path: Path):
         "repo_full_name": "tandemstream/core",
         "packet_qna_log_path": "p1/qna.md",
         "summaries": [
-            _mk_summary("p1", [("full_match", "q1"), ("no_match", "q2")])
+            _mk_summary_dict("p1", [("full_match", "q1"), ("no_match", "q2")],
+                             artifact_path=str(artifact_file))
         ],
     }
     path = gb.write_packet_artifact(outcome, tmp_path)
@@ -247,18 +312,54 @@ def test_write_packet_artifact_serializes_gradingsummary(tmp_path: Path):
     payload = json.loads(path.read_text())
     assert payload["packet_slug"] == "p1"
     s = payload["summaries"][0]
+    # Aggregate fields preserved.
     assert s["packet_id"] == "p1"
     assert s["total"] == 2
     assert s["pass_count"] == 1
     assert s["pass_pct"] == 50
-    assert s["passed"] is False  # threshold 60% > 50%
-    assert len(s["rows"]) == 2
+    assert s["passed"] is False
+    # Artifact rows inlined under "artifact" key.
+    assert "artifact" in s
+    assert len(s["artifact"]["rows"]) == 2
+    assert s["artifact"]["rows"][0]["question_id"] == "q1"
+
+
+def test_write_packet_artifact_handles_missing_artifact_file(tmp_path: Path):
+    """If artifact_path points at a file that doesn't exist (operator
+    moved it, FS race), still produce a valid per-packet JSON without
+    crashing — just no `artifact` subfield."""
+    outcome = {
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [
+            _mk_summary_dict("p1", [("full_match", "q1")],
+                             artifact_path="/nonexistent/path.json")
+        ],
+    }
+    path = gb.write_packet_artifact(outcome, tmp_path)
+    payload = json.loads(path.read_text())
+    s = payload["summaries"][0]
+    assert s["total"] == 1
+    assert "artifact" not in s  # gracefully missing
+
+
+def test_write_packet_artifact_handles_no_artifact_path_key(tmp_path: Path):
+    """If a summary dict has no artifact_path at all, still works."""
+    outcome = {
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [{"packet_id": "p1", "passed": True, "pass_pct": 100,
+                       "pass_count": 1, "total": 1}],
+    }
+    path = gb.write_packet_artifact(outcome, tmp_path)
+    payload = json.loads(path.read_text())
+    assert payload["summaries"][0]["pass_count"] == 1
 
 
 def test_write_manifest_records_totals_and_metadata(tmp_path: Path):
     outcomes = [
         {"packet_slug": "p1", "status": "ok",
-         "summaries": [_mk_summary("p1", [("full_match", "q1")])]}
+         "summaries": [_mk_summary_dict("p1", [("full_match", "q1")])]}
     ]
     path = gb.write_manifest(
         "baseline-2026-05-15",
@@ -283,14 +384,130 @@ def test_write_manifest_records_totals_and_metadata(tmp_path: Path):
     assert payload["grader_model"] == "sonnet"
 
 
+# ───────── cmd_grade_packet_batch failure handling (codex r1 P2) ─────
+
+
+def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, monkeypatch):
+    """run_pr_grading returns status='error' (not raised) on operational
+    failures. The batch must count those as partial failures and exit 2."""
+    core_repo = tmp_path / "core-repo"
+    core_repo.mkdir()
+    pkt = core_repo / "products" / "tandem" / "packages" / "python" / "atlas" / "docs" / "work" / "2026-01-01-x"
+    pkt.mkdir(parents=True)
+    (pkt / "02-qna-log.md").write_text("# ignored — grade_one_packet is mocked")
+
+    output_dir = tmp_path / "shadow-runs" / "baseline-test"
+
+    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    args = SimpleNamespace(
+        core_repo_path=str(core_repo),
+        commit_sha="abcdef0",
+        output_dir=str(output_dir),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+
+    # Mock grade_one_packet to return a status="error" outcome (mirroring
+    # the orchestrator's exception-swallowing behavior).
+    def _fake_grade_one(*_args, **_kwargs):
+        return {
+            "packet_slug": "2026-01-01-x",
+            "packet_qna_log_path": _kwargs["qna_log_path"],
+            "status": "error",
+            "error": "RuntimeError: simulated operational failure",
+            "summaries": [],
+            "base_sha": _kwargs["commit_sha"],
+            "head_sha": _kwargs["commit_sha"],
+            "pr_number": 0,
+            "repo_full_name": _kwargs["repo_full_name"],
+        }
+    monkeypatch.setattr(gb, "grade_one_packet", _fake_grade_one)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 2  # partial failure exit code
+
+
+def test_cmd_grade_packet_batch_succeeds_when_all_packets_ok(tmp_path: Path, monkeypatch):
+    core_repo = tmp_path / "core-repo"
+    core_repo.mkdir()
+    pkt = core_repo / "products" / "tandem" / "packages" / "python" / "atlas" / "docs" / "work" / "2026-01-01-x"
+    pkt.mkdir(parents=True)
+    (pkt / "02-qna-log.md").write_text("...")
+
+    output_dir = tmp_path / "shadow-runs" / "baseline-test"
+
+    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    args = SimpleNamespace(
+        core_repo_path=str(core_repo),
+        commit_sha="abcdef0",
+        output_dir=str(output_dir),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+
+    def _fake_grade_one(*_args, **_kwargs):
+        return {
+            "packet_slug": "2026-01-01-x",
+            "packet_qna_log_path": _kwargs["qna_log_path"],
+            "status": "ok",
+            "summaries": [_mk_summary_dict("2026-01-01-x", [("full_match", "q1")])],
+            "base_sha": _kwargs["commit_sha"],
+            "head_sha": _kwargs["commit_sha"],
+            "pr_number": 0,
+            "repo_full_name": _kwargs["repo_full_name"],
+            "code_revision_id": "rev-1",
+        }
+    monkeypatch.setattr(gb, "grade_one_packet", _fake_grade_one)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 0
+    # Manifest + summary should exist.
+    assert (output_dir / "manifest.json").exists()
+    assert (output_dir / "summary.md").exists()
+
+
+def test_cmd_grade_packet_batch_counts_raised_exceptions_too(tmp_path: Path, monkeypatch):
+    """Defensive: even if run_pr_grading raises (shouldn't per its
+    docstring, but bugs happen), batch must still record + count it."""
+    core_repo = tmp_path / "core-repo"
+    pkt = core_repo / "docs" / "work" / "2026-01-01-x"
+    pkt.mkdir(parents=True)
+    (pkt / "02-qna-log.md").write_text("...")
+
+    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    args = SimpleNamespace(
+        core_repo_path=str(core_repo),
+        commit_sha="abcdef0",
+        output_dir=str(tmp_path / "shadow-runs" / "baseline-test"),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+
+    def _fake_grade_one(*_args, **_kwargs):
+        raise RuntimeError("bug escaped run_pr_grading")
+    monkeypatch.setattr(gb, "grade_one_packet", _fake_grade_one)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 2
+
+
 def test_write_per_run_summary_md_sorts_packets_worst_first(tmp_path: Path):
     outcomes = [
         {"packet_slug": "good", "status": "ok",
-         "summaries": [_mk_summary("good", [("full_match", "q1"), ("full_match", "q2")])]},
+         "summaries": [_mk_summary_dict("good", [("full_match", "q1"), ("full_match", "q2")])]},
         {"packet_slug": "bad", "status": "ok",
-         "summaries": [_mk_summary("bad", [("no_match", "q1"), ("no_match", "q2")])]},
+         "summaries": [_mk_summary_dict("bad", [("no_match", "q1"), ("no_match", "q2")])]},
         {"packet_slug": "mid", "status": "ok",
-         "summaries": [_mk_summary("mid", [("full_match", "q1"), ("no_match", "q2")])]},
+         "summaries": [_mk_summary_dict("mid", [("full_match", "q1"), ("no_match", "q2")])]},
     ]
     path = gb.write_per_run_summary_md(
         "baseline-x",

@@ -58,6 +58,12 @@ from . import overall_summary as os_mod
 from .receiver import PrEvent
 
 
+# Statuses set by ``grader_service.run_pr_grading`` that count as
+# "successful" from the batch CLI's perspective. Anything else is a
+# partial failure that should bump the exit code to 2.
+_OK_STATUSES = frozenset(["ok"])
+
+
 # ─── Synthesizing a PrEvent for a single packet ──────────────────────
 
 
@@ -206,19 +212,26 @@ def grade_one_packet(
 # ─── Serializing one packet's outcome to JSON ────────────────────────
 
 
-def _summary_to_dict(summary) -> dict[str, Any]:
-    """Convert a ``GradingSummary`` to a JSON-serializable dict.
+def _load_artifact_rows(artifact_path: Optional[str]) -> Optional[dict[str, Any]]:
+    """Read the per-packet artifact JSON written by
+    ``grader_service.write_grading_artifact``.
 
-    Calls ``asdict`` on the summary (which handles ``ReceiptGradingRow``
-    children) then adds the derived aggregate fields (pass_count, total,
-    pass_pct, passed) since those are ``@property`` and asdict skips them.
+    Returns the full payload (including ``rows``) on success, or ``None``
+    if the path is missing / unreadable / unparseable. Codex r1 (2026-05-15)
+    flagged that the batch needs to consume the actual ``run_pr_grading``
+    return shape — the ``summaries`` dicts there are aggregate-only and
+    reference an external artifact file for per-receipt detail.
     """
-    d = asdict(summary)
-    d["pass_count"] = summary.pass_count
-    d["total"] = summary.total
-    d["pass_pct"] = summary.pass_pct
-    d["passed"] = summary.passed
-    return d
+    if not artifact_path:
+        return None
+    try:
+        return json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        # Non-fatal: per-packet JSON falls back to aggregate-only.
+        sys.stderr.write(
+            f"[grade-batch] WARN: could not load artifact {artifact_path}: {exc}\n"
+        )
+        return None
 
 
 def write_packet_artifact(
@@ -227,6 +240,11 @@ def write_packet_artifact(
 ) -> Path:
     """Write a per-packet JSON under ``output_dir/packets/<slug>.json``.
 
+    Inlines the per-receipt rows from each summary's ``artifact_path``
+    (the file ``grader_service.write_grading_artifact`` writes per
+    packet) so this single JSON is self-contained — drilling into a
+    packet's results doesn't require chasing a separate file.
+
     Returns the written path. Creates parent dirs as needed.
     """
     packets_dir = output_dir / "packets"
@@ -234,9 +252,29 @@ def write_packet_artifact(
     slug = outcome.get("packet_slug", "unknown-packet")
     target = packets_dir / f"{slug}.json"
 
+    # Inline each summary's full artifact (with rows) alongside the
+    # aggregate-only dict from run_pr_grading.
+    enriched_summaries = []
+    for summary_dict in outcome.get("summaries", []):
+        if not isinstance(summary_dict, dict):
+            # Defensive: if anyone in the future passes a GradingSummary
+            # object instead of the dict shape, still serialize sanely.
+            try:
+                enriched = asdict(summary_dict)
+            except TypeError:
+                enriched = {"_repr": str(summary_dict)}
+        else:
+            enriched = dict(summary_dict)
+            artifact_payload = _load_artifact_rows(enriched.get("artifact_path"))
+            if artifact_payload is not None:
+                # Embed the rows + other artifact fields under "artifact"
+                # rather than overwriting the aggregate top-level keys.
+                enriched["artifact"] = artifact_payload
+        enriched_summaries.append(enriched)
+
     serializable_outcome = {
         **outcome,
-        "summaries": [_summary_to_dict(s) for s in outcome.get("summaries", [])],
+        "summaries": enriched_summaries,
     }
     target.write_text(
         json.dumps(serializable_outcome, indent=2, sort_keys=True, default=str),
@@ -248,11 +286,28 @@ def write_packet_artifact(
 # ─── Per-run aggregation: manifest.json + summary.md ─────────────────
 
 
+def _summary_total(summary) -> int:
+    """Read ``total`` from either the production dict shape (from
+    ``run_pr_grading``) or the dataclass shape (used in some tests)."""
+    if isinstance(summary, dict):
+        return int(summary.get("total", 0))
+    return getattr(summary, "total", 0)
+
+
+def _summary_pass_count(summary) -> int:
+    """Read ``pass_count`` from either the production dict shape or
+    the dataclass shape."""
+    if isinstance(summary, dict):
+        return int(summary.get("pass_count", 0))
+    return getattr(summary, "pass_count", 0)
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
     "Correct" mirrors ``GradingSummary.pass_count`` — full_match or
-    partial_match.
+    partial_match. Reads from the dict shape ``run_pr_grading``
+    returns (codex r1 fix).
     """
     total_packets = len(packet_outcomes)
     total_receipts = 0
@@ -263,8 +318,8 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_receipts = 0
         packet_correct = 0
         for summary in outcome.get("summaries", []):
-            packet_receipts += summary.total
-            packet_correct += summary.pass_count
+            packet_receipts += _summary_total(summary)
+            packet_correct += _summary_pass_count(summary)
         total_receipts += packet_receipts
         total_correct += packet_correct
         per_packet_pct[slug] = {
@@ -355,8 +410,8 @@ def write_per_run_summary_md(
         receipts = 0
         correct = 0
         for summary in outcome.get("summaries", []):
-            receipts += summary.total
-            correct += summary.pass_count
+            receipts += _summary_total(summary)
+            correct += _summary_pass_count(summary)
         pct = (round(correct * 100 / receipts, 1) if receipts else 0.0)
         rows.append((pct, slug, receipts, correct, outcome.get("status", "ok")))
     rows.sort(key=lambda r: r[0])
@@ -473,6 +528,20 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 f"  WARN: {slug} crashed: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
+        else:
+            # Codex r1 P2 fix: run_pr_grading documents that operational
+            # failures are RETURNED as status="error" (or other non-"ok"
+            # statuses like "revision_not_indexed" or "skipped_not_packet")
+            # rather than RAISED. Without this branch, the batch would
+            # exit 0 even when packets failed silently.
+            if outcome.get("status") not in _OK_STATUSES:
+                partial_failures += 1
+                if not args.quiet:
+                    print(
+                        f"  WARN: {slug} status={outcome.get('status')} "
+                        f"error={outcome.get('error')}",
+                        file=sys.stderr,
+                    )
 
         write_packet_artifact(outcome, output_dir)
         packet_outcomes.append(outcome)
