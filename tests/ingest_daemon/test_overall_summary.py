@@ -65,6 +65,34 @@ def test_load_run_manifests_skips_corrupt_files(tmp_path: Path, capsys):
     assert "baseline-bad" in err
 
 
+@pytest.mark.parametrize(
+    "bad_content,kind",
+    [
+        ("[]", "list"),
+        ("null", "NoneType"),
+        ('"a string"', "str"),
+        ("42", "int"),
+    ],
+)
+def test_load_run_manifests_skips_non_object_manifests(
+    tmp_path: Path, capsys, bad_content, kind
+):
+    """Codex r7 P2: a manifest that's valid JSON but not a dict (top-
+    level array, null, scalar) would crash the `manifest["_dir"]=...`
+    assignment. Skip with a WARN instead so one malformed historical
+    manifest doesn't break every subsequent batch."""
+    _write_run(tmp_path, "baseline-good", started_at="2026-05-15T10:00:00Z")
+    bad_dir = tmp_path / "baseline-malformed"
+    bad_dir.mkdir()
+    (bad_dir / "manifest.json").write_text(bad_content)
+    runs = os_mod.load_run_manifests(tmp_path)
+    assert [r["run_name"] for r in runs] == ["baseline-good"]
+    err = capsys.readouterr().err
+    assert "baseline-malformed" in err
+    assert "not a JSON object" in err
+    assert kind in err  # explicit type name in the WARN aids debugging
+
+
 def test_load_run_manifests_handles_missing_root(tmp_path: Path):
     runs = os_mod.load_run_manifests(tmp_path / "does-not-exist")
     assert runs == []

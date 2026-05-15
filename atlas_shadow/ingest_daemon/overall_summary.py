@@ -91,6 +91,20 @@ def load_run_manifests(shadow_runs_root: Path) -> list[dict[str, Any]]:
                 file=sys.stderr,
             )
             continue
+        # Codex r7 P2: a manifest that's valid JSON but not a dict (e.g.
+        # `[]` from a bad manual edit, or `null` from a partial write)
+        # would crash the `_dir` assignment below. Since every batch run
+        # calls regenerate(), one bad historical manifest would break
+        # every subsequent batch — so we skip-on-shape too, not just
+        # skip-on-parse-error.
+        if not isinstance(manifest, dict):
+            import sys
+            print(
+                f"[overall_summary] WARN: skipping {manifest_path}: "
+                f"manifest is not a JSON object (got {type(manifest).__name__})",
+                file=sys.stderr,
+            )
+            continue
         manifest["_dir"] = run_dir.name  # for cross-reference
         runs.append(manifest)
     runs.sort(key=lambda r: r.get("started_at", ""))
