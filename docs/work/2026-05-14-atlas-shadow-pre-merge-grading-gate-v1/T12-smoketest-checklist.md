@@ -49,9 +49,9 @@ covered by the offline AGs.
 | 5 | A PR comment carrying the marker `<!-- atlas-shadow-grading -->` is posted. | Per-receipt table; columns include `qid`, `question`, `tool`, `grade`, `conf`, `rationale`. | ☐ |
 | 6 | If the packet has doc-anchored receipts (`source_path` ending in `.md`/`.yaml`/etc.), the comment table includes a `revision_binding` column showing `db_commit_scoped` / `git_receipt_snapshot` / `unresolved_source_ref`. | ✓ | ☐ |
 | 7 | A JSON artifact lands at `atlas-shadow/shadow-runs/pr-<N>-<ts>.json` matching the comment's grades. | ✓ | ☐ |
-| 8 | Push a second commit to the PR branch (triggers `synchronize`). | New check_run created; the SAME PR comment is UPDATED (one comment total, not two). | ☐ |
+| 8 | Push a second commit to the PR branch (triggers `synchronize`). | New `pending` -> `success`/`failure` commit-status pair posted on the new head SHA; the SAME PR comment is UPDATED (one comment total, not two). | ☐ |
 | 9 | Close (without merging) the PR; open it again (`reopened` action). | Grading re-fires; the same PR comment is updated again. | ☐ |
-| 10 | Open a PR that touches `src/foo.py` but NO `02-qna-log.md`. | No check_run is created; no PR comment is posted. Daemon log notes `skipped_not_packet`. | ☐ |
+| 10 | Open a PR that touches `src/foo.py` but NO `02-qna-log.md`. | No commit status is posted; no PR comment is posted. Daemon log notes `skipped_not_packet`. | ☐ |
 | 11 | `make shadow-run FIXTURE=dogfood-v2 LIMIT=1` (AG7 regression check). | Exit 0. | ☐ |
 | 12 | Inspect `.daemon-state.json`: during the in-flight PR (step 3-4 window), the file contains a `pinned_revisions` entry keyed on the PR number. After grading completes (step 5), the pin is GONE. | ✓ | ☐ |
 
