@@ -1,21 +1,32 @@
-"""gh_check — GitHub Checks API integration (T7).
+"""gh_check — GitHub commit-status integration (T7).
 
-The pre-merge gate transitions the ``atlas-shadow-grading`` check_run
-through ``in_progress`` -> ``completed`` (with ``conclusion`` in
-``success`` / ``failure`` / ``neutral``).
+The pre-merge gate posts a ``atlas-shadow-grading`` commit status that
+transitions through ``pending`` -> ``success`` / ``failure`` / ``error``
+on the PR's head SHA.
+
+**Why commit statuses, not Check Runs?** The Checks API
+(``/repos/{owner}/{repo}/check-runs``) is **only available to GitHub
+Apps** — it returns 403 ``You must authenticate via a GitHub App`` when
+called with a personal access token (caught during T12 smoketest,
+2026-05-15). Commit Statuses (``/repos/{owner}/{repo}/statuses/{sha}``)
+accept PAT auth, integrate with branch protection ``Settings -> Branches
+-> Required status checks`` the same way, and display in the same PR
+``Checks`` UI tab. The migration path to a GitHub App (richer per-check
+annotations, line-level details) is deferred to v1.1 if needed.
 
 This module is a thin wrapper around the REST API:
 
-  * ``create_check_in_progress(...)`` — POST /repos/{owner}/{repo}/check-runs
-    (status=in_progress). Returns the ``check_run_id`` the daemon stores
-    until grading completes.
-  * ``update_check_complete(...)`` — PATCH /repos/{owner}/{repo}/check-runs/
-    {check_run_id} (status=completed + conclusion + output).
+  * ``post_pending_status(...)`` — POST /repos/{owner}/{repo}/statuses/{sha}
+    with ``state=pending``. Initial entry posted when the PR webhook
+    arrives.
+  * ``post_final_status(...)`` — POST same endpoint with
+    ``state=success | failure | error``. Replaces the prior status on
+    the (sha, context) pair (GitHub shows only the latest in the UI).
 
 Authentication: GitHub PAT or fine-grained token in the
-``GITHUB_ATLAS_SHADOW_TOKEN`` env var. Required scopes: ``checks:write``
-on the target repo. The daemon refuses to call these helpers when the
-token is missing (caller-side check).
+``GITHUB_ATLAS_SHADOW_TOKEN`` env var. Required scope: ``repo:status``
+(included in the broader ``repo`` scope). The daemon refuses to call
+these helpers when the token is missing (caller-side check).
 
 All requests go through stdlib ``urllib.request``; no new transitive deps.
 ``_http`` injection seam lets tests stub the response without monkey-
@@ -105,29 +116,51 @@ def _auth_headers(github_token: str) -> dict[str, str]:
     }
 
 
-def create_check_in_progress(
+STATUS_CONTEXT = "atlas-shadow-grading"
+_VALID_STATES = frozenset({"pending", "success", "failure", "error"})
+
+
+def post_status(
     *,
     repo_full_name: str,
     head_sha: str,
-    name: str = "atlas-shadow-grading",
-    details_url: Optional[str] = None,
+    state: str,
+    description: str,
+    context: str = STATUS_CONTEXT,
+    target_url: Optional[str] = None,
     github_token: str,
     _http: Callable = http_request,
 ) -> dict[str, Any]:
-    """POST a new ``check_run`` in ``in_progress`` state.
+    """POST a commit status to ``/repos/{owner}/{repo}/statuses/{sha}``.
 
-    Returns the parsed JSON body (which carries the ``id`` the daemon
-    stores until ``update_check_complete``). Raises :class:`RuntimeError`
-    on non-2xx responses with the GitHub error body for context.
+    Args:
+      state: one of ``pending`` / ``success`` / ``failure`` / ``error``.
+        Per D-P2-5: receipts-passed-threshold -> ``success``,
+        receipts-failed-threshold -> ``failure``, operational error ->
+        ``success`` (soft-pass; description carries the error so
+        operators see it without blocking merge).
+      description: short string (max 140 chars per GH; we truncate).
+        Shown next to the status in the PR's Checks tab.
+      context: status context name. Branch-protection rules match on
+        this string; default ``atlas-shadow-grading``.
+      target_url: optional URL the status badge links to (e.g., the
+        shadow-runs artifact path or the PR comment anchor).
     """
-    url = f"{GITHUB_API_BASE}/repos/{repo_full_name}/check-runs"
+    if state not in _VALID_STATES:
+        raise ValueError(
+            f"state must be one of {sorted(_VALID_STATES)}; got {state!r}"
+        )
+    # GitHub caps description at 140 chars. Truncate with ellipsis.
+    if description and len(description) > 140:
+        description = description[:137].rstrip() + "..."
     payload: dict[str, Any] = {
-        "name": name,
-        "head_sha": head_sha,
-        "status": "in_progress",
+        "state": state,
+        "context": context,
+        "description": description or "",
     }
-    if details_url:
-        payload["details_url"] = details_url
+    if target_url:
+        payload["target_url"] = target_url
+    url = f"{GITHUB_API_BASE}/repos/{repo_full_name}/statuses/{head_sha}"
     resp = _http(
         method="POST",
         url=url,
@@ -136,55 +169,90 @@ def create_check_in_progress(
     )
     if not (200 <= resp.status < 300):
         raise RuntimeError(
-            f"create_check_in_progress failed: status={resp.status} "
-            f"body={resp.body[:500]!r}"
+            f"post_status failed: status={resp.status} body={resp.body[:500]!r}"
         )
     return resp.json() or {}
 
 
-def update_check_complete(
+def post_pending_status(
     *,
     repo_full_name: str,
-    check_run_id: int,
-    conclusion: str,
-    output_title: str,
-    output_summary: str,
-    output_text: Optional[str] = None,
+    head_sha: str,
+    description: str = "grading in progress",
     github_token: str,
     _http: Callable = http_request,
 ) -> dict[str, Any]:
-    """PATCH an existing check_run to ``status=completed`` with a conclusion.
-
-    Args:
-      conclusion: one of ``success`` / ``failure`` / ``neutral`` /
-        ``cancelled`` / ``skipped`` / ``timed_out`` / ``action_required``.
-        Per D-P2-5, the grading gate uses ``success`` (soft-pass) or
-        ``failure`` (hard-fail); other values are passed through for
-        forward compatibility.
-      output_title / output_summary / output_text: rendered on the GH
-        check-run UI. Summary is markdown.
-    """
-    url = f"{GITHUB_API_BASE}/repos/{repo_full_name}/check-runs/{check_run_id}"
-    output: dict[str, Any] = {
-        "title": output_title,
-        "summary": output_summary,
-    }
-    if output_text:
-        output["text"] = output_text
-    payload = {
-        "status": "completed",
-        "conclusion": conclusion,
-        "output": output,
-    }
-    resp = _http(
-        method="PATCH",
-        url=url,
-        body=json.dumps(payload).encode("utf-8"),
-        headers=_auth_headers(github_token),
+    """Convenience wrapper: POST state=pending. Initial entry on PR-open."""
+    return post_status(
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        state="pending",
+        description=description,
+        github_token=github_token,
+        _http=_http,
     )
-    if not (200 <= resp.status < 300):
-        raise RuntimeError(
-            f"update_check_complete failed: status={resp.status} "
-            f"body={resp.body[:500]!r}"
-        )
-    return resp.json() or {}
+
+
+def post_final_status(
+    *,
+    repo_full_name: str,
+    head_sha: str,
+    state: str,
+    description: str,
+    target_url: Optional[str] = None,
+    github_token: str,
+    _http: Callable = http_request,
+) -> dict[str, Any]:
+    """Convenience wrapper: POST state=success|failure|error. Replaces
+    the prior pending status on the (sha, context) pair (GitHub shows
+    only the latest in the UI).
+    """
+    return post_status(
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        state=state,
+        description=description,
+        target_url=target_url,
+        github_token=github_token,
+        _http=_http,
+    )
+
+
+# Backward-compat aliases — for code paths that still reference the
+# Check Runs-style names. Removed once nothing in atlas-shadow imports
+# them.
+def create_check_in_progress(*, repo_full_name, head_sha, github_token,
+                             name=STATUS_CONTEXT, details_url=None,
+                             _http=http_request):  # pragma: no cover
+    """DEPRECATED: kept for backward import compatibility. Use
+    :func:`post_pending_status` instead. The Check Runs API requires a
+    GitHub App; this wrapper now posts a commit status."""
+    return post_pending_status(
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        github_token=github_token,
+        _http=_http,
+    )
+
+
+def update_check_complete(*, repo_full_name, check_run_id, conclusion,
+                          output_title, output_summary, github_token,
+                          output_text=None, _http=http_request):  # pragma: no cover
+    """DEPRECATED: kept for backward import compatibility. Use
+    :func:`post_final_status` instead."""
+    # check_run_id is ignored; commit statuses don't have an id-based
+    # update model (each POST replaces the prior latest per context).
+    # Map Check Runs conclusion values to commit-status states.
+    _MAP = {"success": "success", "failure": "failure", "neutral": "success",
+            "cancelled": "error", "skipped": "success", "timed_out": "error",
+            "action_required": "failure"}
+    state = _MAP.get(conclusion, "error")
+    # The caller hands us a `head_sha` indirectly via the prior
+    # `post_pending_status` call; recovering it via the (unused)
+    # `check_run_id` isn't possible, so this back-compat wrapper requires
+    # callers that still use it to also pass `head_sha` explicitly.
+    raise NotImplementedError(
+        "update_check_complete back-compat wrapper requires explicit head_sha; "
+        "switch the caller to post_final_status(head_sha=..., state=..., "
+        "description=...) directly."
+    )

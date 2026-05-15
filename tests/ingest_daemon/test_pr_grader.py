@@ -768,13 +768,9 @@ def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monke
             "methods": ["GET"],
             "body": {"encoding": "base64", "content": qna_log_b64},
         },
-        "/check-runs": {
+        f"/statuses/{HEAD_SHA}": {
             "methods": ["POST"],
-            "body": {"id": 555},
-        },
-        "/check-runs/555": {
-            "methods": ["PATCH"],
-            "body": {"id": 555, "conclusion": "success"},
+            "body": {"id": 555, "state": "success"},
         },
         "/issues/99/comments": {
             "methods": ["GET", "POST"],
@@ -802,17 +798,16 @@ def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monke
         github_token="fake-token",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: gh_check_mod.create_check_in_progress(_http=http, **kw),
-        _update_check=lambda **kw: gh_check_mod.update_check_complete(_http=http, **kw),
+        _post_pending=lambda **kw: gh_check_mod.post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: gh_check_mod.post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: pr_comment_mod.post_or_update_pr_comment(_http=http, **kw),
         _grade_one=stubbed_grade_one,
     )
 
     # 7. Assertions.
     assert outcome["status"] == "ok"
-    assert outcome["check_run_id"] == 555
+    assert outcome["status_state"] == "success"
     assert outcome["code_revision_id"] == "11111111-1111-1111-1111-111111111111"
-    assert outcome["conclusion"] == "success"
     assert len(outcome["summaries"]) == 1
     s = outcome["summaries"][0]
     assert s["passed"] is True
@@ -830,10 +825,22 @@ def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monke
     assert payload["passed"] is True
     assert len(payload["rows"]) == 2
 
-    # check_run was created + updated; comment was posted
+    # Two statuses posted (pending + final), comment was posted.
     methods_and_urls = [(c["method"], c["url"]) for c in http.calls]
-    assert any(m == "POST" and "/check-runs" in u for m, u in methods_and_urls)
-    assert any(m == "PATCH" and "/check-runs/555" in u for m, u in methods_and_urls)
+    status_posts = [
+        (m, u) for m, u in methods_and_urls
+        if m == "POST" and f"/statuses/{HEAD_SHA}" in u
+    ]
+    assert len(status_posts) == 2  # pending + final
+    # Verify the pending was posted before the final.
+    pending_body = json.loads(http.calls[
+        [c["url"] for c in http.calls].index(
+            next(c["url"] for c in http.calls if f"/statuses/{HEAD_SHA}" in c["url"])
+        )
+    ]["body"])
+    assert pending_body["state"] == "pending"
+    final_body = json.loads([c for c in http.calls if f"/statuses/{HEAD_SHA}" in c["url"]][-1]["body"])
+    assert final_body["state"] == "success"
     assert any(m == "POST" and "/issues/99/comments" in u for m, u in methods_and_urls)
 
 
@@ -901,55 +908,100 @@ def test_find_by_commit_sha_returns_succeeded_only(daemon_config, db_path):
 # ===========================================================================
 
 
-def test_gh_check_create_and_update():
+def test_gh_status_pending_and_final():
+    """Commit Statuses API: POST pending + POST final on the same SHA.
+
+    Migrated from the Check Runs API in 2026-05-15 when T12 smoketest
+    surfaced that Check Runs requires GitHub App auth (PATs are rejected
+    with 403). The Commit Statuses API works with PAT scopes.
+    """
     from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
     http = _StubHttp(responses={
-        "/check-runs": {"methods": ["POST"], "body": {"id": 999, "status": "in_progress"}},
-        "/check-runs/999": {"methods": ["PATCH"], "body": {"id": 999, "conclusion": "failure"}},
+        f"/statuses/{HEAD_SHA}": {
+            "methods": ["POST"],
+            "body": {"id": 999, "state": "pending"},
+        },
     })
 
-    created = gh_check_mod.create_check_in_progress(
+    pending = gh_check_mod.post_pending_status(
         repo_full_name="o/r",
         head_sha=HEAD_SHA,
         github_token="t",
         _http=http,
     )
-    assert created["id"] == 999
+    assert pending["state"] == "pending"
 
-    updated = gh_check_mod.update_check_complete(
+    final = gh_check_mod.post_final_status(
         repo_full_name="o/r",
-        check_run_id=999,
-        conclusion="failure",
-        output_title="atlas-shadow grading: fail",
-        output_summary="2/5 receipts passed (40%)",
+        head_sha=HEAD_SHA,
+        state="failure",
+        description="fail 2/5 (40%)",
         github_token="t",
         _http=http,
     )
-    assert updated["conclusion"] == "failure"
+    # Each call returns whatever the stub gave us; the important assertion
+    # is on the request payload (state + context + description).
+    posted_pending = json.loads(http.calls[0]["body"])
+    assert posted_pending["state"] == "pending"
+    assert posted_pending["context"] == "atlas-shadow-grading"
+    posted_final = json.loads(http.calls[1]["body"])
+    assert posted_final["state"] == "failure"
+    assert posted_final["description"] == "fail 2/5 (40%)"
+    assert posted_final["context"] == "atlas-shadow-grading"
 
-    # Verify the POST and PATCH bodies carry the right payload shape.
-    posted = json.loads(http.calls[0]["body"])
-    assert posted["status"] == "in_progress"
-    assert posted["head_sha"] == HEAD_SHA
-    patched = json.loads(http.calls[1]["body"])
-    assert patched["status"] == "completed"
-    assert patched["conclusion"] == "failure"
-    assert "title" in patched["output"]
 
-
-def test_gh_check_non_2xx_raises():
-    """A 4xx response from the Checks API should raise RuntimeError."""
+def test_gh_status_non_2xx_raises():
+    """A 4xx response from the Statuses API should raise RuntimeError."""
     from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
     http = _StubHttp(responses={
-        "/check-runs": {"methods": ["POST"], "status": 422, "body": {"message": "bad"}},
+        f"/statuses/{HEAD_SHA}": {
+            "methods": ["POST"], "status": 422, "body": {"message": "bad"},
+        },
     })
     with pytest.raises(RuntimeError):
-        gh_check_mod.create_check_in_progress(
+        gh_check_mod.post_pending_status(
             repo_full_name="o/r",
             head_sha=HEAD_SHA,
             github_token="t",
             _http=http,
         )
+
+
+def test_gh_status_rejects_invalid_state():
+    """``state`` must be one of the four valid values; others raise
+    ValueError before any HTTP call (defensive contract check)."""
+    from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
+    http = _StubHttp(responses={})  # would raise if called
+    with pytest.raises(ValueError, match="state"):
+        gh_check_mod.post_status(
+            repo_full_name="o/r",
+            head_sha=HEAD_SHA,
+            state="not-a-real-state",
+            description="x",
+            github_token="t",
+            _http=http,
+        )
+
+
+def test_gh_status_truncates_long_description():
+    """GitHub caps description at 140 chars; the wrapper truncates with
+    an ellipsis so the rendering is deterministic."""
+    from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
+    http = _StubHttp(responses={
+        f"/statuses/{HEAD_SHA}": {"methods": ["POST"], "body": {}},
+    })
+    long_desc = "x" * 200
+    gh_check_mod.post_status(
+        repo_full_name="o/r",
+        head_sha=HEAD_SHA,
+        state="success",
+        description=long_desc,
+        github_token="t",
+        _http=http,
+    )
+    posted = json.loads(http.calls[0]["body"])
+    assert len(posted["description"]) <= 140
+    assert posted["description"].endswith("...")
 
 
 def test_pr_comment_renders_revision_binding_column_when_doc_receipts_present():
@@ -1037,17 +1089,10 @@ def test_offline_imports_unchanged():
 
 def _stub_http_for_skip_or_error(error_at: str = None):
     """Build a stub that satisfies enough of the orchestrator flow to
-    reach the desired error point. ``error_at`` is one of:
-    'list_files' / 'create_check' / 'fetch_contents' / 'post_comment' /
-    'update_check'.
+    reach the desired error point.
     """
     import base64
     qna_b64 = base64.b64encode(_SAMPLE_QNA_LOG.encode("utf-8")).decode()
-
-    def _raise(name):
-        def inner(**kw):
-            raise RuntimeError(f"stub raised at {name}")
-        return inner
 
     responses = {
         "/pulls/77/files": {
@@ -1060,13 +1105,9 @@ def _stub_http_for_skip_or_error(error_at: str = None):
             "methods": ["GET"],
             "body": {"encoding": "base64", "content": qna_b64},
         },
-        "/check-runs": {
+        f"/statuses/{HEAD_SHA}": {
             "methods": ["POST"],
-            "body": {"id": 1234},
-        },
-        "/check-runs/1234": {
-            "methods": ["PATCH"],
-            "body": {"id": 1234},
+            "body": {"id": 1234, "state": "pending"},
         },
         "/issues/77/comments": {
             "methods": ["GET", "POST"],
@@ -1098,15 +1139,24 @@ def test_pin_released_on_orchestrator_exception(daemon_config, db_path, state_fi
     )
     http = _stub_http_for_skip_or_error()
 
-    def explosive_update(**kw):
-        raise RuntimeError("simulated GH outage during update_check_complete")
+    call_log = {"count": 0}
+
+    def explosive_final(**kw):
+        # First call (pending) succeeds; second call (final) raises so the
+        # orchestrator's error path fires.
+        call_log["count"] += 1
+        if call_log["count"] == 1:
+            raise RuntimeError("simulated GH outage during post_final_status")
+        # Subsequent calls (the error-path's soft-pass attempt) also raise
+        # so we exercise the nested-try in the error path.
+        raise RuntimeError("simulated GH outage on error-path soft-pass")
 
     outcome = grader_service_mod.run_pr_grading(
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['create_check_in_progress']).create_check_in_progress(_http=http, **kw),
-        _update_check=explosive_update,
+        _post_pending=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_pending_status']).post_pending_status(_http=http, **kw),
+        _post_final=explosive_final,
         _post_comment=lambda **kw: __import__('atlas_shadow.ingest_daemon.pr_comment', fromlist=['post_or_update_pr_comment']).post_or_update_pr_comment(_http=http, **kw),
         _grade_one=lambda **kw: grader_service_mod._grade_one_receipt(
             **kw,
@@ -1136,8 +1186,8 @@ def test_pin_not_acquired_when_base_sha_not_in_ledger(daemon_config, db_path, st
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['create_check_in_progress']).create_check_in_progress(_http=http, **kw),
-        _update_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['update_check_complete']).update_check_complete(_http=http, **kw),
+        _post_pending=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_pending_status']).post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_final_status']).post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: __import__('atlas_shadow.ingest_daemon.pr_comment', fromlist=['post_or_update_pr_comment']).post_or_update_pr_comment(_http=http, **kw),
         _grade_one=lambda **kw: grader_service_mod._grade_one_receipt(
             **kw, _runner_run_one=_fake_runner_run_one(), _grader_grade=_fake_grader(),
@@ -1231,8 +1281,8 @@ def test_run_pr_grading_skips_non_packet_pr(daemon_config, db_path, tmp_path):
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: pytest.fail("must not fetch contents"),
-        _create_check=lambda **kw: pytest.fail("must not create check_run"),
-        _update_check=lambda **kw: pytest.fail("must not update check_run"),
+        _post_pending=lambda **kw: pytest.fail("must not post pending status"),
+        _post_final=lambda **kw: pytest.fail("must not post final status"),
         _post_comment=lambda **kw: pytest.fail("must not post comment"),
     )
     assert outcome["status"] == "skipped_not_packet"
@@ -1276,8 +1326,8 @@ def test_run_pr_grading_continues_on_partial_grader_failure(daemon_config, db_pa
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['create_check_in_progress']).create_check_in_progress(_http=http, **kw),
-        _update_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['update_check_complete']).update_check_complete(_http=http, **kw),
+        _post_pending=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_pending_status']).post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_final_status']).post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: __import__('atlas_shadow.ingest_daemon.pr_comment', fromlist=['post_or_update_pr_comment']).post_or_update_pr_comment(_http=http, **kw),
         _grade_one=flaky_grade_one,
     )
@@ -1294,10 +1344,15 @@ def test_run_pr_grading_continues_on_partial_grader_failure(daemon_config, db_pa
     assert rows_by_qid["q2"]["grade"] == "full_match"
 
 
-def test_run_pr_grading_operational_error_sets_neutral(daemon_config, db_path, state_file, tmp_path):
-    """When the orchestrator hits an OPERATIONAL error AFTER creating the
-    check_run (e.g., GH Contents API outage), the check is updated to
-    conclusion=neutral so PRs don't soft-block indefinitely (D-P2-5).
+def test_run_pr_grading_operational_error_soft_passes(daemon_config, db_path, state_file, tmp_path):
+    """When the orchestrator hits an OPERATIONAL error AFTER posting the
+    pending status (e.g., GH Contents API outage), the status is updated
+    to ``success`` with a descriptive error message so PRs don't
+    soft-block indefinitely (D-P2-5).
+
+    Commit Status API has no ``neutral`` equivalent — the closest match
+    for "didn't grade but don't block" is ``success`` with a description
+    that surfaces the error to operators.
     """
     ledger_mod.insert_terminal_attempt(
         db_path, commit_sha=BASE_SHA, status="succeeded",
@@ -1311,9 +1366,8 @@ def test_run_pr_grading_operational_error_sets_neutral(daemon_config, db_path, s
         action="opened", repo_full_name="o/r", pr_number=77,
         base_sha=BASE_SHA, base_ref="main", head_sha=HEAD_SHA, head_ref="f",
     )
-    # HTTP: PR files lists a packet; check-runs POST succeeds (so we have
-    # a check_run id to update); but Contents API returns 500.
-    import base64
+    # HTTP: PR files lists a packet; pending status POST succeeds;
+    # Contents API returns 500.
     http = _StubHttp(responses={
         "/pulls/77/files": {
             "methods": ["GET"],
@@ -1321,18 +1375,14 @@ def test_run_pr_grading_operational_error_sets_neutral(daemon_config, db_path, s
                 {"filename": "products/tandem/packages/python/atlas/docs/work/2026-05-14-x-v1/02-qna-log.md", "status": "added"},
             ],
         },
-        "/check-runs": {
+        f"/statuses/{HEAD_SHA}": {
             "methods": ["POST"],
-            "body": {"id": 8888},
+            "body": {"id": 8888, "state": "pending"},
         },
         "/contents/": {
             "methods": ["GET"],
             "status": 500,
             "body": {"message": "internal error"},
-        },
-        "/check-runs/8888": {
-            "methods": ["PATCH"],
-            "body": {"id": 8888, "conclusion": "neutral"},
         },
     })
 
@@ -1340,16 +1390,20 @@ def test_run_pr_grading_operational_error_sets_neutral(daemon_config, db_path, s
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['create_check_in_progress']).create_check_in_progress(_http=http, **kw),
-        _update_check=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['update_check_complete']).update_check_complete(_http=http, **kw),
+        _post_pending=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_pending_status']).post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_final_status']).post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: __import__('atlas_shadow.ingest_daemon.pr_comment', fromlist=['post_or_update_pr_comment']).post_or_update_pr_comment(_http=http, **kw),
     )
     assert outcome["status"] == "error"
-    # The check_run was PATCHed to "neutral" (operational error).
-    patch_calls = [c for c in http.calls if c["method"] == "PATCH"]
-    assert len(patch_calls) == 1
-    patched_body = json.loads(patch_calls[0]["body"])
-    assert patched_body["conclusion"] == "neutral"
+    # Two statuses posted on /statuses/<sha>: pending then a soft-pass success.
+    status_posts = [
+        c for c in http.calls
+        if c["method"] == "POST" and f"/statuses/{HEAD_SHA}" in c["url"]
+    ]
+    assert len(status_posts) == 2
+    final_body = json.loads(status_posts[1]["body"])
+    assert final_body["state"] == "success"
+    assert "operational error" in final_body["description"].lower()
     # And the pin was released.
     assert state_file_mod.get_pinned_revision(cfg.state_file, pr_number=77) is None
 
@@ -1462,15 +1516,14 @@ def test_run_pr_grading_idempotent_rerun_updates_comment(daemon_config, db_path,
                     body=json.dumps({"encoding": "base64", "content": qna_b64}).encode(),
                     headers={},
                 )
-            if "/check-runs" in url and method == "POST":
-                # Each create returns a new check_run_id.
+            if "/statuses/" in url and method == "POST":
+                # Each post returns a new status id (id is the GH status
+                # row id; orchestrator doesn't track it).
                 return HttpResponse(
                     status=201,
-                    body=json.dumps({"id": 10000 + len(self.calls)}).encode(),
+                    body=json.dumps({"id": 10000 + len(self.calls), "state": "pending"}).encode(),
                     headers={},
                 )
-            if "/check-runs/" in url and method == "PATCH":
-                return HttpResponse(status=200, body=b"{}", headers={})
             if "/issues/77/comments" in url and method == "GET":
                 return HttpResponse(
                     status=200,
@@ -1502,8 +1555,8 @@ def test_run_pr_grading_idempotent_rerun_updates_comment(daemon_config, db_path,
     common_kw = dict(
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
-        _create_check=lambda **kw: gh_check_mod.create_check_in_progress(_http=http, **kw),
-        _update_check=lambda **kw: gh_check_mod.update_check_complete(_http=http, **kw),
+        _post_pending=lambda **kw: gh_check_mod.post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: gh_check_mod.post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: pr_comment_mod.post_or_update_pr_comment(_http=http, **kw),
         _grade_one=lambda **kw: grader_service_mod._grade_one_receipt(
             **kw, _runner_run_one=_fake_runner_run_one(), _grader_grade=_fake_grader(),
@@ -1527,8 +1580,9 @@ def test_run_pr_grading_idempotent_rerun_updates_comment(daemon_config, db_path,
     assert comments[0]["id"] == initial_comment_id
     assert pr_comment_mod.COMMENT_MARKER in comments[0]["body"]
 
-    # And a NEW check_run was created on run 2 (different id from run 1).
-    create_calls = [
-        c for c in http.calls if c["method"] == "POST" and c["url"].endswith("/check-runs")
+    # Two POSTs to /statuses/ per run (pending + final) -> 4 total across both runs.
+    status_posts = [
+        c for c in http.calls
+        if c["method"] == "POST" and "/statuses/" in c["url"]
     ]
-    assert len(create_calls) == 2
+    assert len(status_posts) == 4

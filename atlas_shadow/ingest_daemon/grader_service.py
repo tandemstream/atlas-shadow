@@ -683,8 +683,8 @@ def run_pr_grading(
     github_token: str,
     _fetch_pr_files: Callable = _fetch_pr_files,
     _fetch_file_at_ref: Callable = _fetch_file_at_ref,
-    _create_check: Callable = gh_check_mod.create_check_in_progress,
-    _update_check: Callable = gh_check_mod.update_check_complete,
+    _post_pending: Callable = gh_check_mod.post_pending_status,
+    _post_final: Callable = gh_check_mod.post_final_status,
     _post_comment: Callable = pr_comment_mod.post_or_update_pr_comment,
     _grade_one: Callable = _grade_one_receipt,
     _now_iso: Callable = lambda: datetime.now(timezone.utc).isoformat(),
@@ -694,6 +694,13 @@ def run_pr_grading(
     Returns a dict summarizing what happened — useful for tests + log
     enrichment. NEVER raises; operational failures surface as a
     ``status='error'`` field with the exception text.
+
+    GH integration uses the Commit Statuses API (not Check Runs) because
+    PATs can't create check_runs (T12 smoketest 2026-05-15: the Check
+    Runs API returns 403 with ``You must authenticate via a GitHub App``).
+    Commit statuses display in the same PR ``Checks`` UI tab and
+    integrate with branch protection ``Settings -> Branches -> Required
+    status checks`` via the ``atlas-shadow-grading`` context.
     """
     outcome: dict[str, Any] = {
         "pr_number": event.pr_number,
@@ -701,11 +708,11 @@ def run_pr_grading(
         "head_sha": event.head_sha,
         "repo_full_name": event.repo_full_name,
         "summaries": [],
-        "check_run_id": None,
+        "status_state": None,
         "status": "ok",
         "error": None,
     }
-    check_run_id: Optional[int] = None
+    pending_posted = False
     pin_acquired = False
     code_revision_id: Optional[str] = None
     try:
@@ -727,14 +734,14 @@ def run_pr_grading(
             outcome["status"] = "skipped_not_packet"
             return outcome
 
-        # Create check (in_progress)
-        check = _create_check(
+        # Post pending commit status (signals "grading in flight").
+        _post_pending(
             repo_full_name=event.repo_full_name,
             head_sha=event.head_sha,
             github_token=github_token,
         )
-        check_run_id = int(check.get("id") or 0) or None
-        outcome["check_run_id"] = check_run_id
+        pending_posted = True
+        outcome["status_state"] = "pending"
 
         # Resolve parent code_revision_id
         parent_row = ledger_mod.find_by_commit_sha(cfg.db_path, event.base_sha)
@@ -837,40 +844,40 @@ def run_pr_grading(
                 "artifact_path": str(artifact_path),
             })
 
-        # Compute overall conclusion across packets — all must pass.
+        # Compute overall state across packets — all must pass.
         all_passed = all(s["passed"] for s in outcome["summaries"]) if outcome["summaries"] else True
-        conclusion = "success" if all_passed else "failure"
-        if check_run_id is not None:
-            _update_check(
-                repo_full_name=event.repo_full_name,
-                check_run_id=check_run_id,
-                conclusion=conclusion,
-                output_title=(
-                    "atlas-shadow grading: "
-                    + ("pass" if all_passed else "fail")
-                ),
-                output_summary=_build_check_summary(outcome),
-                github_token=github_token,
-            )
-        outcome["conclusion"] = conclusion
+        state = "success" if all_passed else "failure"
+        description = _build_status_description(outcome, all_passed)
+        _post_final(
+            repo_full_name=event.repo_full_name,
+            head_sha=event.head_sha,
+            state=state,
+            description=description,
+            github_token=github_token,
+        )
+        outcome["status_state"] = state
         return outcome
     except Exception as exc:
         outcome["status"] = "error"
         outcome["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        # Soft-pass on operational errors (D-P2-5 leans toward not blocking
-        # merges when the grader itself is broken).
-        if check_run_id is not None:
+        # Soft-pass on operational errors (D-P2-5: don't block merge when
+        # the grader itself is broken). Commit Status API has no
+        # ``neutral`` equivalent; we map operational errors to ``success``
+        # with a description that surfaces the problem to operators.
+        if pending_posted:
             try:
-                _update_check(
+                _post_final(
                     repo_full_name=event.repo_full_name,
-                    check_run_id=check_run_id,
-                    conclusion="neutral",
-                    output_title="atlas-shadow grading: operational error",
-                    output_summary=f"```\n{outcome['error'][:1500]}\n```",
+                    head_sha=event.head_sha,
+                    state="success",
+                    description=(
+                        f"(operational error: {type(exc).__name__}; see daemon log)"
+                    ),
                     github_token=github_token,
                 )
+                outcome["status_state"] = "success_with_operational_error"
             except Exception as exc2:
-                outcome["error"] += f"\n+ update_check_complete: {exc2}"
+                outcome["error"] += f"\n+ post_final_status: {exc2}"
         print(f"[ingest-daemon] run_pr_grading error: {outcome['error']}", file=sys.stderr)
         return outcome
     finally:
@@ -885,18 +892,24 @@ def run_pr_grading(
                 )
 
 
-def _build_check_summary(outcome: dict[str, Any]) -> str:
-    """Render a short Markdown summary for the GH check_run output."""
-    lines = []
-    for s in outcome.get("summaries", []):
-        badge = "PASS" if s.get("passed") else "FAIL"
-        lines.append(
-            f"- `{s['packet_id']}` — **{badge}** "
-            f"({s['pass_count']}/{s['total']} = {s['pass_pct']}%)"
-        )
-    if not lines:
-        return "No packet receipts found in this PR."
-    return "\n".join(lines)
+def _build_status_description(outcome: dict[str, Any], all_passed: bool) -> str:
+    """Render a 140-char-or-less commit-status description.
+
+    GitHub truncates over-length descriptions in the API; we truncate
+    here too so the rendering is deterministic. Format:
+
+        "pass 12/12 (100%)"     # all green
+        "fail 4/12 (33%)"       # some failures
+        "no receipts in PR"     # empty-receipts edge case
+    """
+    summaries = outcome.get("summaries") or []
+    if not summaries:
+        return "no receipts in PR"
+    total = sum(s["total"] for s in summaries)
+    passed = sum(s["pass_count"] for s in summaries)
+    pct = int(round(passed * 100 / total)) if total else 0
+    badge = "pass" if all_passed else "fail"
+    return f"{badge} {passed}/{total} ({pct}%)"
 
 
 def handle_pr_event(cfg, event) -> None:
