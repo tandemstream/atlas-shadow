@@ -49,6 +49,7 @@ def _now_iso() -> str:
 def run_doc_ingest(
     *,
     core_repo_path: Path,
+    source_root: Path,
     org_id: str,
     commit_sha: str,
     repo_url: str,
@@ -62,6 +63,22 @@ def run_doc_ingest(
     packet ground truth) via ``git show <commit_sha>:<path>`` and ingests
     via ``core.ingest.pipeline.ingest`` into the same atlas DB the SCIP
     path writes to.
+
+    Two paths matter:
+
+    - ``core_repo_path`` is the operator's long-lived checkout that
+      provides the atlas venv (``<core_repo_path>/products/.../atlas/.venv/bin/python``)
+      and the ``scripts.shadow_ingest_docs`` module on PYTHONPATH via cwd.
+      The daemon does NOT auto-advance this checkout.
+    - ``source_root`` is the freshly-checked-out worktree the daemon's
+      worker materialized for the target commit (under
+      ``cache_dir/worktrees/<sha-prefix>``). This is where the git ops
+      ``git rev-parse``, ``git ls-tree``, and ``git show`` need to run
+      because it's the only checkout guaranteed to contain
+      ``commit_sha``. Codex r1 (PR #10) fix — passing
+      ``cfg.core_repo_path`` to ``--repo-path`` made doc-ingest fail for
+      every webhook-driven commit because that checkout doesn't have
+      the new SHA.
 
     Atlas's file-content-hash memoization ensures repeat runs are cheap:
     files whose content hasn't changed between commits skip re-embedding.
@@ -100,7 +117,7 @@ def run_doc_ingest(
         str(venv_py), "-m", "scripts.shadow_ingest_docs",
         "--org-id", org_id,
         "--commit-sha", commit_sha,
-        "--repo-path", str(core_repo_path),
+        "--repo-path", str(source_root),
         "--repo-url", repo_url,
         "--quiet",
     ]
@@ -305,6 +322,7 @@ def process_one(
         try:
             doc_outcome = _run_doc_ingest(
                 core_repo_path=cfg.core_repo_path,
+                source_root=source_root,
                 org_id=cfg.continuous_shadow_org_id,
                 commit_sha=commit_sha,
                 repo_url=cfg.repo_url,

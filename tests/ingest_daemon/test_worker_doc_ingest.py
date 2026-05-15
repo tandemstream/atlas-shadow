@@ -46,11 +46,20 @@ def _make_proc(returncode: int, stdout: str = "", stderr: str = ""):
 
 
 def test_run_doc_ingest_happy_path(tmp_path: Path):
-    """Exit 0 + parseable manifest → status=succeeded with counts."""
+    """Exit 0 + parseable manifest → status=succeeded with counts.
+
+    Codex r1 (PR #10): --repo-path must point at source_root (the
+    daemon's checked-out worktree at the target commit), NOT
+    core_repo_path (which the daemon never auto-advances and so
+    typically doesn't have webhook-driven commits).
+    """
     # Materialize the expected atlas leaf + venv so the venv-check passes.
     atlas_leaf = tmp_path / "products" / "tandem" / "packages" / "python" / "atlas"
     (atlas_leaf / ".venv" / "bin").mkdir(parents=True)
     (atlas_leaf / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+
+    source_root = tmp_path / "cache" / "worktrees" / "abc0000"
+    source_root.mkdir(parents=True)
 
     captured_cmd = []
     def _fake_run(cmd, **kwargs):
@@ -59,6 +68,7 @@ def test_run_doc_ingest_happy_path(tmp_path: Path):
 
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=source_root,
         org_id="org-1",
         commit_sha="abc0000",
         repo_url="https://github.com/example/repo",
@@ -80,7 +90,13 @@ def test_run_doc_ingest_happy_path(tmp_path: Path):
     assert "--commit-sha" in captured_cmd
     assert "abc0000" in captured_cmd
     assert "--repo-path" in captured_cmd
-    assert str(tmp_path) in captured_cmd
+    # Critical: --repo-path is source_root (worktree the daemon checked
+    # out at the target SHA), not core_repo_path (operator's static
+    # checkout). Codex r1 PR #10 bug fix.
+    assert str(source_root) in captured_cmd
+    assert str(tmp_path) not in [
+        captured_cmd[i + 1] for i, v in enumerate(captured_cmd) if v == "--repo-path"
+    ]
     assert "--repo-url" in captured_cmd
     assert "https://github.com/example/repo" in captured_cmd
     assert "--quiet" in captured_cmd
@@ -95,6 +111,7 @@ def test_run_doc_ingest_exit_2_is_partial_success(tmp_path: Path):
 
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=tmp_path / "fake-source",
         org_id="org-1",
         commit_sha="abc",
         repo_url="https://example/repo",
@@ -113,6 +130,7 @@ def test_run_doc_ingest_exit_1_is_failure(tmp_path: Path):
 
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=tmp_path / "fake-source",
         org_id="org-1",
         commit_sha="abc",
         repo_url="https://example/repo",
@@ -135,6 +153,7 @@ def test_run_doc_ingest_timeout(tmp_path: Path):
 
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=tmp_path / "fake-source",
         org_id="org-1",
         commit_sha="abc",
         repo_url="https://example/repo",
@@ -154,6 +173,7 @@ def test_run_doc_ingest_unparseable_stdout(tmp_path: Path):
 
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=tmp_path / "fake-source",
         org_id="org-1",
         commit_sha="abc",
         repo_url="https://example/repo",
@@ -171,6 +191,7 @@ def test_run_doc_ingest_missing_venv(tmp_path: Path):
     # tmp_path has no atlas leaf — the venv path won't exist.
     out = worker_mod.run_doc_ingest(
         core_repo_path=tmp_path,
+        source_root=tmp_path / "fake-source",
         org_id="org-1",
         commit_sha="abc",
         repo_url="https://example/repo",
@@ -260,7 +281,13 @@ def _make_claim() -> dict:
 
 def test_process_one_invokes_doc_ingest_when_enabled(tmp_path: Path, monkeypatch):
     """Default: doc_ingest_enabled=True → _run_doc_ingest fires after
-    successful SCIP, outcome stashed under counts.doc_ingest."""
+    successful SCIP, outcome stashed under counts.doc_ingest.
+
+    Also asserts (codex r1 PR #10 fix): source_root is threaded into
+    _run_doc_ingest as a SEPARATE arg from core_repo_path. The fake
+    pipeline's _checkout_worktree returns Path("/fake/worktree"), so
+    that's what should appear as source_root in the call.
+    """
     cfg = _make_cfg(tmp_path, doc_ingest_enabled=True)
     _bootstrap_db(cfg)
     stubs = _scip_stub_kwargs(monkeypatch)
@@ -284,6 +311,11 @@ def test_process_one_invokes_doc_ingest_when_enabled(tmp_path: Path, monkeypatch
     assert doc_calls[0]["org_id"] == "org-1"
     assert doc_calls[0]["commit_sha"] == _make_claim()["commit_sha"]
     assert doc_calls[0]["timeout_seconds"] == 60
+    # Codex r1 PR #10: source_root (from _checkout_worktree) must be
+    # passed as the repo-path for git ops, not core_repo_path.
+    assert doc_calls[0]["source_root"] == Path("/fake/worktree")
+    assert doc_calls[0]["core_repo_path"] == cfg.core_repo_path
+    assert doc_calls[0]["source_root"] != doc_calls[0]["core_repo_path"]
 
 
 def test_process_one_skips_doc_ingest_when_disabled(tmp_path: Path, monkeypatch):
