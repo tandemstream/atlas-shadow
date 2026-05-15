@@ -19,6 +19,15 @@
 #   ingest-status      — print /status payload (no HTTP needed)
 #   ingest-replay      — enqueue commit(s); pass COMMIT=<sha> or FROM=<sha>
 #
+#   grading-up         — alias for ingest-up. The daemon's FastAPI receiver
+#                        handles both push (ingest) and pull_request (grading)
+#                        events through a single endpoint; one process runs
+#                        both surfaces. See docs/pre-merge-grading-gate.md.
+#   grading-verify     — verify env vars + paths the pre-merge grading gate
+#                        needs (GITHUB_WEBHOOK_SECRET, GITHUB_ATLAS_SHADOW_TOKEN,
+#                        ATLAS_DB_URL chain, shadow-runs/ writable, etc.).
+#                        Exit 0 when all hard requirements pass, 1 otherwise.
+#
 #   test               — pytest -v
 #   clean              — remove .venv and __pycache__
 
@@ -108,6 +117,16 @@ ingest-replay:
 	    echo "Usage: make ingest-replay COMMIT=<sha>  OR  make ingest-replay FROM=<sha>"; \
 	    exit 2; \
 	fi
+
+# T10 (P2 packet 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1) —
+# pre-merge grading gate targets.
+
+.PHONY: grading-up
+grading-up: ingest-up
+
+.PHONY: grading-verify
+grading-verify:
+	$(PY) -m atlas_shadow.ingest_daemon --config $(SHADOW_CONFIG) grading-verify
 
 .PHONY: clean
 clean:
