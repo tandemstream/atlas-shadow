@@ -78,12 +78,14 @@ def test_process_one_succeeded_writes_ledger_and_state(daemon_config, db_path, s
         commit_sha,
         repo_url,
         timeout_seconds,
+        parent_code_revision_id=None,
     ):
         captured["ingest_org_id"] = org_id
         captured["ingest_scip_path"] = scip_path
         captured["ingest_source_root"] = source_root
         captured["ingest_commit_sha"] = commit_sha
         captured["ingest_repo_url"] = repo_url
+        captured["ingest_parent_code_revision_id"] = parent_code_revision_id
         return {
             "org_id": org_id,
             "code_revision_id": "11111111-1111-1111-1111-111111111111",
@@ -110,6 +112,12 @@ def test_process_one_succeeded_writes_ledger_and_state(daemon_config, db_path, s
     # pin).
     assert captured["ingest_commit_sha"] == claim["commit_sha"]
     assert captured["ingest_repo_url"] == daemon_config.repo_url
+    # P1 T2 (packet 2026-05-14-atlas-shadow-substrate-enablers-v1):
+    # cold start — no state file exists at fixture setup, so
+    # parent_code_revision_id is None and the worker passes that
+    # through to _run_ingest. Verified separately in
+    # test_process_one_threads_parent_code_revision_id_when_state_exists.
+    assert captured["ingest_parent_code_revision_id"] is None
 
     # Ledger row written.
     latest = ledger_mod.latest_succeeded(db_path)
@@ -230,6 +238,48 @@ def test_dogfood_ingest_argv_shape_is_stable(tmp_path):
     # (core PR #209 added these flags to the dogfood CLI).
     assert pairs["--commit-sha"] == "deadbeef" + "0" * 32
     assert pairs["--repo-url"] == "https://github.com/tandemstream/core"
+    # P1 T2 (packet 2026-05-14-atlas-shadow-substrate-enablers-v1):
+    # cold-start argv (parent_code_revision_id is None / unset) must NOT
+    # include the incremental flags. The daemon's first ingest after a
+    # state-file reset relies on this to fall back to full ingest
+    # cleanly.
+    assert "--incremental" not in argv, (
+        "Cold-start argv (no parent_code_revision_id) must not include "
+        "--incremental — the dogfood CLI's default is full ingest."
+    )
+    assert "--parent-code-revision-id" not in argv
+
+
+def test_dogfood_ingest_argv_with_parent_revision_appends_incremental_flags(tmp_path):
+    """P1 T2 (packet 2026-05-14-atlas-shadow-substrate-enablers-v1) —
+    when `parent_code_revision_id` is non-None the daemon argv appends
+    ``--incremental --parent-code-revision-id <uuid>`` so the dogfood
+    CLI dispatches to file_memoization.ingest_with_carry_forward
+    [qa:q4]."""
+    core_repo_path = tmp_path / "core"
+    parent_uuid = "11111111-2222-3333-4444-555555555555"
+    argv = scip_mod.dogfood_ingest_argv(
+        core_repo_path=core_repo_path,
+        org_id="3ec689a0-678b-47ed-af17-a72e5adbfad8",
+        scip_path=Path("/tmp/x.scip"),
+        source_root=Path("/tmp/x"),
+        commit_sha="deadbeef" + "0" * 32,
+        repo_url="https://github.com/tandemstream/core",
+        parent_code_revision_id=parent_uuid,
+    )
+
+    assert "--incremental" in argv
+    # --parent-code-revision-id <uuid> must be paired correctly.
+    flag_idx = argv.index("--parent-code-revision-id")
+    assert argv[flag_idx + 1] == parent_uuid
+
+    # The original v1 + v2 flags must still be present (paired).
+    pairs = dict(zip(argv[3::2], argv[4::2]))
+    assert pairs["--org-id"] == "3ec689a0-678b-47ed-af17-a72e5adbfad8"
+    assert pairs["--scip-path"] == "/tmp/x.scip"
+    assert pairs["--source-root"] == "/tmp/x"
+    assert pairs["--commit-sha"] == "deadbeef" + "0" * 32
+    assert pairs["--repo-url"] == "https://github.com/tandemstream/core"
 
 
 def _parse_dogfood_argparse_flags(script_path: Path) -> set[str]:
@@ -315,6 +365,46 @@ def test_argv_matches_dogfood_argparse():
     assert v2_flags <= used_flags, (
         f"Daemon argv is missing v2 flags {v2_flags - used_flags}. "
         f"Update atlas_shadow/ingest_daemon/scip_builder.py::dogfood_ingest_argv."
+    )
+
+    # P1 T2 follow-on (packet 2026-05-14-atlas-shadow-substrate-enablers-v1):
+    # the dogfood script MUST declare --incremental + --parent-code-revision-id,
+    # and the daemon MUST pass them when a parent UUID is supplied. The
+    # parity assertion is bidirectional — both sides must agree.
+    p1_flags = {"--incremental", "--parent-code-revision-id"}
+    assert p1_flags <= declared_flags, (
+        f"Dogfood script is missing P1 T2 flags {p1_flags - declared_flags}. "
+        f"Make sure tandemstream/core is at or past the merged "
+        f"P1 packet — the daemon depends on these flags to engage "
+        f"file_memoization.ingest_with_carry_forward [qa:q4]."
+    )
+    # The cold-start argv above does NOT include the P1 flags (correct
+    # — they only appear when parent_code_revision_id is supplied). To
+    # exercise the parent-supplied path against the same dogfood
+    # argparse, build a second argv with a parent UUID and assert it.
+    argv_with_parent = scip_mod.dogfood_ingest_argv(
+        core_repo_path=Path(core_repo_path).expanduser(),
+        org_id="some-uuid",
+        scip_path=Path("/tmp/x.scip"),
+        source_root=Path("/tmp/x"),
+        commit_sha="deadbeef" + "0" * 32,
+        repo_url="https://github.com/tandemstream/core",
+        parent_code_revision_id="11111111-2222-3333-4444-555555555555",
+    )
+    used_flags_with_parent = {
+        tok for tok in argv_with_parent if isinstance(tok, str) and tok.startswith("--")
+    }
+    assert p1_flags <= used_flags_with_parent, (
+        f"Daemon argv with parent_code_revision_id supplied is missing "
+        f"P1 T2 flags {p1_flags - used_flags_with_parent}. "
+        f"Update atlas_shadow/ingest_daemon/scip_builder.py::dogfood_ingest_argv."
+    )
+    # And the parent-supplied argv must STILL be a subset of declared
+    # flags (no daemon-side stray flags the dogfood CLI wouldn't accept).
+    missing_with_parent = used_flags_with_parent - declared_flags
+    assert not missing_with_parent, (
+        f"Worker passes P1 flags the dogfood script does NOT declare: "
+        f"{missing_with_parent}."
     )
 
 
