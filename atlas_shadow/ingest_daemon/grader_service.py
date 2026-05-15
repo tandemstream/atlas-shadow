@@ -5,8 +5,9 @@ This module is the entry point for atlas-shadow's pre-merge grading gate
 across receiver (T1), packet-tag detection (T2), receipt parsing (T3),
 receipt -> Atlas-query translation (T4), doc-anchored resolution (T4a, in
 ``doc_resolver.py``), the existing offline ``grader.grade`` rubric, revision
-pinning (T6), GitHub Checks API (T7), the PR comment generator (T8), and
-the durable artifact writer (T9).
+pinning (T6, helpers in ``state_file`` + ``ledger``), GitHub Checks API
+(T7, in ``gh_check.py``), the PR comment generator (T8, in
+``pr_comment.py``), and the durable artifact writer (T9, here).
 
 Tasks colocated here:
 
@@ -16,18 +17,23 @@ Tasks colocated here:
   * T4 — :func:`translate_receipt_to_query` (CODE-anchored heuristic +
     ``query_hint:`` override + doc-extension routing to T4a).
   * T5 — :func:`run_pr_grading` / :func:`handle_pr_event` (the orchestrator).
-  * T6 — pin lifecycle helpers (:func:`acquire_pin` / :func:`release_pin`).
+  * T9 — :func:`write_grading_artifact` (durable JSON dump).
 
-T4a (doc resolver) lives in a separate module to keep its direct psycopg
-dependency contained.
+T4a (doc resolver) lives in :mod:`atlas_shadow.ingest_daemon.doc_resolver`
+to keep its direct psycopg dependency contained.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import re
-from dataclasses import dataclass, field
+import sys
+import traceback
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 # ---------------------------------------------------------------------------
 # T2 — Packet-tag detection
@@ -465,3 +471,505 @@ def translate_receipt_to_query(receipt: "PacketReceipt"):
         return DocQuery(receipt=receipt)
     tool = _classify_code_tool(receipt)
     return CodeQuery(tool=tool, question=receipt.question, receipt=receipt)
+
+
+# ---------------------------------------------------------------------------
+# T5 — PR grading orchestrator
+# ---------------------------------------------------------------------------
+#
+# `handle_pr_event` is the entry point the receiver hands off to via
+# FastAPI BackgroundTasks (T1). It runs through:
+#
+#   1. Token resolution (GITHUB_ATLAS_SHADOW_TOKEN).
+#   2. PR files fetch -> packet detection (T2).
+#   3. GH check_run create (in_progress).
+#   4. Parent code_revision_id lookup (T6 — ledger.find_by_commit_sha).
+#   5. Pin acquisition (T6 — state_file.acquire_pin).
+#   6. Per-packet: fetch qna_log content (Contents API); parse receipts
+#      (T3); per-receipt translate (T4) -> runner.run_one OR
+#      doc_resolver.resolve_doc_receipt (T4a) -> grader.grade.
+#   7. Build GradingSummary; render PR comment (T8); write artifact (T9).
+#   8. Update GH check_run to completed (success / failure per threshold).
+#   9. Pin release (in finally:).
+#
+# Errors at any step are logged + the check_run is updated to a
+# `neutral` conclusion so PR authors see the gate isn't blocking them
+# silently (D-P2-5: soft-pass on operational errors; hard-fail is reserved
+# for genuine receipt failures below threshold).
+
+from . import gh_check as gh_check_mod  # noqa: E402
+from . import ledger as ledger_mod  # noqa: E402
+from . import pr_comment as pr_comment_mod  # noqa: E402
+from . import state_file as state_file_mod  # noqa: E402
+from . import doc_resolver as doc_resolver_mod  # noqa: E402
+
+
+def _fetch_pr_files(
+    *,
+    repo_full_name: str,
+    pr_number: int,
+    github_token: str,
+    _http: Callable = gh_check_mod.http_request,
+) -> list[dict[str, Any]]:
+    """GET /repos/{owner}/{repo}/pulls/{number}/files (page 1, per_page=100).
+
+    Returns the parsed JSON. v1 doesn't paginate; PRs touching >100 files
+    are rare enough that single-page is OK to start.
+    """
+    url = (
+        f"{gh_check_mod.GITHUB_API_BASE}/repos/{repo_full_name}/pulls/"
+        f"{pr_number}/files?per_page=100"
+    )
+    resp = _http(
+        method="GET",
+        url=url,
+        headers=gh_check_mod._auth_headers(github_token),
+    )
+    if not (200 <= resp.status < 300):
+        raise RuntimeError(
+            f"_fetch_pr_files failed: status={resp.status} body={resp.body[:500]!r}"
+        )
+    data = resp.json() or []
+    return data if isinstance(data, list) else []
+
+
+def _fetch_file_at_ref(
+    *,
+    repo_full_name: str,
+    path: str,
+    ref: str,
+    github_token: str,
+    _http: Callable = gh_check_mod.http_request,
+) -> Optional[str]:
+    """GET /repos/{owner}/{repo}/contents/{path}?ref={sha}. Returns the
+    decoded file body, or None on 404 / non-base64 / unexpected shape.
+    """
+    url = (
+        f"{gh_check_mod.GITHUB_API_BASE}/repos/{repo_full_name}/contents/"
+        f"{path}?ref={ref}"
+    )
+    resp = _http(
+        method="GET",
+        url=url,
+        headers=gh_check_mod._auth_headers(github_token),
+    )
+    if resp.status == 404:
+        return None
+    if not (200 <= resp.status < 300):
+        raise RuntimeError(
+            f"_fetch_file_at_ref failed: status={resp.status} body={resp.body[:500]!r}"
+        )
+    payload = resp.json() or {}
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("encoding") != "base64":
+        # Large files (>1MB) come back without content; we don't grade those.
+        return None
+    raw = payload.get("content") or ""
+    try:
+        return base64.b64decode(raw).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _grade_one_receipt(
+    *,
+    cfg,
+    receipt: PacketReceipt,
+    code_revision_id: Optional[str],
+    repo_full_name: str,
+    _runner_run_one: Optional[Callable] = None,
+    _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
+    _grader_grade: Optional[Callable] = None,
+) -> "pr_comment_mod.ReceiptGradingRow":
+    """Translate, dispatch to runner/doc_resolver, and grade one receipt.
+
+    Injection seams (``_runner_run_one``, ``_doc_resolver``, ``_grader_grade``)
+    keep this testable without standing up Atlas / a real DB / the
+    Anthropic SDK.
+    """
+    translation = translate_receipt_to_query(receipt)
+
+    artifact_id: Optional[str] = None
+    chunk_id: Optional[str] = None
+    revision_binding: Optional[str] = None
+    heading_path: Optional[list[str]] = None
+    warnings: list[str] = []
+    atlas_answer_text = ""
+    tool_label = ""
+
+    if isinstance(translation, DocQuery):
+        # T4a path
+        result = _doc_resolver(
+            receipt,
+            org_id=cfg.continuous_shadow_org_id,
+            repo=repo_full_name,
+            repo_path=cfg.core_repo_path,
+        )
+        atlas_answer_text = result.raw_text or ""
+        tool_label = "doc_resolver"
+        revision_binding = result.revision_binding
+        artifact_id = result.artifact_id
+        chunk_id = result.chunk_id
+        heading_path = result.heading_path
+        warnings = list(result.warnings or [])
+    else:
+        # T4 code path — shell out via runner.run_one.
+        from atlas_shadow import runner as runner_mod  # lazy import (heavy)
+        from atlas_shadow.parser import Receipt as RunnerReceipt
+
+        runner_receipt = RunnerReceipt(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            oracle_excerpt=receipt.oracle_excerpt,
+            oracle_claim=receipt.oracle_claim,
+            source_path=receipt.source_path,
+            source_lines=receipt.source_lines,
+            commit_sha=receipt.source_commit,
+            class_label=None,
+        )
+        run_one = _runner_run_one or runner_mod.run_one
+        shadow_response = run_one(
+            runner_receipt,
+            fixture_id="pr-packet",
+            org_id=cfg.continuous_shadow_org_id,
+            core_repo_path=cfg.core_repo_path,
+            tool=translation.tool,
+            principal_id=cfg.default_principal_id,
+            domain_pack="code",
+            code_revision_id=code_revision_id,
+        )
+        atlas_answer_text = shadow_response.atlas_response.answer_text or ""
+        tool_label = translation.tool
+
+    # Grade
+    from atlas_shadow import grader as grader_mod  # lazy import
+    grade_fn = _grader_grade or grader_mod.grade
+    grading = grade_fn(
+        question=receipt.question,
+        oracle_excerpt=receipt.oracle_excerpt,
+        oracle_claim=receipt.oracle_claim,
+        atlas_answer_text=atlas_answer_text,
+        model=cfg.grader_model,
+    )
+
+    return pr_comment_mod.ReceiptGradingRow(
+        question_id=receipt.question_id,
+        question=receipt.question,
+        grade=grading.grade,
+        confidence=float(grading.confidence),
+        rationale=grading.rationale,
+        tool=tool_label,
+        revision_binding=revision_binding,
+        artifact_id=artifact_id,
+        chunk_id=chunk_id,
+        heading_path=heading_path,
+        warnings=warnings,
+    )
+
+
+def run_pr_grading(
+    cfg,
+    event,
+    *,
+    github_token: str,
+    _fetch_pr_files: Callable = _fetch_pr_files,
+    _fetch_file_at_ref: Callable = _fetch_file_at_ref,
+    _create_check: Callable = gh_check_mod.create_check_in_progress,
+    _update_check: Callable = gh_check_mod.update_check_complete,
+    _post_comment: Callable = pr_comment_mod.post_or_update_pr_comment,
+    _grade_one: Callable = _grade_one_receipt,
+    _now_iso: Callable = lambda: datetime.now(timezone.utc).isoformat(),
+) -> dict[str, Any]:
+    """Run the full pre-merge grading pipeline for one PR event.
+
+    Returns a dict summarizing what happened — useful for tests + log
+    enrichment. NEVER raises; operational failures surface as a
+    ``status='error'`` field with the exception text.
+    """
+    outcome: dict[str, Any] = {
+        "pr_number": event.pr_number,
+        "base_sha": event.base_sha,
+        "head_sha": event.head_sha,
+        "repo_full_name": event.repo_full_name,
+        "summaries": [],
+        "check_run_id": None,
+        "status": "ok",
+        "error": None,
+    }
+    check_run_id: Optional[int] = None
+    pin_acquired = False
+    code_revision_id: Optional[str] = None
+    try:
+        pr_files = _fetch_pr_files(
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+            github_token=github_token,
+        )
+        touched = [
+            f["filename"]
+            for f in pr_files
+            if isinstance(f, dict)
+            and f.get("filename")
+            and f.get("status") != "removed"
+        ]
+        qna_log_paths = detect_packet_qna_log(touched)
+        outcome["packet_paths"] = qna_log_paths
+        if not qna_log_paths:
+            outcome["status"] = "skipped_not_packet"
+            return outcome
+
+        # Create check (in_progress)
+        check = _create_check(
+            repo_full_name=event.repo_full_name,
+            head_sha=event.head_sha,
+            github_token=github_token,
+        )
+        check_run_id = int(check.get("id") or 0) or None
+        outcome["check_run_id"] = check_run_id
+
+        # Resolve parent code_revision_id
+        parent_row = ledger_mod.find_by_commit_sha(cfg.db_path, event.base_sha)
+        if parent_row:
+            cr = parent_row.get("code_revision_id")
+            code_revision_id = str(cr) if cr else None
+        outcome["code_revision_id"] = code_revision_id
+
+        # Acquire pin
+        if code_revision_id:
+            state_file_mod.acquire_pin(
+                cfg.state_file,
+                pr_number=event.pr_number,
+                code_revision_id=code_revision_id,
+            )
+            pin_acquired = True
+
+        # Per-packet grading
+        for qna_log_path in qna_log_paths:
+            body = _fetch_file_at_ref(
+                repo_full_name=event.repo_full_name,
+                path=qna_log_path,
+                ref=event.head_sha,
+                github_token=github_token,
+            )
+            if body is None:
+                continue
+            # Parse via a temp file (parser reads from disk)
+            tmp = cfg.shadow_runs_dir / "_tmp" / f"pr-{event.pr_number}-{Path(qna_log_path).name}"
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(body, encoding="utf-8")
+            try:
+                receipts, threshold_opt = parse_packet_receipts(tmp)
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            threshold = threshold_opt if threshold_opt is not None else 50
+            packet_id = Path(qna_log_path).parent.name
+
+            rows: list[pr_comment_mod.ReceiptGradingRow] = []
+            for receipt in receipts:
+                try:
+                    row = _grade_one(
+                        cfg=cfg,
+                        receipt=receipt,
+                        code_revision_id=code_revision_id,
+                        repo_full_name=event.repo_full_name,
+                    )
+                except Exception as exc:
+                    rows.append(
+                        pr_comment_mod.ReceiptGradingRow(
+                            question_id=receipt.question_id,
+                            question=receipt.question,
+                            grade="no_match",
+                            confidence=0.0,
+                            rationale=f"grading_error: {type(exc).__name__}: {exc}",
+                            tool="error",
+                            warnings=[f"exception:{type(exc).__name__}"],
+                        )
+                    )
+                    continue
+                rows.append(row)
+
+            summary = pr_comment_mod.GradingSummary(
+                packet_id=packet_id,
+                code_revision_id=code_revision_id,
+                base_sha=event.base_sha,
+                threshold_pct=threshold,
+                rows=rows,
+            )
+
+            # Render comment + post
+            body_md = pr_comment_mod.build_comment_markdown(summary)
+            _post_comment(
+                repo_full_name=event.repo_full_name,
+                pr_number=event.pr_number,
+                body=body_md,
+                github_token=github_token,
+            )
+
+            # Write artifact
+            artifact_path = write_grading_artifact(
+                summary=summary,
+                pr_number=event.pr_number,
+                artifact_dir=cfg.shadow_runs_dir,
+                base_sha=event.base_sha,
+                head_sha=event.head_sha,
+                repo_full_name=event.repo_full_name,
+                now_iso=_now_iso,
+            )
+
+            outcome["summaries"].append({
+                "packet_id": packet_id,
+                "passed": summary.passed,
+                "pass_pct": summary.pass_pct,
+                "pass_count": summary.pass_count,
+                "total": summary.total,
+                "artifact_path": str(artifact_path),
+            })
+
+        # Compute overall conclusion across packets — all must pass.
+        all_passed = all(s["passed"] for s in outcome["summaries"]) if outcome["summaries"] else True
+        conclusion = "success" if all_passed else "failure"
+        if check_run_id is not None:
+            _update_check(
+                repo_full_name=event.repo_full_name,
+                check_run_id=check_run_id,
+                conclusion=conclusion,
+                output_title=(
+                    "atlas-shadow grading: "
+                    + ("pass" if all_passed else "fail")
+                ),
+                output_summary=_build_check_summary(outcome),
+                github_token=github_token,
+            )
+        outcome["conclusion"] = conclusion
+        return outcome
+    except Exception as exc:
+        outcome["status"] = "error"
+        outcome["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        # Soft-pass on operational errors (D-P2-5 leans toward not blocking
+        # merges when the grader itself is broken).
+        if check_run_id is not None:
+            try:
+                _update_check(
+                    repo_full_name=event.repo_full_name,
+                    check_run_id=check_run_id,
+                    conclusion="neutral",
+                    output_title="atlas-shadow grading: operational error",
+                    output_summary=f"```\n{outcome['error'][:1500]}\n```",
+                    github_token=github_token,
+                )
+            except Exception as exc2:
+                outcome["error"] += f"\n+ update_check_complete: {exc2}"
+        print(f"[ingest-daemon] run_pr_grading error: {outcome['error']}", file=sys.stderr)
+        return outcome
+    finally:
+        if pin_acquired:
+            try:
+                state_file_mod.release_pin(cfg.state_file, pr_number=event.pr_number)
+            except Exception as exc:
+                print(
+                    f"[ingest-daemon] release_pin failed for PR "
+                    f"#{event.pr_number}: {exc}",
+                    file=sys.stderr,
+                )
+
+
+def _build_check_summary(outcome: dict[str, Any]) -> str:
+    """Render a short Markdown summary for the GH check_run output."""
+    lines = []
+    for s in outcome.get("summaries", []):
+        badge = "PASS" if s.get("passed") else "FAIL"
+        lines.append(
+            f"- `{s['packet_id']}` — **{badge}** "
+            f"({s['pass_count']}/{s['total']} = {s['pass_pct']}%)"
+        )
+    if not lines:
+        return "No packet receipts found in this PR."
+    return "\n".join(lines)
+
+
+def handle_pr_event(cfg, event) -> None:
+    """Receiver-facing entry: invoked by FastAPI BackgroundTasks.
+
+    Resolves the GH token + delegates to :func:`run_pr_grading`. Soft-
+    skips the entire run when the token is absent (logged to stderr so
+    operators notice).
+    """
+    token = gh_check_mod.github_token_from_env()
+    if not token:
+        print(
+            "[ingest-daemon] PR event received but GITHUB_ATLAS_SHADOW_TOKEN "
+            "is unset; skipping grading. Set the token to enable the "
+            "pre-merge grading gate.",
+            file=sys.stderr,
+        )
+        return
+    run_pr_grading(cfg, event, github_token=token)
+
+
+# ---------------------------------------------------------------------------
+# T9 — Durable artifact writer
+# ---------------------------------------------------------------------------
+
+
+def write_grading_artifact(
+    *,
+    summary: "pr_comment_mod.GradingSummary",
+    pr_number: int,
+    artifact_dir: Path,
+    base_sha: str,
+    head_sha: str,
+    repo_full_name: str,
+    now_iso: Optional[Callable[[], str]] = None,
+) -> Path:
+    """Serialize a :class:`GradingSummary` to ``shadow-runs/pr-<n>-<ts>.json``.
+
+    Returns the artifact path. Mirrors the schema the PR comment renders
+    so post-merge analysis can replay either form.
+    """
+    if now_iso is None:
+        now_iso = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
+    artifact_dir = Path(artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = artifact_dir / f"pr-{pr_number}-{ts}.json"
+    payload = {
+        "schema_version": "1.0",
+        "produced_at": now_iso(),
+        "pr_number": pr_number,
+        "repo_full_name": repo_full_name,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "packet_id": summary.packet_id,
+        "code_revision_id": summary.code_revision_id,
+        "threshold_pct": summary.threshold_pct,
+        "pass_count": summary.pass_count,
+        "total": summary.total,
+        "pass_pct": summary.pass_pct,
+        "passed": summary.passed,
+        "rows": [_serialize_row(row) for row in summary.rows],
+    }
+    out_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return out_path
+
+
+def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
+    return {
+        "question_id": row.question_id,
+        "question": row.question,
+        "grade": row.grade,
+        "confidence": float(row.confidence),
+        "rationale": row.rationale,
+        "tool": row.tool,
+        "revision_binding": row.revision_binding,
+        "artifact_id": row.artifact_id,
+        "chunk_id": row.chunk_id,
+        "heading_path": list(row.heading_path) if row.heading_path else None,
+        "warnings": list(row.warnings or []),
+    }

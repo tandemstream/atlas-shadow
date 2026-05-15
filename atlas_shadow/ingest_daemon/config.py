@@ -44,6 +44,14 @@ DEFAULTS: dict[str, Any] = {
     "scip_build_timeout_seconds": 1200,
     "ingest_shell_out_timeout_seconds": 1800,
     "host": "127.0.0.1",
+    # T5 (P2 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1): grader
+    # model + principal_id used by the PR-grading orchestrator. Mirror
+    # the keys read by `atlas_shadow.cli` (which lives at atlas-shadow
+    # repo root and consumes the same ``shadow-config.yaml``). Defaults
+    # match the existing CLI fallback chain.
+    "grader_model": "sonnet",
+    "default_principal_id": None,
+    "shadow_runs_dir": "shadow-runs",
 }
 
 
@@ -69,6 +77,12 @@ class DaemonConfig:
     scip_build_timeout_seconds: int = DEFAULTS["scip_build_timeout_seconds"]
     ingest_shell_out_timeout_seconds: int = DEFAULTS["ingest_shell_out_timeout_seconds"]
     webhook_secret: Optional[str] = None
+    # T5 (P2): PR-grading config. Read from the top-level YAML (mirroring
+    # ``atlas_shadow.cli``), NOT from ``ingest_daemon:`` section, because
+    # these settings are shared with the offline grader.
+    grader_model: str = DEFAULTS["grader_model"]
+    default_principal_id: Optional[str] = DEFAULTS["default_principal_id"]
+    shadow_runs_dir: Path = field(default_factory=lambda: Path(DEFAULTS["shadow_runs_dir"]))
 
 
 def load_config(
@@ -115,6 +129,19 @@ def load_config(
     if not state_file.is_absolute():
         state_file = (base_dir / state_file).resolve()
 
+    # T5 (P2): grader_model + default_principal_id live at the top-level
+    # YAML alongside `continuous_shadow_org_id`. `shadow_runs_dir` is
+    # daemon-owned (under `ingest_daemon:` section) but defaults to the
+    # repo-rooted `shadow-runs/` directory.
+    grader_model = str(raw.get("grader_model") or DEFAULTS["grader_model"])
+    default_principal_id = raw.get("default_principal_id")
+    if default_principal_id is not None:
+        default_principal_id = str(default_principal_id)
+    shadow_runs_dir_raw = merged.get("shadow_runs_dir") or DEFAULTS["shadow_runs_dir"]
+    shadow_runs_dir = Path(str(shadow_runs_dir_raw)).expanduser()
+    if not shadow_runs_dir.is_absolute():
+        shadow_runs_dir = (cfg_path.parent / shadow_runs_dir).resolve()
+
     return DaemonConfig(
         continuous_shadow_org_id=str(org_id),
         core_repo_path=Path(core_repo_path).expanduser(),
@@ -132,4 +159,7 @@ def load_config(
         scip_build_timeout_seconds=int(merged["scip_build_timeout_seconds"]),
         ingest_shell_out_timeout_seconds=int(merged["ingest_shell_out_timeout_seconds"]),
         webhook_secret=os.environ.get("GITHUB_WEBHOOK_SECRET"),
+        grader_model=grader_model,
+        default_principal_id=default_principal_id,
+        shadow_runs_dir=shadow_runs_dir,
     )
