@@ -25,6 +25,9 @@ amendment decision #11: backlog catch-up is operator-driven via
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import time
 import traceback
 from datetime import datetime, timezone
@@ -43,12 +46,143 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def run_doc_ingest(
+    *,
+    core_repo_path: Path,
+    org_id: str,
+    commit_sha: str,
+    repo_url: str,
+    timeout_seconds: int,
+    _subprocess_run: Callable = subprocess.run,
+) -> dict[str, Any]:
+    """Shell out to ``scripts.shadow_ingest_docs`` for the new SHA.
+
+    The doc-side counterpart to ``scip_builder.run_dogfood_ingest``.
+    Reads doc-flavored files (``.md``/``.yaml``/etc., minus ``docs/work/``
+    packet ground truth) via ``git show <commit_sha>:<path>`` and ingests
+    via ``core.ingest.pipeline.ingest`` into the same atlas DB the SCIP
+    path writes to.
+
+    Atlas's file-content-hash memoization ensures repeat runs are cheap:
+    files whose content hasn't changed between commits skip re-embedding.
+    Cold runs (first time atlas has seen these doc bodies) take ~10-15 min
+    per 1000 files; subsequent commits are typically 1-3 min.
+
+    Returns a dict::
+
+        {
+            "status": "succeeded" | "failed" | "timeout" | "unparseable",
+            "files_seen": int | None,
+            "files_ingested": int | None,
+            "artifact_count": int | None,
+            "chunk_count": int | None,
+            "latency_ms": int | None,
+            "error": str | None,
+        }
+
+    Never raises — every failure mode collapses to a dict the caller can
+    log + degrade past. SCIP ingest already succeeded by the time we get
+    here; doc-ingest failure must not invalidate that.
+    """
+    atlas_leaf = core_repo_path / "products" / "tandem" / "packages" / "python" / "atlas"
+    venv_py = atlas_leaf / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        return {
+            "status": "failed",
+            "files_seen": None,
+            "files_ingested": None,
+            "artifact_count": None,
+            "chunk_count": None,
+            "latency_ms": None,
+            "error": f"atlas leaf venv python not found at {venv_py}",
+        }
+    cmd = [
+        str(venv_py), "-m", "scripts.shadow_ingest_docs",
+        "--org-id", org_id,
+        "--commit-sha", commit_sha,
+        "--repo-path", str(core_repo_path),
+        "--repo-url", repo_url,
+        "--quiet",
+    ]
+    started = time.perf_counter()
+    try:
+        proc = _subprocess_run(
+            cmd,
+            cwd=str(atlas_leaf),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "timeout",
+            "files_seen": None,
+            "files_ingested": None,
+            "artifact_count": None,
+            "chunk_count": None,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "error": f"doc ingest timed out after {exc.timeout}s",
+        }
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "failed",
+            "files_seen": None,
+            "files_ingested": None,
+            "artifact_count": None,
+            "chunk_count": None,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    elapsed = int((time.perf_counter() - started) * 1000)
+    # shadow_ingest_docs.py with --quiet emits only the final manifest
+    # JSON to stdout. Exit 0 = full success; exit 2 = soft-pass (partial,
+    # e.g. some artifacts zero-chunked); exit 1 = fatal setup error.
+    if proc.returncode not in (0, 2):
+        return {
+            "status": "failed",
+            "files_seen": None,
+            "files_ingested": None,
+            "artifact_count": None,
+            "chunk_count": None,
+            "latency_ms": elapsed,
+            "error": (
+                f"doc ingest exit={proc.returncode}; "
+                f"stderr={proc.stderr[:500] if proc.stderr else ''!r}"
+            ),
+        }
+    try:
+        manifest = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "unparseable",
+            "files_seen": None,
+            "files_ingested": None,
+            "artifact_count": None,
+            "chunk_count": None,
+            "latency_ms": elapsed,
+            "error": f"could not parse doc-ingest manifest: {exc}",
+        }
+    counts = manifest.get("counts") or {}
+    return {
+        "status": "succeeded" if proc.returncode == 0 else "partial",
+        "files_seen": manifest.get("files_seen"),
+        "files_ingested": manifest.get("files_ingested"),
+        "artifact_count": counts.get("artifact_count"),
+        "chunk_count": counts.get("chunk_count"),
+        "latency_ms": manifest.get("latency_ms") or elapsed,
+        "error": None,
+    }
+
+
 def process_one(
     cfg: DaemonConfig,
     claim: dict[str, Any],
     *,
     _build_scip: Callable = scip_mod.build_scip,
     _run_ingest: Callable = scip_mod.run_dogfood_ingest,
+    _run_doc_ingest: Callable = run_doc_ingest,
     _ensure_clone: Callable = cache_mod.ensure_core_clone,
     _checkout_worktree: Callable = cache_mod.checkout_worktree_at_commit,
     _write_state: Callable = state_mod.write_state,
@@ -156,6 +290,62 @@ def process_one(
             or chunk_stats.get("chunk_count")
             or chunk_stats.get("chunk_refs")
         )
+
+    # P3 follow-up: run the doc-side ingest after SCIP succeeds. Keeps
+    # the doc corpus current with code so doc-anchored receipts resolve
+    # via the precise db_commit_scoped tier instead of falling through
+    # to git_receipt_snapshot. Disabled via shadow-config.yaml
+    # ``ingest_daemon.doc_ingest_enabled: false`` for code-only mode.
+    #
+    # Doc-ingest failure does NOT fail the whole commit — SCIP already
+    # succeeded and atlas has the code data. The failure is logged to
+    # stderr + recorded in counts_json so operators can audit drift.
+    doc_outcome: Optional[dict[str, Any]] = None
+    if cfg.doc_ingest_enabled:
+        try:
+            doc_outcome = _run_doc_ingest(
+                core_repo_path=cfg.core_repo_path,
+                org_id=cfg.continuous_shadow_org_id,
+                commit_sha=commit_sha,
+                repo_url=cfg.repo_url,
+                timeout_seconds=cfg.doc_ingest_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let doc raise
+            doc_outcome = {
+                "status": "error",
+                "files_seen": None,
+                "files_ingested": None,
+                "artifact_count": None,
+                "chunk_count": None,
+                "latency_ms": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if doc_outcome.get("status") not in ("succeeded", "partial"):
+            print(
+                f"[ingest-daemon] WARN: doc ingest "
+                f"status={doc_outcome.get('status')} for {commit_sha} "
+                f"(SCIP succeeded; doc corpus may be stale): "
+                f"{doc_outcome.get('error')}",
+                file=sys.stderr,
+            )
+        elif doc_outcome.get("status") == "partial":
+            # Soft-pass: shadow_ingest_docs returned exit 2 (some
+            # artifacts have zero chunks, or some files errored). Still
+            # useful — log so operator can investigate the gaps.
+            print(
+                f"[ingest-daemon] WARN: doc ingest partial for {commit_sha}: "
+                f"files_ingested={doc_outcome.get('files_ingested')} / "
+                f"files_seen={doc_outcome.get('files_seen')}",
+                file=sys.stderr,
+            )
+
+    # Stash doc-ingest outcome under counts so the ledger row records
+    # both code + doc stats without a schema migration.
+    if doc_outcome is not None:
+        if counts is None:
+            counts = {}
+        counts = {**counts, "doc_ingest": doc_outcome}
+
     latency_ms = int((time.perf_counter() - perf_start) * 1000)
 
     # (a) ledger row
@@ -183,8 +373,6 @@ def process_one(
                 latest_code_revision_id=str(code_revision_id),
             )
         except Exception as exc:
-            import sys
-
             print(
                 f"[ingest-daemon] WARN: state file write failed after successful "
                 f"ingest of {commit_sha} (code_revision_id={code_revision_id}): "
@@ -207,8 +395,6 @@ def process_one(
     try:
         scip_path.unlink(missing_ok=True)
     except OSError as exc:
-        import sys
-
         print(
             f"[ingest-daemon] WARN: SCIP blob delete failed for {scip_path} "
             f"after successful ingest of {commit_sha} "
