@@ -1,0 +1,600 @@
+"""grade_batch — offline batch grading of every packet in core.
+
+Loops over every ``02-qna-log.md`` file in a core checkout, runs the
+same ``grader_service.run_pr_grading`` orchestrator used by the live
+gate (P2 v1) — but with all GitHub side-effects stubbed out — and
+writes one JSON file per packet under
+``shadow-runs/baseline-<date>/packets/<packet>.json`` plus a top-level
+``manifest.json`` + ``summary.md`` for the run.
+
+After the batch finishes, ``overall_summary.regenerate`` is invoked
+to rewrite the cross-run dashboard at
+``shadow-runs/overall-summary.{md,json}`` from every
+``baseline-*/manifest.json`` on disk. That dashboard is the "how is
+atlas doing overall, over time" view — it carries aggregate per-run
+totals + regression callouts (>10pp drops from the previous run).
+
+This module is the offline batch counterpart to the live webhook-
+driven path. The two share ``run_pr_grading`` so grading semantics
+stay identical; only the inputs (synthetic ``PrEvent`` per packet
+vs. real GitHub webhook payload) and outputs (filesystem JSON vs.
+posted commit status + PR comment) differ.
+
+Usage::
+
+    cd <atlas-shadow-checkout>
+    set -a && source <atlas-runtime.env> && set +a
+    set -a && source <core-atlas-leaf>/.env && set +a
+    export GITHUB_WEBHOOK_SECRET="$(cat ~/.atlas-shadow/webhook.secret)"
+    export ATLAS_SHADOW_GRADER_BACKEND=claude_cli
+
+    .venv/bin/python -m atlas_shadow.ingest_daemon \\
+        --config shadow-config.yaml \\
+        grade-packet-batch \\
+        --core-repo-path /Users/ray/tandemstream/core--shadow-runtime \\
+        --commit-sha 2344d204671f3c644ffef5a026eb273824ef77a4 \\
+        --output-dir shadow-runs/baseline-2026-05-15
+
+The script is idempotent: re-running with the same ``--output-dir``
+overwrites that run's artifacts but preserves earlier runs. The
+overall-summary regen is similarly idempotent — it always rebuilds
+from on-disk ``baseline-*/manifest.json`` files.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from . import grader_service as gs
+from . import overall_summary as os_mod
+from .receiver import PrEvent
+
+
+# ─── Synthesizing a PrEvent for a single packet ──────────────────────
+
+
+def _synthesize_pr_event(
+    *,
+    repo_full_name: str,
+    commit_sha: str,
+    packet_qna_log_path: str,
+    pr_number: int = 0,
+) -> PrEvent:
+    """Build a ``PrEvent`` that tells ``run_pr_grading`` "this packet's
+    qna log is the only changed file".
+
+    ``pr_number`` defaults to 0 so any code path that types it into a
+    URL or comment context gets a clearly-synthetic value. The batch
+    never actually posts to GitHub, so the value is cosmetic.
+    """
+    return PrEvent(
+        action="opened",
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+        base_sha=commit_sha,
+        base_ref="main",
+        head_sha=commit_sha,
+        head_ref=f"batch-grade@{commit_sha[:7]}",
+        title=f"[batch grade] {packet_qna_log_path}",
+        html_url=f"file://{packet_qna_log_path}",
+    )
+
+
+def _stub_fetch_pr_files(
+    *,
+    repo_full_name: str,
+    pr_number: int,
+    github_token: str,
+    qna_log_path: str,
+) -> list[dict[str, Any]]:
+    """Replacement for ``grader_service._fetch_pr_files``.
+
+    The real call hits ``GET /repos/.../pulls/{n}/files``. For batch
+    mode there's no real PR — we synthesize the file list as a single
+    modified entry pointing at the packet's qna log. The orchestrator's
+    ``detect_packet_qna_log`` then finds it and proceeds normally.
+    """
+    return [{"filename": qna_log_path, "status": "modified"}]
+
+
+def _noop_post_pending(**kwargs) -> None:
+    """No-op stand-in for GH commit-status pending posts."""
+    return None
+
+
+def _noop_post_final(**kwargs) -> None:
+    """No-op stand-in for GH commit-status final posts."""
+    return None
+
+
+def _noop_post_comment(**kwargs) -> None:
+    """No-op stand-in for GH PR-comment posts."""
+    return None
+
+
+# ─── Walking the core repo for packet qna logs ───────────────────────
+
+
+def discover_packet_qna_logs(
+    core_repo_path: Path,
+    *,
+    packet_glob: str = "**/docs/work/*/02-qna-log.md",
+) -> list[str]:
+    """Return repo-relative paths of every ``02-qna-log.md`` under
+    ``core_repo_path`` matching ``packet_glob`` (default = every packet).
+
+    Pathlib's ``Path.glob`` handles the ``**`` recursive matching.
+    Returns POSIX-style relpaths sorted for determinism.
+    """
+    root = core_repo_path.resolve()
+    matches = []
+    for path in root.glob(packet_glob):
+        if path.is_file():
+            matches.append(path.relative_to(root).as_posix())
+    return sorted(matches)
+
+
+def _packet_slug_from_qna_path(qna_log_path: str) -> str:
+    """Extract the packet slug (the directory name immediately above
+    ``02-qna-log.md``) from a relpath like
+    ``products/.../docs/work/2026-05-14-foo-v1/02-qna-log.md``.
+
+    Used as the per-packet JSON filename and as the packet identifier
+    in the manifest.
+    """
+    parts = Path(qna_log_path).parts
+    # Find "work" segment; slug is one segment after it.
+    try:
+        idx = parts.index("work")
+        return parts[idx + 1]
+    except (ValueError, IndexError):
+        # Fallback: use parent directory name.
+        return Path(qna_log_path).parent.name
+
+
+# ─── Grading one packet ──────────────────────────────────────────────
+
+
+def grade_one_packet(
+    cfg,
+    *,
+    repo_full_name: str,
+    commit_sha: str,
+    qna_log_path: str,
+    github_token: str,
+    _run_pr_grading: Callable = gs.run_pr_grading,
+) -> dict[str, Any]:
+    """Run grading for a single packet's qna log.
+
+    Returns the orchestrator's ``outcome`` dict augmented with
+    ``packet_slug`` and ``packet_qna_log_path`` so the caller can write
+    a self-describing JSON.
+    """
+    event = _synthesize_pr_event(
+        repo_full_name=repo_full_name,
+        commit_sha=commit_sha,
+        packet_qna_log_path=qna_log_path,
+    )
+
+    # Wire the stubbed fetcher so detect_packet_qna_log sees our packet.
+    def _fetch_for_this_packet(**kwargs):
+        return _stub_fetch_pr_files(**kwargs, qna_log_path=qna_log_path)
+
+    outcome = _run_pr_grading(
+        cfg,
+        event,
+        github_token=github_token,
+        _fetch_pr_files=_fetch_for_this_packet,
+        _post_pending=_noop_post_pending,
+        _post_final=_noop_post_final,
+        _post_comment=_noop_post_comment,
+    )
+
+    outcome["packet_slug"] = _packet_slug_from_qna_path(qna_log_path)
+    outcome["packet_qna_log_path"] = qna_log_path
+    return outcome
+
+
+# ─── Serializing one packet's outcome to JSON ────────────────────────
+
+
+def _summary_to_dict(summary) -> dict[str, Any]:
+    """Convert a ``GradingSummary`` to a JSON-serializable dict.
+
+    Calls ``asdict`` on the summary (which handles ``ReceiptGradingRow``
+    children) then adds the derived aggregate fields (pass_count, total,
+    pass_pct, passed) since those are ``@property`` and asdict skips them.
+    """
+    d = asdict(summary)
+    d["pass_count"] = summary.pass_count
+    d["total"] = summary.total
+    d["pass_pct"] = summary.pass_pct
+    d["passed"] = summary.passed
+    return d
+
+
+def write_packet_artifact(
+    outcome: dict[str, Any],
+    output_dir: Path,
+) -> Path:
+    """Write a per-packet JSON under ``output_dir/packets/<slug>.json``.
+
+    Returns the written path. Creates parent dirs as needed.
+    """
+    packets_dir = output_dir / "packets"
+    packets_dir.mkdir(parents=True, exist_ok=True)
+    slug = outcome.get("packet_slug", "unknown-packet")
+    target = packets_dir / f"{slug}.json"
+
+    serializable_outcome = {
+        **outcome,
+        "summaries": [_summary_to_dict(s) for s in outcome.get("summaries", [])],
+    }
+    target.write_text(
+        json.dumps(serializable_outcome, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    return target
+
+
+# ─── Per-run aggregation: manifest.json + summary.md ─────────────────
+
+
+def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum receipts/correct counts across every packet in this run.
+
+    "Correct" mirrors ``GradingSummary.pass_count`` — full_match or
+    partial_match.
+    """
+    total_packets = len(packet_outcomes)
+    total_receipts = 0
+    total_correct = 0
+    per_packet_pct: dict[str, dict[str, Any]] = {}
+    for outcome in packet_outcomes:
+        slug = outcome.get("packet_slug", "unknown")
+        packet_receipts = 0
+        packet_correct = 0
+        for summary in outcome.get("summaries", []):
+            packet_receipts += summary.total
+            packet_correct += summary.pass_count
+        total_receipts += packet_receipts
+        total_correct += packet_correct
+        per_packet_pct[slug] = {
+            "receipts": packet_receipts,
+            "correct": packet_correct,
+            "pct": (round(packet_correct * 100 / packet_receipts, 1)
+                    if packet_receipts else 0.0),
+            "status": outcome.get("status"),
+        }
+    overall_pct = (
+        round(total_correct * 100 / total_receipts, 1) if total_receipts else 0.0
+    )
+    return {
+        "total_packets": total_packets,
+        "total_receipts": total_receipts,
+        "total_correct": total_correct,
+        "overall_pct": overall_pct,
+        "per_packet_pct": per_packet_pct,
+    }
+
+
+def write_manifest(
+    run_name: str,
+    output_dir: Path,
+    *,
+    commit_sha: str,
+    code_revision_id: Optional[str],
+    packet_outcomes: list[dict[str, Any]],
+    started_at: str,
+    finished_at: str,
+    grader_backend: str,
+    grader_model: str,
+) -> Path:
+    """Write ``output_dir/manifest.json`` with this run's summary.
+
+    The cross-run aggregator reads this file (across every
+    ``baseline-*/`` folder) to build ``overall-summary.{md,json}``.
+    """
+    totals = _aggregate_run_totals(packet_outcomes)
+    manifest = {
+        "run_name": run_name,
+        "commit_sha": commit_sha,
+        "code_revision_id": code_revision_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "grader_backend": grader_backend,
+        "grader_model": grader_model,
+        **totals,
+    }
+    target = output_dir / "manifest.json"
+    target.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return target
+
+
+def write_per_run_summary_md(
+    run_name: str,
+    output_dir: Path,
+    *,
+    commit_sha: str,
+    packet_outcomes: list[dict[str, Any]],
+    overall_pct: float,
+    total_receipts: int,
+    total_correct: int,
+) -> Path:
+    """Write a human-readable per-run summary table to
+    ``output_dir/summary.md``. Per-packet rows.
+    """
+    lines = [
+        f"# {run_name}",
+        "",
+        f"- **Commit SHA:** `{commit_sha}`",
+        f"- **Packets graded:** {len(packet_outcomes)}",
+        f"- **Total receipts:** {total_receipts}",
+        f"- **Correct:** {total_correct} ({overall_pct:.1f}%)",
+        "",
+        "## Per-packet results",
+        "",
+        "| Packet | Receipts | Correct | Pct | Status |",
+        "|---|---|---|---|---|",
+    ]
+    # Sort by ascending pct (worst first) — easier to spot problems.
+    rows = []
+    for outcome in packet_outcomes:
+        slug = outcome.get("packet_slug", "unknown")
+        receipts = 0
+        correct = 0
+        for summary in outcome.get("summaries", []):
+            receipts += summary.total
+            correct += summary.pass_count
+        pct = (round(correct * 100 / receipts, 1) if receipts else 0.0)
+        rows.append((pct, slug, receipts, correct, outcome.get("status", "ok")))
+    rows.sort(key=lambda r: r[0])
+    for pct, slug, receipts, correct, status in rows:
+        lines.append(f"| {slug} | {receipts} | {correct} | {pct:.1f}% | {status} |")
+    lines.append("")
+
+    target = output_dir / "summary.md"
+    target.write_text("\n".join(lines), encoding="utf-8")
+    return target
+
+
+# ─── CLI entry point ─────────────────────────────────────────────────
+
+
+def cmd_grade_packet_batch(cfg, args) -> int:
+    """Main entry point invoked by ``entrypoint.cmd_grade_packet_batch``.
+
+    Returns shell exit code: 0 on full success, 2 on partial failure
+    (some packets errored but at least one graded), 1 on fatal setup
+    error.
+    """
+    core_repo_path = Path(args.core_repo_path).resolve()
+    if not core_repo_path.is_dir():
+        print(
+            f"ERROR: --core-repo-path {core_repo_path} is not a directory",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve commit_sha: --commit-sha overrides, else use the daemon's
+    # latest_commit_ingested from the state file (avoids accidentally
+    # grading against a SHA the shadow corpus doesn't reflect).
+    commit_sha = args.commit_sha
+    if not commit_sha:
+        from .state_file import read_state
+
+        state = read_state(cfg.state_file)
+        commit_sha = state.get("latest_commit_ingested") if state else None
+        if not commit_sha:
+            print(
+                "ERROR: --commit-sha not provided and daemon state file has "
+                "no latest_commit_ingested. Run `make ingest-replay COMMIT=...` "
+                "first, or pass --commit-sha explicitly.",
+                file=sys.stderr,
+            )
+            return 1
+
+    qna_logs = discover_packet_qna_logs(core_repo_path, packet_glob=args.packet_glob)
+    if args.limit is not None:
+        qna_logs = qna_logs[: args.limit]
+    if not qna_logs:
+        print(
+            f"ERROR: no qna logs matched {args.packet_glob!r} under {core_repo_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print(json.dumps({
+            "dry_run": True,
+            "core_repo_path": str(core_repo_path),
+            "commit_sha": commit_sha,
+            "packet_glob": args.packet_glob,
+            "packets_matched": len(qna_logs),
+            "packets": qna_logs,
+        }, indent=2))
+        return 0
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_name = output_dir.name
+
+    # Read GitHub token even though we won't post — run_pr_grading still
+    # passes it through to its (stubbed) callbacks, and we want the
+    # stub to never accidentally see "" and degrade behavior. Operators
+    # must export GITHUB_ATLAS_SHADOW_TOKEN regardless.
+    github_token = os.environ.get("GITHUB_ATLAS_SHADOW_TOKEN", "")
+
+    repo_full_name = args.repo_full_name
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    started_perf = time.perf_counter()
+    packet_outcomes: list[dict[str, Any]] = []
+    fatal_setup = 0
+    partial_failures = 0
+
+    for idx, qna_log in enumerate(qna_logs, start=1):
+        slug = _packet_slug_from_qna_path(qna_log)
+        if not args.quiet:
+            print(f"[{idx}/{len(qna_logs)}] grading {slug}...", flush=True)
+        try:
+            outcome = grade_one_packet(
+                cfg,
+                repo_full_name=repo_full_name,
+                commit_sha=commit_sha,
+                qna_log_path=qna_log,
+                github_token=github_token,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
+            partial_failures += 1
+            outcome = {
+                "packet_slug": slug,
+                "packet_qna_log_path": qna_log,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "summaries": [],
+                "base_sha": commit_sha,
+                "head_sha": commit_sha,
+                "pr_number": 0,
+                "repo_full_name": repo_full_name,
+            }
+            print(
+                f"  WARN: {slug} crashed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+        write_packet_artifact(outcome, output_dir)
+        packet_outcomes.append(outcome)
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+    elapsed_ms = round((time.perf_counter() - started_perf) * 1000)
+
+    # Get code_revision_id from any packet's outcome (all packets share it
+    # since base_sha is the same).
+    code_revision_id = None
+    for outcome in packet_outcomes:
+        if outcome.get("code_revision_id"):
+            code_revision_id = outcome["code_revision_id"]
+            break
+
+    grader_backend = os.environ.get("ATLAS_SHADOW_GRADER_BACKEND") or (
+        "anthropic_sdk" if os.environ.get("ANTHROPIC_API_KEY") else "unset"
+    )
+    grader_model = getattr(cfg, "grader_model", "sonnet")
+
+    manifest_path = write_manifest(
+        run_name,
+        output_dir,
+        commit_sha=commit_sha,
+        code_revision_id=code_revision_id,
+        packet_outcomes=packet_outcomes,
+        started_at=started_at,
+        finished_at=finished_at,
+        grader_backend=grader_backend,
+        grader_model=grader_model,
+    )
+    totals = _aggregate_run_totals(packet_outcomes)
+    summary_path = write_per_run_summary_md(
+        run_name,
+        output_dir,
+        commit_sha=commit_sha,
+        packet_outcomes=packet_outcomes,
+        overall_pct=totals["overall_pct"],
+        total_receipts=totals["total_receipts"],
+        total_correct=totals["total_correct"],
+    )
+
+    # Regenerate cross-run dashboard from on-disk manifests.
+    shadow_runs_root = output_dir.parent
+    overall_md_path, overall_json_path = os_mod.regenerate(shadow_runs_root)
+
+    print(
+        f"\nBatch finished in {elapsed_ms}ms.\n"
+        f"  manifest:           {manifest_path}\n"
+        f"  per-run summary:    {summary_path}\n"
+        f"  overall dashboard:  {overall_md_path}\n"
+        f"  overall (json):     {overall_json_path}\n"
+        f"  packets graded:     {totals['total_packets']}\n"
+        f"  total receipts:     {totals['total_receipts']}\n"
+        f"  correct:            {totals['total_correct']} ({totals['overall_pct']:.1f}%)\n"
+    )
+
+    if fatal_setup:
+        return 1
+    if partial_failures:
+        return 2
+    return 0
+
+
+def build_subparser(subparsers) -> argparse.ArgumentParser:
+    """Register the ``grade-packet-batch`` subcommand on the daemon
+    entry point's argparse subparsers."""
+    p = subparsers.add_parser(
+        "grade-packet-batch",
+        help="Offline batch grading of every packet's qna log",
+        description=(
+            "Run the P2 grading pipeline against every packet's "
+            "02-qna-log.md in a core repo checkout, without posting "
+            "anything to GitHub. Writes per-packet JSON + a per-run "
+            "summary + regenerates the cross-run shadow-runs/overall-"
+            "summary dashboard."
+        ),
+    )
+    p.add_argument(
+        "--core-repo-path",
+        required=True,
+        help="Path to a core checkout pinned to --commit-sha (the "
+             "worktree HEAD is read directly to discover qna logs).",
+    )
+    p.add_argument(
+        "--commit-sha",
+        default=None,
+        help="Full 40-char SHA the grading is anchored at. If omitted, "
+             "uses the daemon's latest_commit_ingested from the state file.",
+    )
+    p.add_argument(
+        "--output-dir",
+        required=True,
+        help="Where to write this batch's artifacts (e.g. "
+             "shadow-runs/baseline-2026-05-15).",
+    )
+    p.add_argument(
+        "--packet-glob",
+        default="**/docs/work/*/02-qna-log.md",
+        help="Glob pattern (relative to --core-repo-path) for qna logs. "
+             "Default matches every packet.",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max packets to grade (debug). Default: all matched.",
+    )
+    p.add_argument(
+        "--repo-full-name",
+        default="tandemstream/core",
+        help="repo_full_name to record in the synthetic PrEvent. "
+             "Cosmetic — the batch never posts to GitHub.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List packets that would be graded without running anything.",
+    )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-packet progress lines.",
+    )
+    return p
