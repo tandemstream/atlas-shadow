@@ -1279,9 +1279,11 @@ def test_acquire_pin_preserves_other_pins_under_repeated_writes(daemon_config, s
 
 
 def test_run_pr_grading_skips_non_packet_pr(daemon_config, db_path, tmp_path):
-    """A PR that touches no 02-qna-log.md should NOT create a check_run
-    and NOT post a comment. The orchestrator returns
-    `skipped_not_packet`.
+    """Codex review r7: a PR with no `02-qna-log.md` touched must still
+    get a terminal commit status (state=success, "not a packet PR;
+    nothing to grade") so branch protection rules that mark
+    `atlas-shadow-grading` as required don't permanently block
+    ordinary non-packet PRs. No PR comment is posted (nothing to say).
     """
     from dataclasses import replace
     cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "sr")
@@ -1297,19 +1299,29 @@ def test_run_pr_grading_skips_non_packet_pr(daemon_config, db_path, tmp_path):
                 {"filename": "README.md", "status": "modified"},
             ],
         },
+        f"/statuses/{HEAD_SHA}": {
+            "methods": ["POST"],
+            "body": {"id": 7777, "state": "success"},
+        },
     })
     outcome = grader_service_mod.run_pr_grading(
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
         _fetch_file_at_ref=lambda **kw: pytest.fail("must not fetch contents"),
-        _post_pending=lambda **kw: pytest.fail("must not post pending status"),
-        _post_final=lambda **kw: pytest.fail("must not post final status"),
+        _post_pending=lambda **kw: pytest.fail("must not post pending status for non-packet"),
+        _post_final=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_final_status']).post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: pytest.fail("must not post comment"),
     )
     assert outcome["status"] == "skipped_not_packet"
+    assert outcome["status_state"] == "success_not_packet"
     assert outcome["packet_paths"] == []
-    # No HTTP calls beyond the pulls/files list.
-    assert all("/pulls/" in c["url"] for c in http.calls)
+    # Exactly one final status was posted: state=success, with the
+    # "not a packet PR" description.
+    status_posts = [c for c in http.calls if c["method"] == "POST" and "/statuses/" in c["url"]]
+    assert len(status_posts) == 1
+    posted = json.loads(status_posts[0]["body"])
+    assert posted["state"] == "success"
+    assert "not a packet PR" in posted["description"]
 
 
 def test_run_pr_grading_continues_on_partial_grader_failure(daemon_config, db_path, tmp_path):

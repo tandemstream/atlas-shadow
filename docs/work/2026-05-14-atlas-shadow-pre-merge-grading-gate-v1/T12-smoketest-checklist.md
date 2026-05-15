@@ -51,7 +51,7 @@ covered by the offline AGs.
 | 7 | A JSON artifact lands at `atlas-shadow/shadow-runs/pr-<N>-<ts>.json` matching the comment's grades. | ✓ | ☐ |
 | 8 | Push a second commit to the PR branch (triggers `synchronize`). | New `pending` -> `success`/`failure` commit-status pair posted on the new head SHA; the SAME PR comment is UPDATED (one comment total, not two). | ☐ |
 | 9 | Close (without merging) the PR; open it again (`reopened` action). | Grading re-fires; the same PR comment is updated again. | ☐ |
-| 10 | Open a PR that touches `src/foo.py` but NO `02-qna-log.md`. | No commit status is posted; no PR comment is posted. Daemon log notes `skipped_not_packet`. | ☐ |
+| 10 | Open a PR that touches `src/foo.py` but NO `02-qna-log.md`. | Single soft-pass commit status posted on head SHA: `state=success` with description `not a packet PR; nothing to grade`. NO PR comment. Daemon log notes `skipped_not_packet`. (Branch protection with `atlas-shadow-grading` as a required check is now satisfied for ordinary non-packet PRs — codex r7 fix.) | ☐ |
 | 11 | `make shadow-run FIXTURE=dogfood-v2 LIMIT=1` (AG7 regression check). | Exit 0. | ☐ |
 | 12 | Inspect `.daemon-state.json`: during the in-flight PR (step 3-4 window), the file contains a `pinned_revisions` entry keyed on the PR number. After grading completes (step 5), the pin is GONE. | ✓ | ☐ |
 

@@ -731,7 +731,30 @@ def run_pr_grading(
         qna_log_paths = detect_packet_qna_log(touched)
         outcome["packet_paths"] = qna_log_paths
         if not qna_log_paths:
+            # Codex review r7 (2026-05-15): non-packet PRs must get a
+            # terminal status when `atlas-shadow-grading` is configured
+            # as a required status check on the repo's branch protection
+            # rules — branch protection's "required status" is per-
+            # context globally, not per-changed-files, so an absent
+            # status leaves ordinary PRs unmergeable. Post a soft-pass
+            # `state=success` so non-packet PRs aren't blocked by this
+            # gate. The description makes the no-op grading explicit.
             outcome["status"] = "skipped_not_packet"
+            try:
+                _post_final(
+                    repo_full_name=event.repo_full_name,
+                    head_sha=event.head_sha,
+                    state="success",
+                    description="not a packet PR; nothing to grade",
+                    github_token=github_token,
+                )
+                outcome["status_state"] = "success_not_packet"
+            except Exception as exc:
+                print(
+                    f"[ingest-daemon] WARN: non-packet success status "
+                    f"post failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
             return outcome
 
         # Post pending commit status (signals "grading in flight").
