@@ -374,3 +374,94 @@ def _find_end_of_fenced_block(body_lines: list[str], start: int) -> int:
                 return idx + 1
             in_block = True
     return len(body_lines)
+
+
+# ---------------------------------------------------------------------------
+# T4 — Receipt -> Atlas query translator (code-path heuristic + doc-extension
+# routing to T4a)
+# ---------------------------------------------------------------------------
+
+# Doc-anchored receipts route to T4a (doc_resolver.py) — find_code doesn't
+# emit doc citations today (D-P2-10). Lowercase suffix matched against
+# ``source_ref.path``.
+DOC_EXTENSIONS = frozenset({".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".log"})
+
+# Atlas-query tool names that the runner / workspace_atlas_query CLI accepts.
+_VALID_TOOLS = frozenset({"find_code", "scan_search", "auto"})
+
+
+@dataclass(frozen=True)
+class CodeQuery:
+    """A code-anchored translation routed through ``runner.run_one``.
+
+    The orchestrator (T5) builds the ``workspace run atlas-query`` argv
+    from these fields (plus the daemon's pinned ``code_revision_id``) and
+    consumes the resulting ``ShadowResponse.atlas_response.answer_text``.
+    """
+
+    tool: str  # "find_code" | "scan_search" | "auto"
+    question: str
+    receipt: "PacketReceipt"
+
+
+@dataclass(frozen=True)
+class DocQuery:
+    """A doc-anchored translation routed through T4a doc_resolver.
+
+    The orchestrator hands this to ``doc_resolver.resolve_doc_receipt`` to
+    produce the resolved chunk text the grader compares against the oracle.
+    """
+
+    receipt: "PacketReceipt"
+
+
+def _is_doc_path(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    lower = path.lower()
+    return any(lower.endswith(ext) for ext in DOC_EXTENSIONS)
+
+
+def _classify_code_tool(receipt: "PacketReceipt") -> str:
+    """Pick the Atlas tool for a CODE-anchored receipt.
+
+    Order:
+      1. Per-receipt ``query_hint:`` override (when one of the valid tool
+         names; invalid hints log and fall through).
+      2. ``command_text`` heuristic — ``sed-range`` -> find_code,
+         ``grep``/``rg`` -> scan_search.
+      3. Default: find_code (matches RQ-3's default-Atlas-tool decision).
+    """
+    hint = (receipt.query_hint or "").strip().lower()
+    if hint in _VALID_TOOLS:
+        return hint
+    cmd = (receipt.command_text or "").lower()
+    if "sed-range" in cmd:
+        return "find_code"
+    # Match either the canonical wrapper form (`qa_lookup.sh grep ...`)
+    # or a bare `grep` / `rg` token; tolerate quoting around the verb.
+    if "qa_lookup.sh grep" in cmd or "qa_lookup.sh rg" in cmd:
+        return "scan_search"
+    # Bare grep / rg as the first non-space token.
+    tokens = cmd.split()
+    if tokens and tokens[0] in ("grep", "rg"):
+        return "scan_search"
+    return "find_code"
+
+
+def translate_receipt_to_query(receipt: "PacketReceipt"):
+    """Route a receipt to a CODE-anchored or doc-anchored translation.
+
+    Doc-anchored receipts (extension in :data:`DOC_EXTENSIONS`) return a
+    :class:`DocQuery` regardless of ``query_hint``: T4a is the only path
+    that can resolve doc citations until CodePack v1.1 ships
+    (D-P2-10 + D-P2-14). CODE-anchored receipts return a :class:`CodeQuery`
+    with the tool chosen by :func:`_classify_code_tool`.
+
+    The translator does NOT execute the query — that's the orchestrator's
+    job. Translator output is pure / cacheable.
+    """
+    if _is_doc_path(receipt.source_path):
+        return DocQuery(receipt=receipt)
+    tool = _classify_code_tool(receipt)
+    return CodeQuery(tool=tool, question=receipt.question, receipt=receipt)
