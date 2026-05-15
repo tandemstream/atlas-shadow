@@ -209,6 +209,71 @@ def test_read_file_via_git_show_returns_none_for_missing_path(tmp_path: Path, ca
     assert "git show" in err  # WARN logged so operator can diagnose
 
 
+def _init_repo_with_qna_history(tmp_path: Path) -> tuple[Path, str, str, str, str]:
+    """Build a repo where a packet qna log is created, edited, then
+    left untouched by a later run-head commit.
+
+    Returns (repo, qna_path, created_sha, edited_sha, run_sha).
+    """
+    repo = tmp_path / "historyrepo"
+    repo.mkdir()
+    import subprocess as _sp
+    kw = {"cwd": repo, "check": True, "capture_output": True}
+    _sp.run(["git", "init", "--initial-branch=main", "-q"], **kw)
+    _sp.run(["git", "config", "user.email", "t@e.com"], **kw)
+    _sp.run(["git", "config", "user.name", "T"], **kw)
+
+    qna_path = "docs/work/2026-01-01-history/02-qna-log.md"
+    packet_dir = repo / "docs" / "work" / "2026-01-01-history"
+    packet_dir.mkdir(parents=True)
+    (packet_dir / "02-qna-log.md").write_text("# first\n")
+    _sp.run(["git", "add", qna_path], **kw)
+    _sp.run(["git", "commit", "-m", "create packet", "-q"], **kw)
+    created = _sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                      capture_output=True, text=True, check=True).stdout.strip()
+
+    (packet_dir / "02-qna-log.md").write_text("# second\n")
+    _sp.run(["git", "add", qna_path], **kw)
+    _sp.run(["git", "commit", "-m", "edit packet", "-q"], **kw)
+    edited = _sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                     capture_output=True, text=True, check=True).stdout.strip()
+
+    (repo / "README.md").write_text("# unrelated\n")
+    _sp.run(["git", "add", "README.md"], **kw)
+    _sp.run(["git", "commit", "-m", "unrelated run head", "-q"], **kw)
+    run = _sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                  capture_output=True, text=True, check=True).stdout.strip()
+    return repo, qna_path, created, edited, run
+
+
+def test_resolve_packet_commit_sha_modes(tmp_path: Path):
+    """Historical shadow grading can pin each packet to its own history
+    instead of grading all packets against the latest run commit."""
+    repo, qna_path, created, edited, run = _init_repo_with_qna_history(tmp_path)
+
+    assert gb.resolve_packet_commit_sha(
+        repo, run_commit_sha=run, qna_log_path=qna_path, mode="created"
+    ) == created
+    assert gb.resolve_packet_commit_sha(
+        repo, run_commit_sha=run, qna_log_path=qna_path, mode="latest-change"
+    ) == edited
+    assert gb.resolve_packet_commit_sha(
+        repo, run_commit_sha=run, qna_log_path=qna_path, mode="run-commit"
+    ) == run
+
+
+def test_resolve_packet_commit_sha_falls_back_to_run_commit(tmp_path: Path, capsys):
+    repo, _, _, _, run = _init_repo_with_qna_history(tmp_path)
+    resolved = gb.resolve_packet_commit_sha(
+        repo,
+        run_commit_sha=run,
+        qna_log_path="docs/work/no-such-packet/02-qna-log.md",
+        mode="created",
+    )
+    assert resolved == run
+    assert "falling back to run commit" in capsys.readouterr().err
+
+
 # ───────── discover_packet_qna_logs commit-pinned mode (codex r3) ────
 
 
@@ -464,6 +529,102 @@ def test_cmd_grade_packet_batch_overrides_cfg_paths_for_orchestrator(
     # The original cfg is untouched.
     assert cfg.core_repo_path == yaml_core_path
     assert cfg.shadow_runs_dir == yaml_shadow_runs
+
+
+def test_cmd_grade_packet_batch_uses_packet_specific_history_sha(
+    tmp_path: Path, monkeypatch
+):
+    """The batch run commit is for discovery; each packet's synthetic PR
+    base/head SHA is resolved independently from packet history."""
+    cli_core_path = tmp_path / "cli-core"
+    cli_core_path.mkdir()
+    output_dir = tmp_path / "cli-output" / "baseline-test"
+
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "s.json"),
+        core_repo_path=cli_core_path,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+        continuous_shadow_org_id="org-1",
+    )
+    args = SimpleNamespace(
+        core_repo_path=str(cli_core_path),
+        commit_sha="runsha0000000000000000000000000000000000",
+        output_dir=str(output_dir),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        packet_sha_mode="created",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+    qna_path = "docs/work/2026-01-01-x/02-qna-log.md"
+    packet_sha = "packetsha00000000000000000000000000000000"
+
+    monkeypatch.setattr(gb, "replace", _fake_replace)
+    monkeypatch.setattr(gb, "discover_packet_qna_logs", lambda *a, **kw: [qna_path])
+    monkeypatch.setattr(gb, "resolve_packet_commit_sha", lambda *a, **kw: packet_sha)
+
+    captured = {}
+    def _capture(cfg_passed, **kw):
+        captured["commit_sha"] = kw["commit_sha"]
+        return {
+            "packet_slug": "2026-01-01-x",
+            "packet_qna_log_path": kw["qna_log_path"],
+            "status": "ok",
+            "summaries": [_mk_summary_dict("2026-01-01-x", [("full_match", "q1")])],
+            "code_revision_id": "rev-packet",
+            "base_sha": kw["commit_sha"],
+            "head_sha": kw["commit_sha"],
+            "pr_number": 0,
+            "repo_full_name": kw["repo_full_name"],
+        }
+    monkeypatch.setattr(gb, "grade_one_packet", _capture)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 0
+    assert captured["commit_sha"] == packet_sha
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert manifest["run_commit_sha"] == args.commit_sha
+    assert manifest["packet_sha_mode"] == "created"
+    assert manifest["packet_base_shas"]["2026-01-01-x"] == packet_sha
+    packet_payload = json.loads((output_dir / "packets" / "2026-01-01-x.json").read_text())
+    assert packet_payload["run_commit_sha"] == args.commit_sha
+    assert packet_payload["packet_base_sha"] == packet_sha
+
+
+def test_cmd_grade_packet_batch_dry_run_reports_packet_base_shas(
+    tmp_path: Path, monkeypatch, capsys
+):
+    repo = tmp_path / "core-repo"
+    repo.mkdir()
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "s.json"),
+        core_repo_path=repo,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+    )
+    args = SimpleNamespace(
+        core_repo_path=str(repo),
+        commit_sha="runsha0000000000000000000000000000000000",
+        output_dir=str(tmp_path / "unused"),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        packet_sha_mode="created",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=True,
+        quiet=True,
+    )
+    qna_path = "docs/work/2026-01-01-x/02-qna-log.md"
+    packet_sha = "packetsha00000000000000000000000000000000"
+    monkeypatch.setattr(gb, "discover_packet_qna_logs", lambda *a, **kw: [qna_path])
+    monkeypatch.setattr(gb, "resolve_packet_commit_sha", lambda *a, **kw: packet_sha)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["packet_sha_mode"] == "created"
+    assert payload["packet_base_shas"] == {qna_path: packet_sha}
 
 
 # ───────── _aggregate_run_totals ─────────────────────────────────────

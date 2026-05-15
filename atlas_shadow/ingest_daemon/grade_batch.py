@@ -298,6 +298,63 @@ def _packet_slug_from_qna_path(qna_log_path: str) -> str:
         return Path(qna_log_path).parent.name
 
 
+def resolve_packet_commit_sha(
+    core_repo_path: Path,
+    *,
+    run_commit_sha: str,
+    qna_log_path: str,
+    mode: str,
+    _run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """Resolve the historical SHA used for one packet's synthetic PR.
+
+    ``run_commit_sha`` remains the discovery tree for the batch. The
+    packet's synthetic base/head can be older, which lets shadow grading
+    separate stale-current-HEAD methodology failures from retrieval
+    failures.
+    """
+    if mode == "run-commit":
+        return run_commit_sha
+    if mode not in {"created", "latest-change"}:
+        raise ValueError(f"unknown packet SHA mode: {mode}")
+
+    cmd = ["git", "-C", str(core_repo_path), "log", "--format=%H"]
+    if mode == "created":
+        cmd.append("--diff-filter=A")
+    else:
+        cmd.extend(["-n", "1"])
+    cmd.extend([run_commit_sha, "--", qna_log_path])
+
+    try:
+        proc = _run(cmd, capture_output=True, text=True, check=True, timeout=30)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else ""
+        sys.stderr.write(
+            f"[grade-batch] WARN: could not resolve packet SHA for "
+            f"{qna_log_path} using mode={mode}: {stderr}; falling back "
+            f"to run commit {run_commit_sha}\n"
+        )
+        return run_commit_sha
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"[grade-batch] WARN: packet SHA resolution timed out for "
+            f"{qna_log_path} using mode={mode}; falling back to run commit "
+            f"{run_commit_sha}\n"
+        )
+        return run_commit_sha
+
+    shas = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not shas:
+        sys.stderr.write(
+            f"[grade-batch] WARN: no packet SHA found for {qna_log_path} "
+            f"using mode={mode}; falling back to run commit {run_commit_sha}\n"
+        )
+        return run_commit_sha
+    if mode == "created":
+        return shas[-1]
+    return shas[0]
+
+
 # ─── Grading one packet ──────────────────────────────────────────────
 
 
@@ -506,6 +563,7 @@ def write_manifest(
     finished_at: str,
     grader_backend: str,
     grader_model: str,
+    packet_sha_mode: str = "run-commit",
 ) -> Path:
     """Write ``output_dir/manifest.json`` with this run's summary.
 
@@ -516,6 +574,17 @@ def write_manifest(
     manifest = {
         "run_name": run_name,
         "commit_sha": commit_sha,
+        "run_commit_sha": commit_sha,
+        "packet_sha_mode": packet_sha_mode,
+        "packet_base_shas": {
+            outcome.get("packet_slug", "unknown"): outcome.get("base_sha")
+            for outcome in packet_outcomes
+        },
+        "packet_code_revision_ids": {
+            outcome.get("packet_slug", "unknown"): outcome.get("code_revision_id")
+            for outcome in packet_outcomes
+            if outcome.get("code_revision_id")
+        },
         "code_revision_id": code_revision_id,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -536,6 +605,7 @@ def write_per_run_summary_md(
     output_dir: Path,
     *,
     commit_sha: str,
+    packet_sha_mode: str = "run-commit",
     packet_outcomes: list[dict[str, Any]],
     overall_pct: float,
     total_receipts: int,
@@ -548,6 +618,7 @@ def write_per_run_summary_md(
         f"# {run_name}",
         "",
         f"- **Commit SHA:** `{commit_sha}`",
+        f"- **Packet SHA mode:** `{packet_sha_mode}`",
         f"- **Packets graded:** {len(packet_outcomes)}",
         f"- **Total receipts:** {total_receipts}",
         f"- **Correct:** {total_correct} ({overall_pct:.1f}%)",
@@ -634,14 +705,28 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         )
         return 1
 
+    packet_sha_mode = getattr(args, "packet_sha_mode", "created")
+    packet_commit_shas = {
+        qna_log: resolve_packet_commit_sha(
+            core_repo_path,
+            run_commit_sha=commit_sha,
+            qna_log_path=qna_log,
+            mode=packet_sha_mode,
+        )
+        for qna_log in qna_logs
+    }
+
     if args.dry_run:
         print(json.dumps({
             "dry_run": True,
             "core_repo_path": str(core_repo_path),
             "commit_sha": commit_sha,
+            "run_commit_sha": commit_sha,
+            "packet_sha_mode": packet_sha_mode,
             "packet_glob": args.packet_glob,
             "packets_matched": len(qna_logs),
             "packets": qna_logs,
+            "packet_base_shas": packet_commit_shas,
         }, indent=2))
         return 0
 
@@ -693,13 +778,18 @@ def cmd_grade_packet_batch(cfg, args) -> int:
 
     for idx, qna_log in enumerate(qna_logs, start=1):
         slug = _packet_slug_from_qna_path(qna_log)
+        packet_commit_sha = packet_commit_shas.get(qna_log, commit_sha)
         if not args.quiet:
-            print(f"[{idx}/{len(qna_logs)}] grading {slug}...", flush=True)
+            print(
+                f"[{idx}/{len(qna_logs)}] grading {slug} "
+                f"@ {packet_commit_sha[:12]}...",
+                flush=True,
+            )
         try:
             outcome = grade_one_packet(
                 batch_cfg,
                 repo_full_name=repo_full_name,
-                commit_sha=commit_sha,
+                commit_sha=packet_commit_sha,
                 qna_log_path=qna_log,
                 github_token=github_token,
                 core_repo_path=core_repo_path,
@@ -712,8 +802,11 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
                 "summaries": [],
-                "base_sha": commit_sha,
-                "head_sha": commit_sha,
+                "base_sha": packet_commit_sha,
+                "head_sha": packet_commit_sha,
+                "run_commit_sha": commit_sha,
+                "packet_base_sha": packet_commit_sha,
+                "packet_sha_mode": packet_sha_mode,
                 "pr_number": 0,
                 "repo_full_name": repo_full_name,
             }
@@ -754,6 +847,9 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                         file=sys.stderr,
                     )
 
+        outcome.setdefault("run_commit_sha", commit_sha)
+        outcome.setdefault("packet_base_sha", packet_commit_sha)
+        outcome.setdefault("packet_sha_mode", packet_sha_mode)
         write_packet_artifact(outcome, output_dir)
         packet_outcomes.append(outcome)
 
@@ -783,12 +879,14 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         finished_at=finished_at,
         grader_backend=grader_backend,
         grader_model=grader_model,
+        packet_sha_mode=packet_sha_mode,
     )
     totals = _aggregate_run_totals(packet_outcomes)
     summary_path = write_per_run_summary_md(
         run_name,
         output_dir,
         commit_sha=commit_sha,
+        packet_sha_mode=packet_sha_mode,
         packet_outcomes=packet_outcomes,
         overall_pct=totals["overall_pct"],
         total_receipts=totals["total_receipts"],
@@ -842,6 +940,18 @@ def build_subparser(subparsers) -> argparse.ArgumentParser:
         default=None,
         help="Full 40-char SHA the grading is anchored at. If omitted, "
              "uses the daemon's latest_commit_ingested from the state file.",
+    )
+    p.add_argument(
+        "--packet-sha-mode",
+        choices=["created", "latest-change", "run-commit"],
+        default="created",
+        help=(
+            "How to choose each packet's synthetic PR base/head SHA. "
+            "'created' uses the commit where that packet's 02-qna-log.md "
+            "was added; 'latest-change' uses the latest commit touching "
+            "the qna log at or before --commit-sha; 'run-commit' preserves "
+            "legacy behavior and grades every packet at --commit-sha."
+        ),
     )
     p.add_argument(
         "--output-dir",
