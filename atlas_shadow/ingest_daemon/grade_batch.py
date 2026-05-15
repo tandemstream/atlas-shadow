@@ -49,7 +49,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -649,6 +649,20 @@ def cmd_grade_packet_batch(cfg, args) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_name = output_dir.name
 
+    # Codex r5 P2 fix: build a batch-specific cfg with the operator's
+    # paths overridden. Without this, when --core-repo-path or
+    # --output-dir differs from shadow-config.yaml, the orchestrator
+    # would still use cfg.core_repo_path (atlas runner / doc fallback)
+    # and cfg.shadow_runs_dir (per-packet artifact writes) — meaning
+    # we'd discover qna logs from /A but grade against /B and write
+    # artifacts to /B. Raw orchestrator artifacts go in a subdir of
+    # output_dir so they don't clutter the operator-facing files.
+    batch_cfg = replace(
+        cfg,
+        core_repo_path=core_repo_path,
+        shadow_runs_dir=output_dir / "artifacts",
+    )
+
     # Read GitHub token even though we won't post — run_pr_grading still
     # passes it through to its (stubbed) callbacks, and we want the
     # stub to never accidentally see "" and degrade behavior. Operators
@@ -669,7 +683,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
             print(f"[{idx}/{len(qna_logs)}] grading {slug}...", flush=True)
         try:
             outcome = grade_one_packet(
-                cfg,
+                batch_cfg,
                 repo_full_name=repo_full_name,
                 commit_sha=commit_sha,
                 qna_log_path=qna_log,

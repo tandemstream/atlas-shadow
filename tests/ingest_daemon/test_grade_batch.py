@@ -292,6 +292,20 @@ def test_glob_to_regex_handles_recursive_globs(pattern, path, expected):
 # ───────── ok-but-no-receipts treatment (codex r3 defensive) ─────────
 
 
+def _fake_replace(cfg_obj, **overrides):
+    """SimpleNamespace-aware stand-in for ``dataclasses.replace``.
+
+    Used because the cmd-level tests pass ``SimpleNamespace`` as cfg
+    (since DaemonConfig has lots of required fields). The real
+    ``dataclasses.replace`` rejects non-dataclass inputs; this version
+    just builds a new namespace with the overrides applied.
+    """
+    new = SimpleNamespace(**vars(cfg_obj))
+    for k, v in overrides.items():
+        setattr(new, k, v)
+    return new
+
+
 def _run_cmd_with_outcome(tmp_path: Path, monkeypatch, fake_outcome: dict) -> tuple[int, dict]:
     """Helper: invoke cmd_grade_packet_batch with a single packet whose
     grade_one_packet result is controlled by ``fake_outcome``. Returns
@@ -299,7 +313,12 @@ def _run_cmd_with_outcome(tmp_path: Path, monkeypatch, fake_outcome: dict) -> tu
     repo = tmp_path / "core-repo"
     repo.mkdir()
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
-    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "s.json"))
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "s.json"),
+        core_repo_path=repo,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+    )
     args = SimpleNamespace(
         core_repo_path=str(repo),
         commit_sha="deadbeef0000000000000000000000000000000",
@@ -310,6 +329,7 @@ def _run_cmd_with_outcome(tmp_path: Path, monkeypatch, fake_outcome: dict) -> tu
         dry_run=False,
         quiet=True,
     )
+    monkeypatch.setattr(gb, "replace", _fake_replace)
     monkeypatch.setattr(
         gb, "discover_packet_qna_logs",
         lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
@@ -372,6 +392,74 @@ def test_cmd_grade_packet_batch_accepts_ok_with_any_receipts(
     })
     assert rc == 0
     assert manifest["per_packet_pct"]["2026-01-01-x"]["status"] == "ok"
+
+
+def test_cmd_grade_packet_batch_overrides_cfg_paths_for_orchestrator(
+    tmp_path: Path, monkeypatch
+):
+    """Codex r5 P2: the batch must pass a cfg with core_repo_path and
+    shadow_runs_dir overridden to the operator's args, not the YAML
+    defaults — otherwise the orchestrator grades against the wrong
+    checkout and writes artifacts outside --output-dir."""
+    yaml_core_path = tmp_path / "yaml-core"
+    yaml_core_path.mkdir()
+    yaml_shadow_runs = tmp_path / "yaml-shadow-runs"
+    yaml_shadow_runs.mkdir()
+
+    cli_core_path = tmp_path / "cli-core"
+    cli_core_path.mkdir()
+    cli_output_dir = tmp_path / "cli-output" / "baseline-test"
+
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "s.json"),
+        # YAML-derived defaults; the batch should NOT use these.
+        core_repo_path=yaml_core_path,
+        shadow_runs_dir=yaml_shadow_runs,
+        continuous_shadow_org_id="org-1",
+    )
+    args = SimpleNamespace(
+        core_repo_path=str(cli_core_path),
+        commit_sha="deadbeef0000000000000000000000000000000",
+        output_dir=str(cli_output_dir),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+    monkeypatch.setattr(
+        gb, "discover_packet_qna_logs",
+        lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
+    )
+
+    # SimpleNamespace doesn't work with dataclasses.replace, so use the
+    # shared `_fake_replace` helper defined at module top.
+    monkeypatch.setattr(gb, "replace", _fake_replace)
+
+    captured_cfg = {}
+    def _capture(cfg_passed, **kw):
+        captured_cfg["cfg"] = cfg_passed
+        return {
+            "packet_slug": "2026-01-01-x",
+            "packet_qna_log_path": kw["qna_log_path"],
+            "status": "ok",
+            "summaries": [_mk_summary_dict("2026-01-01-x", [("full_match", "q1")])],
+            "code_revision_id": "rev-1",
+            "base_sha": kw["commit_sha"], "head_sha": kw["commit_sha"],
+            "pr_number": 0, "repo_full_name": kw["repo_full_name"],
+        }
+    monkeypatch.setattr(gb, "grade_one_packet", _capture)
+
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 0
+    # The cfg passed to grade_one_packet has the CLI paths, not the YAML.
+    cfg_used = captured_cfg["cfg"]
+    assert cfg_used.core_repo_path == cli_core_path
+    assert cfg_used.shadow_runs_dir == cli_output_dir.resolve() / "artifacts"
+    # The original cfg is untouched.
+    assert cfg.core_repo_path == yaml_core_path
+    assert cfg.shadow_runs_dir == yaml_shadow_runs
 
 
 # ───────── _aggregate_run_totals ─────────────────────────────────────
@@ -617,7 +705,12 @@ def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, m
 
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
 
-    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "state.json"),
+        core_repo_path=core_repo,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+    )
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
         commit_sha="abcdef0000000000000000000000000000000",
@@ -629,6 +722,7 @@ def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, m
         quiet=True,
     )
 
+    monkeypatch.setattr(gb, "replace", _fake_replace)
     # Stub the commit-pinned discovery so we don't need a real git repo.
     monkeypatch.setattr(
         gb, "discover_packet_qna_logs",
@@ -660,7 +754,12 @@ def test_cmd_grade_packet_batch_succeeds_when_all_packets_ok(tmp_path: Path, mon
 
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
 
-    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "state.json"),
+        core_repo_path=core_repo,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+    )
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
         commit_sha="abcdef0000000000000000000000000000000",
@@ -672,6 +771,7 @@ def test_cmd_grade_packet_batch_succeeds_when_all_packets_ok(tmp_path: Path, mon
         quiet=True,
     )
 
+    monkeypatch.setattr(gb, "replace", _fake_replace)
     monkeypatch.setattr(
         gb, "discover_packet_qna_logs",
         lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
@@ -704,7 +804,12 @@ def test_cmd_grade_packet_batch_counts_raised_exceptions_too(tmp_path: Path, mon
     core_repo = tmp_path / "core-repo"
     core_repo.mkdir()
 
-    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
+    cfg = SimpleNamespace(
+        grader_model="sonnet",
+        state_file=str(tmp_path / "state.json"),
+        core_repo_path=core_repo,
+        shadow_runs_dir=tmp_path / "yaml-shadow-runs",
+    )
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
         commit_sha="abcdef0000000000000000000000000000000",
@@ -716,6 +821,7 @@ def test_cmd_grade_packet_batch_counts_raised_exceptions_too(tmp_path: Path, mon
         quiet=True,
     )
 
+    monkeypatch.setattr(gb, "replace", _fake_replace)
     monkeypatch.setattr(
         gb, "discover_packet_qna_logs",
         lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
