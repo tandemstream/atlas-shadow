@@ -269,12 +269,15 @@ def warn_if_backlog(
     core_clone = cfg.cache_dir / "core"
     if not (core_clone / ".git").exists():
         return None
-    # Refresh remote first
+    # Refresh remote first. §13 subprocess discipline: timeouts on every
+    # subprocess call — pre-existing D5 calls in this function gained
+    # explicit timeouts as part of P2's acceptance gates (§7 audit).
     _subprocess_run(
         ["git", "fetch", "--quiet", "origin", "main"],
         cwd=str(core_clone),
         capture_output=True,
         text=True,
+        timeout=120,
         check=False,
     )
     proc = _subprocess_run(
@@ -282,6 +285,7 @@ def warn_if_backlog(
         cwd=str(core_clone),
         capture_output=True,
         text=True,
+        timeout=30,
         check=False,
     )
     if proc.returncode != 0:

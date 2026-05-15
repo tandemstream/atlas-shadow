@@ -102,11 +102,16 @@ _SUB_BULLET_RE = re.compile(
 # under the receipt's bullet list — see `qna_receipts.py` §8).
 _CODE_FENCE_RE = re.compile(r"^\s*```")
 
-# The threshold header — accept either `**Grading threshold pct:** N` or
-# a raw `grading_threshold_pct: N` line. Anywhere before the first `## `
-# section heading (preamble convention; not a frontmatter requirement).
+# The threshold header — accept any of:
+#   grading_threshold_pct: 60
+#   **grading_threshold_pct:** 60     (colon inside bold)
+#   **grading_threshold_pct**: 60     (colon outside bold)
+#   Grading threshold pct: 60         (spaced / capitalized)
+# Anywhere before the first `## ` section heading (preamble convention;
+# not a frontmatter requirement). We strip the bold markers first so the
+# regex doesn't have to enumerate every order.
 _THRESHOLD_HEADER_RE = re.compile(
-    r"^\s*(?:\*\*)?grading[ _-]threshold[ _-]pct(?:\*\*)?\s*[:=]\s*(?P<value>\d{1,3})\s*$",
+    r"^\s*grading[ _-]threshold[ _-]pct\s*:\s*(?P<value>\d{1,3})\s*$",
     re.IGNORECASE,
 )
 
@@ -193,7 +198,10 @@ def _parse_threshold_header(lines: list[str]) -> Optional[int]:
         stripped = raw.lstrip()
         if stripped.startswith("## "):
             break
-        m = _THRESHOLD_HEADER_RE.match(raw)
+        # Strip Markdown bold/italic markers so `**grading_threshold_pct:** 60`
+        # and `grading_threshold_pct: 60` both match.
+        cleaned = re.sub(r"\*+", "", raw).strip()
+        m = _THRESHOLD_HEADER_RE.match(cleaned)
         if m:
             try:
                 value = int(m.group("value"))

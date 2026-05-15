@@ -140,6 +140,7 @@ def cmd_replay(cfg: DaemonConfig, *, commit: str = None, from_sha: str = None) -
             cwd=str(core_clone),
             capture_output=True,
             text=True,
+            timeout=120,
             check=False,
         )
         if proc.returncode != 0:
