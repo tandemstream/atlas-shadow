@@ -4,16 +4,13 @@
 # in Python code — this file is the single source of truth.
 
 # Default-mode target. Atlas-shadow queries Atlas under this org id (no
-# ingestion on the critical path). Per Phase 2 amendment 3, this is
-# pinned-but-stale: the dogfood org at commit 87aa9fa. A future
-# continuous-ingest packet will maintain a separate org with real-time
-# ingestion.
+# ingestion on the critical path).
 #
-# Local dev note: the brief named "af6ef504-7492-4dbb-99cb-9437141bd029"
-# as the blessed dogfood UUID (from outputs/blessed/atlas_dogfood/
-# pass_a_v2_results.json), but the locally-ingested instance uses a
-# different UUID. Override per environment.
-continuous_shadow_org_id: "3ec689a0-678b-47ed-af17-a72e5adbfad8"
+# 2026-05-15: repointed at the freshly-created `shadow_main` org which
+# will be continuously kept current via the ingest daemon (D5) +
+# pre-merge grading gate (P2 v1). Successor to the 87aa9fa-pinned
+# dogfood_v2 org (`3ec689a0-...`) which is now historical.
+continuous_shadow_org_id: "36a5bde2-9de3-4278-b18c-1e2da1916034"
 
 # Optional template org id for out-of-band ingest setup. If unset, the D4
 # ingester creates a fresh org via `workspace run org-create NAME=<auto>`.
@@ -22,7 +19,11 @@ one_off_template_org_id: null
 # Path to a working tandemstream/core checkout with the Atlas venv
 # bootstrapped (`workspace up` from the Atlas leaf has been run). The
 # runner shells out from `<core_repo_path>/products/tandem/packages/python/atlas`.
-core_repo_path: "/Users/ray/tandemstream/core--atlas"
+#
+# 2026-05-15: dedicated worktree pinned to origin/main for shadow-mode
+# bringup (kept clean — the daemon's worker does `git fetch` + checks
+# out commits by SHA, so this worktree should not be used for editing).
+core_repo_path: "/Users/ray/tandemstream/core--shadow-runtime"
 
 # LLM-as-judge model. With the Anthropic SDK backend, reads
 # ANTHROPIC_API_KEY from the environment. When the grader falls back to
@@ -40,12 +41,12 @@ default_principal_id: "00000000-0000-4000-8000-000000000222"
 
 # Pinned code revision id for the continuous shadow org (optional). When
 # set, the runner passes it as --code-revision-id to find_code/scan_search.
-# Resolved by the dogfood ingest script for the commit 87aa9fa.
 #
-# When the ingest daemon (D5) is running, .daemon-state.json overrides
-# this key with a fresher code_revision_id; the runner falls back to this
-# value when the state file is absent.
-continuous_shadow_code_revision_id: "fe98af79-23a7-4718-bae4-fa3f349878c8"
+# 2026-05-15: cleared during shadow_main repointing. The ingest daemon
+# (D5) will populate .daemon-state.json on first successful ingest of
+# origin/main, and the runner will read code_revision_id from there.
+# Leave this null until/unless we want a static fallback.
+continuous_shadow_code_revision_id: null
 
 # --- Continuous-ingest daemon (D5) settings -------------------------------
 #
