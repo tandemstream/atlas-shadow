@@ -52,6 +52,7 @@ def process_one(
     _ensure_clone: Callable = cache_mod.ensure_core_clone,
     _checkout_worktree: Callable = cache_mod.checkout_worktree_at_commit,
     _write_state: Callable = state_mod.write_state,
+    _read_state: Callable = state_mod.read_state,
 ) -> dict[str, Any]:
     """Process one claimed queue row end-to-end.
 
@@ -97,6 +98,18 @@ def process_one(
             timeout_seconds=cfg.scip_build_timeout_seconds,
         )
         scip_size = scip_path.stat().st_size if scip_path.exists() else None
+        # T2 (P1, packet 2026-05-14-atlas-shadow-substrate-enablers-v1):
+        # read the prior ingest's code_revision_id from the daemon state
+        # file and thread it through to the dogfood CLI as
+        # --parent-code-revision-id. Atlas's ingest_scip_upload then
+        # dispatches to file_memoization.ingest_with_carry_forward for
+        # unchanged files. Cold start (no state file) → parent stays
+        # None → daemon's first ingest is a full ingest (byte-identical
+        # to pre-P1 behavior).
+        prior_state = _read_state(cfg.state_file)
+        parent_code_revision_id: Optional[str] = None
+        if isinstance(prior_state, dict):
+            parent_code_revision_id = prior_state.get("latest_code_revision_id")
         ingest_payload = _run_ingest(
             core_repo_path=cfg.core_repo_path,
             org_id=cfg.continuous_shadow_org_id,
@@ -104,6 +117,7 @@ def process_one(
             source_root=source_root,
             commit_sha=commit_sha,
             repo_url=cfg.repo_url,
+            parent_code_revision_id=parent_code_revision_id,
             timeout_seconds=cfg.ingest_shell_out_timeout_seconds,
         )
     except Exception as exc:
@@ -181,6 +195,27 @@ def process_one(
 
     # (c) queue row succeeded
     queue_mod.mark_terminal(cfg.db_path, queue_id, status="succeeded")
+
+    # T3 (P1, packet 2026-05-14-atlas-shadow-substrate-enablers-v1):
+    # SCIP-blob janitor — delete the on-disk blob after a successful
+    # ingest to keep disk usage bounded. ~48 MB/commit; without this,
+    # the daemon's cache_dir/scip/ grows linearly with commit count.
+    # Atlas has the data; the blob is only useful for debugging an
+    # ingest failure (and we don't reach this branch on failure — the
+    # failure branch above returns early and skips this cleanup, so
+    # the blob is naturally retained for inspection per D-P1-4).
+    try:
+        scip_path.unlink(missing_ok=True)
+    except OSError as exc:
+        import sys
+
+        print(
+            f"[ingest-daemon] WARN: SCIP blob delete failed for {scip_path} "
+            f"after successful ingest of {commit_sha} "
+            f"(code_revision_id={code_revision_id}): "
+            f"{type(exc).__name__}: {exc}. Continuing — Atlas has the data.",
+            file=sys.stderr,
+        )
 
     return {
         "status": "succeeded",

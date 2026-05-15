@@ -134,6 +134,7 @@ def dogfood_ingest_argv(
     source_root: Path,
     commit_sha: str,
     repo_url: str,
+    parent_code_revision_id: str | None = None,
 ) -> list[str]:
     """Assemble the argv for the dogfood ingest CLI subprocess.
 
@@ -143,6 +144,8 @@ def dogfood_ingest_argv(
         --source-root <path>
         --commit-sha <40-char-hex>     (v2 follow-on, core PR #209)
         --repo-url <https://...>       (v2 follow-on, core PR #209)
+        --incremental                  (P1 T2, core PR #244 follow-on)
+        --parent-code-revision-id <uuid>   (P1 T2, core PR #244 follow-on)
 
     ``--commit-sha`` + ``--repo-url`` were added so the daemon can drive
     Atlas's idempotency cache key
@@ -153,6 +156,15 @@ def dogfood_ingest_argv(
     regardless of which core SHA the daemon actually drove — proof of
     mechanics but not of fresh-per-commit semantics. See D5 postmortem
     § "One semantic gotcha worth surfacing for v2".
+
+    ``--incremental`` + ``--parent-code-revision-id`` (P1 T2, packet
+    ``2026-05-14-atlas-shadow-substrate-enablers-v1``) are passed
+    together so ``ingest_scip_upload`` dispatches to
+    ``file_memoization.ingest_with_carry_forward`` and unchanged files
+    are carried forward from the parent revision. ``--incremental`` is
+    emitted only when ``parent_code_revision_id`` is non-None — cold
+    starts (no prior state file) and unknown-parent paths fall through
+    to the full-ingest default.
 
     ``INDEXER_VERSION`` and ``PACK_BUNDLE_REVISION`` remain module-level
     constants in the dogfood script — not CLI flags — because the
@@ -165,7 +177,7 @@ def dogfood_ingest_argv(
     (amendment decision #10).
     """
     venv_py = atlas_venv_python(core_repo_path)
-    return [
+    argv = [
         str(venv_py),
         "-m",
         "scripts.dogfood_v2_smoketest_ingest_code",
@@ -180,6 +192,13 @@ def dogfood_ingest_argv(
         "--repo-url",
         repo_url,
     ]
+    if parent_code_revision_id:
+        argv.extend([
+            "--incremental",
+            "--parent-code-revision-id",
+            str(parent_code_revision_id),
+        ])
+    return argv
 
 
 def run_dogfood_ingest(
@@ -190,6 +209,7 @@ def run_dogfood_ingest(
     source_root: Path,
     commit_sha: str,
     repo_url: str,
+    parent_code_revision_id: str | None = None,
     timeout_seconds: int = 1800,
     _subprocess_run: Callable = subprocess.run,
 ) -> dict[str, Any]:
@@ -204,9 +224,18 @@ def run_dogfood_ingest(
     flags so each distinct queue row produces a distinct Atlas
     ``code_revision_id`` (rather than cache-hitting the dogfood pin).
 
+    ``parent_code_revision_id`` (P1 T2, packet ``2026-05-14-atlas-shadow-
+    substrate-enablers-v1``) is the prior ingest's ``code_revision_id``
+    (read by the worker from ``state_file.read_state``). When non-None,
+    ``--incremental --parent-code-revision-id <uuid>`` is appended to the
+    argv and Atlas's carry-forward path engages. When None (cold start
+    / first ingest after state-file reset), the dogfood CLI defaults to
+    full ingest — byte-identical to v1 behavior.
+
     Returns the parsed JSON payload (``org_id``, ``commit_sha``,
     ``code_revision_id``, ``latency_ms``, ``chunk_stats``, ``counts``,
-    etc.). Raises ``RuntimeError`` on non-zero exit / parse failure.
+    ``incremental``, ``parent_shas``). Raises ``RuntimeError`` on
+    non-zero exit / parse failure.
     """
     leaf = atlas_leaf(core_repo_path)
     venv_py = atlas_venv_python(core_repo_path)
@@ -221,6 +250,7 @@ def run_dogfood_ingest(
         source_root=source_root,
         commit_sha=commit_sha,
         repo_url=repo_url,
+        parent_code_revision_id=parent_code_revision_id,
     )
     try:
         proc = _subprocess_run(
