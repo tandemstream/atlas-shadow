@@ -122,6 +122,31 @@ def get_by_commit_sha(db_path: Path, commit_sha: str) -> list[dict[str, Any]]:
         return [_row_to_dict(r) for r in cur.fetchall()]
 
 
+def find_by_commit_sha(db_path: Path, commit_sha: str) -> Optional[dict[str, Any]]:
+    """Most-recent SUCCEEDED ledger row for ``commit_sha``, or None.
+
+    Added 2026-05-15 for P2 T6. The PR grader passes ``PR.base.sha`` and
+    needs the parent commit's ``code_revision_id`` so the Atlas query runs
+    against the pre-merge revision (D-P2-3). Differs from
+    :func:`get_by_commit_sha` in that it filters to ``status='succeeded'``
+    and returns a single dict (not a list).
+    """
+    with queue_mod.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT * FROM ingest_ledger
+             WHERE commit_sha=? AND status='succeeded'
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (commit_sha.lower(),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_dict(row)
+
+
 def _row_to_dict(row) -> dict[str, Any]:
     d = {k: row[k] for k in row.keys()}
     if d.get("counts_json"):
