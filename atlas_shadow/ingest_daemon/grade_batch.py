@@ -705,7 +705,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         )
         return 1
 
-    packet_sha_mode = getattr(args, "packet_sha_mode", "created")
+    packet_sha_mode = getattr(args, "packet_sha_mode", "run-commit")
     packet_commit_shas = {
         qna_log: resolve_packet_commit_sha(
             core_repo_path,
@@ -944,13 +944,22 @@ def build_subparser(subparsers) -> argparse.ArgumentParser:
     p.add_argument(
         "--packet-sha-mode",
         choices=["created", "latest-change", "run-commit"],
-        default="created",
+        default="run-commit",
         help=(
             "How to choose each packet's synthetic PR base/head SHA. "
+            "'run-commit' (default) grades every packet at --commit-sha — "
+            "fast, efficient, and matches the documented baseline workflow "
+            "where only the latest commit is in the ledger. "
             "'created' uses the commit where that packet's 02-qna-log.md "
             "was added; 'latest-change' uses the latest commit touching "
-            "the qna log at or before --commit-sha; 'run-commit' preserves "
-            "legacy behavior and grades every packet at --commit-sha."
+            "the qna log at or before --commit-sha. The historical modes "
+            "require EVERY resolved per-packet SHA to be in the daemon's "
+            "ingest ledger; otherwise the orchestrator's I2 invariant "
+            "soft-passes each unindexed packet as `revision_not_indexed`. "
+            "Pre-ingest those SHAs via `make ingest-replay COMMIT=<sha>` "
+            "before enabling historical modes (codex r1 PR #9 fix — the "
+            "prior `created` default caused default batch runs to skip "
+            "every packet)."
         ),
     )
     p.add_argument(

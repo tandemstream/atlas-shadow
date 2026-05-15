@@ -593,6 +593,42 @@ def test_cmd_grade_packet_batch_uses_packet_specific_history_sha(
     assert packet_payload["packet_base_sha"] == packet_sha
 
 
+def test_packet_sha_mode_default_is_run_commit(tmp_path: Path, monkeypatch):
+    """Codex r1 (PR #9) regression lock-down: the cmd-level default for
+    --packet-sha-mode MUST be 'run-commit', not 'created'.
+
+    Rationale: the documented baseline workflow only ingests the latest
+    commit, and `run_pr_grading` soft-passes any non-ingested SHA as
+    `revision_not_indexed`. If 'created' is the default, every packet
+    falls through to that soft-pass and the batch exits 2 with zero
+    grades, which silently breaks the documented operator command.
+    Historical SHA modes are opt-in (operators who want them must
+    pre-ingest the SHAs).
+    """
+    parser = gb._build_subparser_for_test() if hasattr(gb, "_build_subparser_for_test") else None
+    if parser is None:
+        # Use the real argparse builder from entrypoint wiring.
+        import argparse
+        root = argparse.ArgumentParser()
+        sub = root.add_subparsers(dest="cmd")
+        gb.build_subparser(sub)
+        args = root.parse_args([
+            "grade-packet-batch",
+            "--core-repo-path", str(tmp_path),
+            "--output-dir", str(tmp_path / "out"),
+        ])
+    else:
+        args = parser.parse_args([
+            "--core-repo-path", str(tmp_path),
+            "--output-dir", str(tmp_path / "out"),
+        ])
+    assert args.packet_sha_mode == "run-commit", (
+        f"Default --packet-sha-mode is {args.packet_sha_mode!r}, expected "
+        f"'run-commit'. Per codex r1 PR #9 fix, the default must NOT be "
+        f"'created' (which requires per-packet SHAs to be pre-ingested)."
+    )
+
+
 def test_cmd_grade_packet_batch_dry_run_reports_packet_base_shas(
     tmp_path: Path, monkeypatch, capsys
 ):
