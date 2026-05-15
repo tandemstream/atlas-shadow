@@ -23,6 +23,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import grader_service as grader_service_mod
 from . import queue as queue_mod
 from . import receiver as receiver_mod
 from . import worker as worker_mod
@@ -92,7 +93,14 @@ def cmd_serve(cfg: DaemonConfig) -> int:
         )
         stop_event.set()
         return 2
-    app = receiver_mod.create_app(cfg)
+    # T10 (P2 packet 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1):
+    # wire the PR-grading orchestrator into the receiver. The receiver's
+    # default handler is a stderr-logging stub; in production we pass the
+    # real `handle_pr_event` so opened/synchronize/reopened PR events
+    # run the full grading pipeline via a FastAPI BackgroundTask.
+    app = receiver_mod.create_app(
+        cfg, pr_event_handler=grader_service_mod.handle_pr_event
+    )
     print(
         f"[ingest-daemon] serving on http://{cfg.host}:{cfg.port} "
         f"(org_id={cfg.continuous_shadow_org_id}, db_path={cfg.db_path}, "
@@ -132,6 +140,7 @@ def cmd_replay(cfg: DaemonConfig, *, commit: str = None, from_sha: str = None) -
             cwd=str(core_clone),
             capture_output=True,
             text=True,
+            timeout=120,
             check=False,
         )
         if proc.returncode != 0:
@@ -180,6 +189,113 @@ def cmd_status(cfg: DaemonConfig) -> int:
     return 0
 
 
+def cmd_grading_verify(cfg: DaemonConfig) -> int:
+    """Verify the pre-merge grading gate's environment is configured.
+
+    Checks (in order, each emits a line of pass / fail / warn):
+      1. ``GITHUB_WEBHOOK_SECRET`` env var present (HMAC verify requires it).
+      2. ``GITHUB_ATLAS_SHADOW_TOKEN`` env var present (GH check + comment
+         API auth).
+      3. Atlas DB URL present in env-var chain
+         (ATLAS_SHADOW_DOC_RESOLVER_DB_URL -> ATLAS_ADMIN_DB_URL ->
+         ATLAS_DB_URL). T4a needs this for the primary lookup path.
+      4. ``cfg.shadow_runs_dir`` writable.
+      5. ``cfg.core_repo_path`` resolvable (for the T4a git fallback).
+      6. ``psycopg2`` importable (T4a direct DB path).
+
+    Returns 0 when all hard requirements (1, 2, 4, 5, 6) pass; 1 when any
+    fails. (3 is treated as a warning — T4a degrades to git-receipt-
+    snapshot for doc receipts when the DB lookup is skipped.)
+    """
+    from .config import DEFAULTS  # noqa: F401  (re-export check)
+
+    failures = 0
+    warnings = 0
+
+    secret = cfg.webhook_secret
+    if secret:
+        print("PASS: GITHUB_WEBHOOK_SECRET is set")
+    else:
+        failures += 1
+        print(
+            "FAIL: GITHUB_WEBHOOK_SECRET is unset; receiver returns 503 "
+            "for all webhook calls. Export it via env or systemd."
+        )
+
+    gh_token = (
+        __import__("os").environ.get("GITHUB_ATLAS_SHADOW_TOKEN")
+        or __import__("os").environ.get("GITHUB_TOKEN")
+    )
+    if gh_token:
+        print("PASS: GITHUB_ATLAS_SHADOW_TOKEN is set")
+    else:
+        failures += 1
+        print(
+            "FAIL: GITHUB_ATLAS_SHADOW_TOKEN unset. The grader cannot "
+            "post check_runs or PR comments without it."
+        )
+
+    db_url = None
+    for var in (
+        "ATLAS_SHADOW_DOC_RESOLVER_DB_URL",
+        "ATLAS_ADMIN_DB_URL",
+        "ATLAS_DB_URL",
+    ):
+        if __import__("os").environ.get(var):
+            db_url = var
+            break
+    if db_url:
+        print(f"PASS: doc-resolver DB URL configured via {db_url}")
+    else:
+        warnings += 1
+        print(
+            "WARN: no Atlas DB URL in env (tried "
+            "ATLAS_SHADOW_DOC_RESOLVER_DB_URL, ATLAS_ADMIN_DB_URL, "
+            "ATLAS_DB_URL). T4a primary lookup will be skipped; doc "
+            "receipts will fall back to git_receipt_snapshot."
+        )
+
+    try:
+        cfg.shadow_runs_dir.mkdir(parents=True, exist_ok=True)
+        test_file = cfg.shadow_runs_dir / ".grading-verify.tmp"
+        test_file.write_text("ok\n", encoding="utf-8")
+        test_file.unlink()
+        print(f"PASS: shadow_runs_dir writable at {cfg.shadow_runs_dir}")
+    except (OSError, RuntimeError) as exc:
+        failures += 1
+        print(
+            f"FAIL: shadow_runs_dir not writable: {exc}"
+        )
+
+    if cfg.core_repo_path.exists():
+        print(f"PASS: core_repo_path resolvable at {cfg.core_repo_path}")
+    else:
+        failures += 1
+        print(
+            f"FAIL: core_repo_path does not exist: {cfg.core_repo_path}. "
+            f"T4a's git_receipt_snapshot fallback needs a local clone."
+        )
+
+    try:
+        import psycopg2  # type: ignore  # noqa: F401
+
+        print("PASS: psycopg2 importable")
+    except ImportError as exc:
+        failures += 1
+        print(
+            f"FAIL: psycopg2 not installed ({exc}); T4a primary path "
+            f"unavailable. Run `make setup`."
+        )
+
+    if failures:
+        print(
+            f"\n{failures} hard requirement(s) failed, {warnings} warning(s)."
+        )
+        return 1
+    print(f"\nAll hard requirements passed. {warnings} warning(s).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="atlas-shadow-ingest-daemon",
@@ -197,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--from", dest="from_sha", help="Enqueue range <sha>..origin/main.")
     sub.add_parser("bootstrap", help="Apply DB schema (idempotent).")
     sub.add_parser("status", help="Print /status payload (no HTTP needed).")
+    sub.add_parser(
+        "grading-verify",
+        help="T10 (P2): check env + paths for the pre-merge grading gate.",
+    )
 
     args = parser.parse_args(argv)
     cfg = load_config(Path(args.config))
@@ -208,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_bootstrap(cfg)
     if args.cmd == "status":
         return cmd_status(cfg)
+    if args.cmd == "grading-verify":
+        return cmd_grading_verify(cfg)
     parser.error(f"unknown command: {args.cmd}")
     return 2
 

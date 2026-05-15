@@ -3,3 +3,4 @@ pyyaml>=6.0
 click>=8.1
 fastapi>=0.110
 uvicorn>=0.27
+psycopg2-binary>=2.9
