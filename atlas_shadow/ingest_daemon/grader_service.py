@@ -750,14 +750,67 @@ def run_pr_grading(
             code_revision_id = str(cr) if cr else None
         outcome["code_revision_id"] = code_revision_id
 
-        # Acquire pin
-        if code_revision_id:
-            state_file_mod.acquire_pin(
-                cfg.state_file,
-                pr_number=event.pr_number,
-                code_revision_id=code_revision_id,
+        # Codex review r5 (2026-05-15, I2 enforcement): when the daemon
+        # hasn't ingested base.sha, `code_revision_id` resolves to None.
+        # Running the runner with `code_revision_id=None` would make
+        # atlas-query resolve "latest" instead of the pre-merge state,
+        # defeating the apples-to-apples gate. Refuse to grade
+        # unpinned; soft-pass per D-P2-5 (don't block merge on a
+        # transient ingest lag) but make the situation explicit in the
+        # status description + PR comment so operators know to re-fire
+        # the gate after `make ingest-replay COMMIT=<base_sha>`.
+        if code_revision_id is None:
+            outcome["status"] = "revision_not_indexed"
+            description = (
+                f"(base SHA {event.base_sha[:7]} not indexed; "
+                f"re-run via close/reopen after `make ingest-replay`)"
             )
-            pin_acquired = True
+            _post_final(
+                repo_full_name=event.repo_full_name,
+                head_sha=event.head_sha,
+                state="success",
+                description=description,
+                github_token=github_token,
+            )
+            outcome["status_state"] = "success_revision_not_indexed"
+            # Post a PR comment explaining the situation so reviewers
+            # see WHY no per-receipt table appeared. Use the marker so
+            # any subsequent (successful) run cleanly updates this
+            # comment instead of stacking a duplicate.
+            try:
+                explainer_body = (
+                    f"{pr_comment_mod.COMMENT_MARKER}\n"
+                    f"## atlas-shadow grading\n\n"
+                    f"**Packet(s):** {', '.join(qna_log_paths)}\n"
+                    f"**Base SHA:** `{event.base_sha[:12]}`\n"
+                    f"**Result:** _grading skipped — base SHA not yet "
+                    f"ingested by atlas-shadow daemon_\n\n"
+                    f"Run `make ingest-replay COMMIT={event.base_sha}` "
+                    f"from atlas-shadow, then close+reopen this PR to "
+                    f"re-trigger grading.\n"
+                )
+                _post_comment(
+                    repo_full_name=event.repo_full_name,
+                    pr_number=event.pr_number,
+                    body=explainer_body,
+                    github_token=github_token,
+                )
+            except Exception as exc:
+                print(
+                    f"[ingest-daemon] WARN: revision_not_indexed comment "
+                    f"post failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            return outcome
+
+        # Acquire pin (only when we have a real revision to pin to —
+        # the None case above returned early).
+        state_file_mod.acquire_pin(
+            cfg.state_file,
+            pr_number=event.pr_number,
+            code_revision_id=code_revision_id,
+        )
+        pin_acquired = True
 
         # Per-packet grading
         for qna_log_path in qna_log_paths:

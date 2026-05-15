@@ -1169,9 +1169,13 @@ def test_pin_released_on_orchestrator_exception(daemon_config, db_path, state_fi
     assert state_file_mod.get_pinned_revision(cfg.state_file, pr_number=77) is None
 
 
-def test_pin_not_acquired_when_base_sha_not_in_ledger(daemon_config, db_path, state_file, tmp_path):
-    """If `find_by_commit_sha` returns None, no pin is acquired; release
-    on no-pin is a safe no-op (no exception, no spurious state file).
+def test_orchestrator_refuses_to_grade_when_base_sha_not_in_ledger(daemon_config, db_path, state_file, tmp_path):
+    """Codex review r5 (I2): when the daemon hasn't ingested base.sha,
+    the orchestrator MUST NOT call the runner with
+    `code_revision_id=None` (that would resolve atlas's "latest"
+    revision and produce a misleading grade). The orchestrator
+    refuses to grade unpinned, posts a soft-pass `success` status with
+    a clear description, and explains the situation in a PR comment.
     """
     from dataclasses import replace
     cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "sr")
@@ -1182,6 +1186,11 @@ def test_pin_not_acquired_when_base_sha_not_in_ledger(daemon_config, db_path, st
     )
     http = _stub_http_for_skip_or_error()
 
+    # If the orchestrator EVER calls _grade_one, the test fails: that's
+    # the I2 violation we're guarding against.
+    def _must_not_grade(**kw):
+        pytest.fail("must not grade when code_revision_id is None (I2)")
+
     outcome = grader_service_mod.run_pr_grading(
         cfg, event, github_token="fake",
         _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
@@ -1189,14 +1198,26 @@ def test_pin_not_acquired_when_base_sha_not_in_ledger(daemon_config, db_path, st
         _post_pending=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_pending_status']).post_pending_status(_http=http, **kw),
         _post_final=lambda **kw: __import__('atlas_shadow.ingest_daemon.gh_check', fromlist=['post_final_status']).post_final_status(_http=http, **kw),
         _post_comment=lambda **kw: __import__('atlas_shadow.ingest_daemon.pr_comment', fromlist=['post_or_update_pr_comment']).post_or_update_pr_comment(_http=http, **kw),
-        _grade_one=lambda **kw: grader_service_mod._grade_one_receipt(
-            **kw, _runner_run_one=_fake_runner_run_one(), _grader_grade=_fake_grader(),
-        ),
+        _grade_one=_must_not_grade,
     )
-    assert outcome["status"] == "ok"
+    assert outcome["status"] == "revision_not_indexed"
+    assert outcome["status_state"] == "success_revision_not_indexed"
     assert outcome["code_revision_id"] is None
     # No pin entries should exist for this PR (and no spurious state).
     assert state_file_mod.get_pinned_revision(cfg.state_file, pr_number=77) is None
+    # Soft-pass `success` posted with the "not indexed" description.
+    status_posts = [c for c in http.calls if c["method"] == "POST" and "/statuses/" in c["url"]]
+    assert len(status_posts) == 2  # pending + final
+    final_body = json.loads(status_posts[-1]["body"])
+    assert final_body["state"] == "success"
+    assert "not indexed" in final_body["description"]
+    # Explainer comment posted (one comment, with marker so subsequent
+    # grading runs can replace it cleanly).
+    comment_posts = [c for c in http.calls if c["method"] == "POST" and "/issues/77/comments" in c["url"]]
+    assert len(comment_posts) == 1
+    posted_body = json.loads(comment_posts[0]["body"])["body"]
+    assert "grading skipped" in posted_body
+    assert "make ingest-replay" in posted_body
 
 
 def test_pin_multiple_prs_independent(daemon_config, state_file):
