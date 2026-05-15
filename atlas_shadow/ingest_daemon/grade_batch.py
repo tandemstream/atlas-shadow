@@ -176,19 +176,108 @@ def discover_packet_qna_logs(
     core_repo_path: Path,
     *,
     packet_glob: str = "**/docs/work/*/02-qna-log.md",
+    commit_sha: Optional[str] = None,
+    _run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> list[str]:
-    """Return repo-relative paths of every ``02-qna-log.md`` under
-    ``core_repo_path`` matching ``packet_glob`` (default = every packet).
+    """Return repo-relative paths of every ``02-qna-log.md`` matching
+    ``packet_glob`` (default = every packet).
 
-    Pathlib's ``Path.glob`` handles the ``**`` recursive matching.
+    When ``commit_sha`` is provided (the production path), enumerates
+    files via ``git ls-tree -r --name-only <commit_sha>`` so the
+    discovery is pinned to the actual commit being graded. Codex r3
+    P2 fix: prior pass walked the WORKTREE, which can have files the
+    commit doesn't (just-added) or miss files the commit has (just-
+    deleted). The divergence caused `run_pr_grading` to silently
+    skip with status="ok" + zero receipts.
+
+    When ``commit_sha`` is omitted, falls back to ``Path.glob`` against
+    the worktree (useful for dry-run + tests).
+
     Returns POSIX-style relpaths sorted for determinism.
     """
+    if commit_sha:
+        return _discover_via_ls_tree(
+            core_repo_path, packet_glob, commit_sha, _run=_run
+        )
+
+    # Worktree fallback (dry-run + tests).
     root = core_repo_path.resolve()
     matches = []
     for path in root.glob(packet_glob):
         if path.is_file():
             matches.append(path.relative_to(root).as_posix())
     return sorted(matches)
+
+
+def _discover_via_ls_tree(
+    core_repo_path: Path,
+    packet_glob: str,
+    commit_sha: str,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> list[str]:
+    """Enumerate files at ``commit_sha`` via ``git ls-tree -r``, then
+    filter by ``packet_glob``. Uses ``Path.match`` for glob matching,
+    which (Python 3.13+) supports ``**`` recursive globs. For 3.12
+    compatibility we translate the glob to a regex (same trick we use
+    in core-side ``shadow_ingest_docs.py``).
+    """
+    try:
+        proc = _run(
+            ["git", "-C", str(core_repo_path), "ls-tree", "-r",
+             "--name-only", commit_sha],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"ERROR: git ls-tree failed for {commit_sha} in {core_repo_path}: "
+            f"{exc.stderr.strip()}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"ERROR: git ls-tree timed out for {commit_sha}: {exc}"
+        ) from exc
+
+    import re
+    rx = _glob_to_regex(packet_glob)
+    matches = [
+        line for line in proc.stdout.splitlines()
+        if line and rx.match(line)
+    ]
+    return sorted(matches)
+
+
+def _glob_to_regex(pat: str):
+    """Translate a glob (with ``**`` recursion) to a compiled regex.
+
+    Mirrors the helper in core-side ``shadow_ingest_docs.py`` —
+    ``fnmatch`` treats ``**`` as single-segment so wouldn't match
+    e.g. ``docs/work/<packet>/02-qna-log.md`` at any depth.
+    """
+    import re
+    out: list[str] = []
+    i = 0
+    n = len(pat)
+    while i < n:
+        if pat[i:i + 3] == "**/":
+            out.append("(?:.*/)?")
+            i += 3
+        elif pat[i:i + 2] == "**":
+            out.append(".*")
+            i += 2
+        elif pat[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
 
 
 def _packet_slug_from_qna_path(qna_log_path: str) -> str:
@@ -525,12 +614,22 @@ def cmd_grade_packet_batch(cfg, args) -> int:
             )
             return 1
 
-    qna_logs = discover_packet_qna_logs(core_repo_path, packet_glob=args.packet_glob)
+    # Discover from the COMMIT tree (not the worktree). Codex r3 fix:
+    # worktree drift would have caused run_pr_grading to silently skip
+    # packets whose qna log doesn't exist at --commit-sha but does exist
+    # in the worktree (or vice versa). git ls-tree pins discovery to the
+    # exact SHA we're grading at.
+    qna_logs = discover_packet_qna_logs(
+        core_repo_path,
+        packet_glob=args.packet_glob,
+        commit_sha=commit_sha,
+    )
     if args.limit is not None:
         qna_logs = qna_logs[: args.limit]
     if not qna_logs:
         print(
-            f"ERROR: no qna logs matched {args.packet_glob!r} under {core_repo_path}",
+            f"ERROR: no qna logs matched {args.packet_glob!r} at {commit_sha} "
+            f"in {core_repo_path}",
             file=sys.stderr,
         )
         return 1
@@ -606,6 +705,21 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                     print(
                         f"  WARN: {slug} status={outcome.get('status')} "
                         f"error={outcome.get('error')}",
+                        file=sys.stderr,
+                    )
+            elif not outcome.get("summaries"):
+                # Codex r3 P2 defensive: a packet that produces no
+                # summaries (qna log was unreadable, parser returned
+                # zero receipts, etc.) but still reports status="ok"
+                # represents an ungraded packet. Belt-and-suspenders
+                # alongside the commit-pinned discovery fix above —
+                # in case future failure modes reintroduce the gap.
+                partial_failures += 1
+                outcome["status"] = "ok_but_no_receipts"
+                if not args.quiet:
+                    print(
+                        f"  WARN: {slug} ok but produced 0 receipts "
+                        f"(likely unreadable qna log or unparseable receipts)",
                         file=sys.stderr,
                     )
 

@@ -209,6 +209,142 @@ def test_read_file_via_git_show_returns_none_for_missing_path(tmp_path: Path, ca
     assert "git show" in err  # WARN logged so operator can diagnose
 
 
+# ───────── discover_packet_qna_logs commit-pinned mode (codex r3) ────
+
+
+def _init_repo_with_packet_files(tmp_path: Path) -> tuple[Path, str]:
+    """Build a tmp repo with a couple of packet files committed."""
+    repo = tmp_path / "tmprepo"
+    repo.mkdir()
+    import subprocess as _sp
+    kw = {"cwd": repo, "check": True, "capture_output": True}
+    _sp.run(["git", "init", "--initial-branch=main", "-q"], **kw)
+    _sp.run(["git", "config", "user.email", "t@e.com"], **kw)
+    _sp.run(["git", "config", "user.name", "T"], **kw)
+    pkt_a = repo / "products" / "tandem" / "packages" / "python" / "atlas" / "docs" / "work" / "2026-01-01-a"
+    pkt_a.mkdir(parents=True)
+    (pkt_a / "02-qna-log.md").write_text("# a\n")
+    pkt_b = repo / "docs" / "work" / "2026-01-02-b"
+    pkt_b.mkdir(parents=True)
+    (pkt_b / "02-qna-log.md").write_text("# b\n")
+    (repo / "README.md").write_text("# readme\n")  # decoy
+    _sp.run(["git", "add", "."], **kw)
+    _sp.run(["git", "commit", "-m", "init", "-q"], **kw)
+    proc = _sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                   capture_output=True, text=True, check=True)
+    return repo, proc.stdout.strip()
+
+
+def test_discover_packet_qna_logs_commit_pinned_mode(tmp_path: Path):
+    """Commit-pinned discovery via git ls-tree only sees committed files."""
+    repo, full = _init_repo_with_packet_files(tmp_path)
+    # Add a NEW packet file to the worktree but DON'T commit.
+    new_pkt = repo / "docs" / "work" / "2026-01-03-uncommitted"
+    new_pkt.mkdir(parents=True)
+    (new_pkt / "02-qna-log.md").write_text("# uncommitted")
+
+    # Commit-pinned: only the 2 committed packets.
+    found = gb.discover_packet_qna_logs(repo, commit_sha=full)
+    assert set(found) == {
+        "docs/work/2026-01-02-b/02-qna-log.md",
+        "products/tandem/packages/python/atlas/docs/work/2026-01-01-a/02-qna-log.md",
+    }
+    # Worktree fallback (no commit_sha): includes the uncommitted file.
+    found_worktree = gb.discover_packet_qna_logs(repo)
+    assert "docs/work/2026-01-03-uncommitted/02-qna-log.md" in found_worktree
+
+
+def test_discover_packet_qna_logs_commit_pinned_no_match_returns_empty(tmp_path: Path):
+    repo, full = _init_repo_with_packet_files(tmp_path)
+    found = gb.discover_packet_qna_logs(
+        repo, commit_sha=full, packet_glob="**/no-such-file.md"
+    )
+    assert found == []
+
+
+def test_discover_packet_qna_logs_commit_pinned_errors_on_bad_sha(tmp_path: Path):
+    repo, _ = _init_repo_with_packet_files(tmp_path)
+    with pytest.raises(SystemExit):
+        gb.discover_packet_qna_logs(repo, commit_sha="not-a-real-sha")
+
+
+# ───────── glob-to-regex correctness ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "pattern,path,expected",
+    [
+        ("**/docs/work/*/02-qna-log.md", "docs/work/p/02-qna-log.md", True),
+        ("**/docs/work/*/02-qna-log.md",
+         "products/foo/docs/work/p/02-qna-log.md", True),
+        ("**/docs/work/*/02-qna-log.md", "docs/work/p/01-proposal.md", False),
+        ("**/docs/work/*/02-qna-log.md",
+         "docs/work/p/sub/02-qna-log.md", False),  # * doesn't cross /
+        ("*.md", "a.md", True),
+        ("*.md", "sub/a.md", False),  # bare * doesn't cross /
+    ],
+)
+def test_glob_to_regex_handles_recursive_globs(pattern, path, expected):
+    rx = gb._glob_to_regex(pattern)
+    assert bool(rx.match(path)) is expected
+
+
+# ───────── ok-but-no-receipts treatment (codex r3 defensive) ─────────
+
+
+def test_cmd_grade_packet_batch_flags_ok_but_no_receipts(tmp_path: Path, monkeypatch):
+    """If grade_one_packet returns status='ok' but no summaries, the
+    batch should treat that as a partial failure (zero-receipt soft
+    success is misleading)."""
+    repo = tmp_path / "core-repo"
+    repo.mkdir()
+    pkt = repo / "docs" / "work" / "2026-01-01-x"
+    pkt.mkdir(parents=True)
+    (pkt / "02-qna-log.md").write_text("# ignored — mocked")
+
+    output_dir = tmp_path / "shadow-runs" / "baseline-test"
+
+    cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "s.json"))
+    args = SimpleNamespace(
+        core_repo_path=str(repo),
+        commit_sha=None,  # will fall back; we monkeypatch discovery anyway
+        output_dir=str(output_dir),
+        packet_glob="**/docs/work/*/02-qna-log.md",
+        limit=None,
+        repo_full_name="tandemstream/core",
+        dry_run=False,
+        quiet=True,
+    )
+    # Bypass state-file lookup + commit-resolution.
+    monkeypatch.setattr(
+        gb,
+        "discover_packet_qna_logs",
+        lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
+    )
+    # Set a commit_sha so cmd doesn't try to read state file.
+    args.commit_sha = "deadbeef0000000000000000000000000000000"
+
+    monkeypatch.setattr(
+        gb,
+        "grade_one_packet",
+        lambda *a, **kw: {
+            "packet_slug": "2026-01-01-x",
+            "packet_qna_log_path": kw["qna_log_path"],
+            "status": "ok",
+            "summaries": [],  # ← empty
+            "base_sha": kw["commit_sha"],
+            "head_sha": kw["commit_sha"],
+            "pr_number": 0,
+            "repo_full_name": kw["repo_full_name"],
+        },
+    )
+    rc = gb.cmd_grade_packet_batch(cfg, args)
+    assert rc == 2  # partial failure for zero-receipt-ok
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    # The outcome status got rewritten so it's visible in the manifest.
+    assert manifest["per_packet_pct"]["2026-01-01-x"]["status"] == "ok_but_no_receipts"
+
+
 # ───────── _aggregate_run_totals ─────────────────────────────────────
 
 
@@ -449,16 +585,13 @@ def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, m
     failures. The batch must count those as partial failures and exit 2."""
     core_repo = tmp_path / "core-repo"
     core_repo.mkdir()
-    pkt = core_repo / "products" / "tandem" / "packages" / "python" / "atlas" / "docs" / "work" / "2026-01-01-x"
-    pkt.mkdir(parents=True)
-    (pkt / "02-qna-log.md").write_text("# ignored — grade_one_packet is mocked")
 
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
 
     cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
-        commit_sha="abcdef0",
+        commit_sha="abcdef0000000000000000000000000000000",
         output_dir=str(output_dir),
         packet_glob="**/docs/work/*/02-qna-log.md",
         limit=None,
@@ -467,6 +600,11 @@ def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, m
         quiet=True,
     )
 
+    # Stub the commit-pinned discovery so we don't need a real git repo.
+    monkeypatch.setattr(
+        gb, "discover_packet_qna_logs",
+        lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
+    )
     # Mock grade_one_packet to return a status="error" outcome (mirroring
     # the orchestrator's exception-swallowing behavior).
     def _fake_grade_one(*_args, **_kwargs):
@@ -490,22 +628,24 @@ def test_cmd_grade_packet_batch_counts_returned_error_statuses(tmp_path: Path, m
 def test_cmd_grade_packet_batch_succeeds_when_all_packets_ok(tmp_path: Path, monkeypatch):
     core_repo = tmp_path / "core-repo"
     core_repo.mkdir()
-    pkt = core_repo / "products" / "tandem" / "packages" / "python" / "atlas" / "docs" / "work" / "2026-01-01-x"
-    pkt.mkdir(parents=True)
-    (pkt / "02-qna-log.md").write_text("...")
 
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
 
     cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
-        commit_sha="abcdef0",
+        commit_sha="abcdef0000000000000000000000000000000",
         output_dir=str(output_dir),
         packet_glob="**/docs/work/*/02-qna-log.md",
         limit=None,
         repo_full_name="tandemstream/core",
         dry_run=False,
         quiet=True,
+    )
+
+    monkeypatch.setattr(
+        gb, "discover_packet_qna_logs",
+        lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
     )
 
     def _fake_grade_one(*_args, **_kwargs):
@@ -533,20 +673,23 @@ def test_cmd_grade_packet_batch_counts_raised_exceptions_too(tmp_path: Path, mon
     """Defensive: even if run_pr_grading raises (shouldn't per its
     docstring, but bugs happen), batch must still record + count it."""
     core_repo = tmp_path / "core-repo"
-    pkt = core_repo / "docs" / "work" / "2026-01-01-x"
-    pkt.mkdir(parents=True)
-    (pkt / "02-qna-log.md").write_text("...")
+    core_repo.mkdir()
 
     cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "state.json"))
     args = SimpleNamespace(
         core_repo_path=str(core_repo),
-        commit_sha="abcdef0",
+        commit_sha="abcdef0000000000000000000000000000000",
         output_dir=str(tmp_path / "shadow-runs" / "baseline-test"),
         packet_glob="**/docs/work/*/02-qna-log.md",
         limit=None,
         repo_full_name="tandemstream/core",
         dry_run=False,
         quiet=True,
+    )
+
+    monkeypatch.setattr(
+        gb, "discover_packet_qna_logs",
+        lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
     )
 
     def _fake_grade_one(*_args, **_kwargs):
