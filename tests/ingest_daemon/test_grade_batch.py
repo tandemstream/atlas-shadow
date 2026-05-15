@@ -109,8 +109,8 @@ def test_stub_fetch_pr_files_returns_only_the_one_qna_log():
 
 
 def test_grade_one_packet_wires_noop_posters_and_returns_outcome():
-    """The orchestrator should be called with no-op posters and
-    receive a stubbed file list pointing at the packet's qna log."""
+    """The orchestrator should be called with no-op posters AND with
+    a local-disk file reader (not the GH Contents API)."""
     captured_kwargs = {}
 
     def _fake_run_pr_grading(cfg, event, **kwargs):
@@ -132,13 +132,15 @@ def test_grade_one_packet_wires_noop_posters_and_returns_outcome():
         commit_sha="abc1234",
         qna_log_path="products/foo/docs/work/p-1/02-qna-log.md",
         github_token="ignored",
+        core_repo_path=Path("/fake/repo"),
         _run_pr_grading=_fake_run_pr_grading,
+        _read_file_at_commit=lambda **kw: "stubbed-content",
     )
-    # All four GH callbacks are no-ops.
+    # All three GH-posting callbacks are no-ops.
     assert captured_kwargs["_post_pending"] is gb._noop_post_pending
     assert captured_kwargs["_post_final"] is gb._noop_post_final
     assert captured_kwargs["_post_comment"] is gb._noop_post_comment
-    # The fetcher is a closure but pointing at the right qna log.
+    # The PR-files fetcher is a closure but pointing at the right qna log.
     files = captured_kwargs["_fetch_pr_files"](
         repo_full_name="tandemstream/core",
         pr_number=0,
@@ -147,9 +149,64 @@ def test_grade_one_packet_wires_noop_posters_and_returns_outcome():
     assert files == [
         {"filename": "products/foo/docs/work/p-1/02-qna-log.md", "status": "modified"}
     ]
+    # The file-at-ref reader is wired to read from local disk, NOT GH.
+    body = captured_kwargs["_fetch_file_at_ref"](
+        repo_full_name="tandemstream/core",
+        path="products/foo/docs/work/p-1/02-qna-log.md",
+        ref="abc1234",
+        github_token="ignored",
+    )
+    assert body == "stubbed-content"
     # Outcome carries packet identifiers.
     assert outcome["packet_slug"] == "p-1"
     assert outcome["packet_qna_log_path"] == "products/foo/docs/work/p-1/02-qna-log.md"
+
+
+# ───────── _read_file_via_git_show ───────────────────────────────────
+
+
+def _init_tmp_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Spin up a tmp git repo with one committed file. Returns (path, sha)."""
+    repo = tmp_path / "tmprepo"
+    repo.mkdir()
+    import subprocess as _sp
+    kw = {"cwd": repo, "check": True, "capture_output": True}
+    _sp.run(["git", "init", "--initial-branch=main", "-q"], **kw)
+    _sp.run(["git", "config", "user.email", "t@e.com"], **kw)
+    _sp.run(["git", "config", "user.name", "T"], **kw)
+    (repo / "qna.md").write_text("# committed content\n")
+    _sp.run(["git", "add", "qna.md"], **kw)
+    _sp.run(["git", "commit", "-m", "init", "-q"], **kw)
+    proc = _sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                   capture_output=True, text=True, check=True)
+    return repo, proc.stdout.strip()
+
+
+def test_read_file_via_git_show_reads_committed_bytes(tmp_path: Path):
+    """The local reader reads from the object DB, not the worktree.
+
+    Mirrors the codex r1 P2 #1 fix on the core-side shadow_ingest_docs.py:
+    if the worktree drifted, we still want commit-pinned content.
+    """
+    repo, full = _init_tmp_git_repo(tmp_path)
+    # Overwrite the worktree post-commit.
+    (repo / "qna.md").write_text("DIRTY WORKTREE CONTENT\n")
+    out = gb._read_file_via_git_show(
+        core_repo_path=repo, path="qna.md", ref=full
+    )
+    assert out == "# committed content\n"
+    assert "DIRTY" not in out
+
+
+def test_read_file_via_git_show_returns_none_for_missing_path(tmp_path: Path, capsys):
+    """Matches the 404 contract of _fetch_file_at_ref: missing file → None."""
+    repo, full = _init_tmp_git_repo(tmp_path)
+    out = gb._read_file_via_git_show(
+        core_repo_path=repo, path="does-not-exist.md", ref=full
+    )
+    assert out is None
+    err = capsys.readouterr().err
+    assert "git show" in err  # WARN logged so operator can diagnose
 
 
 # ───────── _aggregate_run_totals ─────────────────────────────────────

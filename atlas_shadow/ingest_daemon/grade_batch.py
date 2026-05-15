@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -109,6 +110,48 @@ def _stub_fetch_pr_files(
     ``detect_packet_qna_log`` then finds it and proceeds normally.
     """
     return [{"filename": qna_log_path, "status": "modified"}]
+
+
+def _read_file_via_git_show(
+    *,
+    core_repo_path: Path,
+    path: str,
+    ref: str,
+    _run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> Optional[str]:
+    """Read ``<ref>:<path>`` from the local git object DB.
+
+    Returns the decoded text on success, ``None`` on git error (matches
+    the contract of ``grader_service._fetch_file_at_ref``, which returns
+    ``None`` on 404). Used as the offline replacement for the GitHub
+    Contents API call in batch mode (codex r2 P1 fix). Reads from the
+    object DB rather than the worktree so the bytes are commit-pinned
+    even if the worktree drifted.
+    """
+    try:
+        proc = _run(
+            ["git", "-C", str(core_repo_path), "show", f"{ref}:{path}"],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+        # "exists, but not '<path>'" / "does not exist in <ref>" → None
+        # (matches the 404 fallthrough contract). Other errors → None
+        # too; the caller will see the orchestrator skip the packet and
+        # the manifest will reflect missing content.
+        sys.stderr.write(
+            f"[grade-batch] WARN: git show {ref}:{path} failed: "
+            f"{stderr.strip()}\n"
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"[grade-batch] WARN: git show {ref}:{path} timed out\n"
+        )
+        return None
+    return proc.stdout.decode("utf-8", errors="replace")
 
 
 def _noop_post_pending(**kwargs) -> None:
@@ -176,13 +219,25 @@ def grade_one_packet(
     commit_sha: str,
     qna_log_path: str,
     github_token: str,
+    core_repo_path: Path,
     _run_pr_grading: Callable = gs.run_pr_grading,
+    _read_file_at_commit: Callable = _read_file_via_git_show,
 ) -> dict[str, Any]:
     """Run grading for a single packet's qna log.
 
+    All GitHub calls inside ``run_pr_grading`` are stubbed:
+      - ``_fetch_pr_files`` → returns the qna log path (synthetic).
+      - ``_fetch_file_at_ref`` → reads from local git object DB at
+        ``<core_repo_path>:<ref>:<path>``. Codex r2 P1 fix — without
+        this stub, the orchestrator would hit GitHub's Contents API
+        and silently skip every packet on a 404 / rate limit / missing
+        token, making the batch falsely report `status='ok'` with zero
+        receipts.
+      - ``_post_pending`` / ``_post_final`` / ``_post_comment`` → no-ops.
+
     Returns the orchestrator's ``outcome`` dict augmented with
-    ``packet_slug`` and ``packet_qna_log_path`` so the caller can write
-    a self-describing JSON.
+    ``packet_slug`` and ``packet_qna_log_path`` so the caller can
+    write a self-describing JSON.
     """
     event = _synthesize_pr_event(
         repo_full_name=repo_full_name,
@@ -194,11 +249,21 @@ def grade_one_packet(
     def _fetch_for_this_packet(**kwargs):
         return _stub_fetch_pr_files(**kwargs, qna_log_path=qna_log_path)
 
+    # Wire the local file reader so qna log content comes from the
+    # local worktree's git object DB, not the GitHub Contents API.
+    def _read_file_local(**kwargs):
+        return _read_file_at_commit(
+            core_repo_path=core_repo_path,
+            path=kwargs["path"],
+            ref=kwargs["ref"],
+        )
+
     outcome = _run_pr_grading(
         cfg,
         event,
         github_token=github_token,
         _fetch_pr_files=_fetch_for_this_packet,
+        _fetch_file_at_ref=_read_file_local,
         _post_pending=_noop_post_pending,
         _post_final=_noop_post_final,
         _post_comment=_noop_post_comment,
@@ -510,6 +575,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 commit_sha=commit_sha,
                 qna_log_path=qna_log,
                 github_token=github_token,
+                core_repo_path=core_repo_path,
             )
         except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
             partial_failures += 1
