@@ -457,6 +457,10 @@ def test_cmd_grade_packet_batch_overrides_cfg_paths_for_orchestrator(
     cfg_used = captured_cfg["cfg"]
     assert cfg_used.core_repo_path == cli_core_path
     assert cfg_used.shadow_runs_dir == cli_output_dir.resolve() / "artifacts"
+    # Codex r6: state_file is also isolated to a per-batch path so the
+    # orchestrator's pin lifecycle doesn't race the live daemon.
+    assert cfg_used.state_file == cli_output_dir.resolve() / ".batch-state.json"
+    assert cfg_used.state_file != Path(cfg.state_file)
     # The original cfg is untouched.
     assert cfg.core_repo_path == yaml_core_path
     assert cfg.shadow_runs_dir == yaml_shadow_runs

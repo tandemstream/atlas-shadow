@@ -649,18 +649,32 @@ def cmd_grade_packet_batch(cfg, args) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_name = output_dir.name
 
-    # Codex r5 P2 fix: build a batch-specific cfg with the operator's
-    # paths overridden. Without this, when --core-repo-path or
-    # --output-dir differs from shadow-config.yaml, the orchestrator
-    # would still use cfg.core_repo_path (atlas runner / doc fallback)
-    # and cfg.shadow_runs_dir (per-packet artifact writes) — meaning
-    # we'd discover qna logs from /A but grade against /B and write
-    # artifacts to /B. Raw orchestrator artifacts go in a subdir of
-    # output_dir so they don't clutter the operator-facing files.
+    # Codex r5 + r6 P2 fixes: build a batch-specific cfg.
+    #
+    # r5: when --core-repo-path or --output-dir differs from
+    # shadow-config.yaml, the orchestrator would otherwise use
+    # cfg.core_repo_path (atlas runner / doc fallback) and
+    # cfg.shadow_runs_dir (per-packet artifact writes) from the YAML
+    # — meaning we'd discover qna logs from /A but grade against /B
+    # and write artifacts to /B. Override both.
+    #
+    # r6: the orchestrator's acquire_pin/release_pin lifecycle for
+    # synthetic PR=0 writes to cfg.state_file (.daemon-state.json by
+    # default). If grade-packet-batch runs while the live ingest daemon
+    # is also writing that file (after every successful webhook
+    # ingest), the two processes race: read-modify-write isn't
+    # cross-process locked, and a batch packet could rewrite the
+    # state with a stale latest_commit_ingested. Override
+    # cfg.state_file to a per-batch path inside output_dir so batch
+    # writes are isolated from the daemon's state.
+    #
+    # Raw orchestrator artifacts go in a subdir of output_dir so they
+    # don't clutter the operator-facing files.
     batch_cfg = replace(
         cfg,
         core_repo_path=core_repo_path,
         shadow_runs_dir=output_dir / "artifacts",
+        state_file=output_dir / ".batch-state.json",
     )
 
     # Read GitHub token even though we won't post — run_pr_grading still
