@@ -607,11 +607,18 @@ def _grade_one_receipt(
     tool_label = ""
 
     if isinstance(translation, DocQuery):
-        # T4a path
+        # T4a path. `repo` in the doc_id is whatever P1's SCIP-path
+        # ingest passed to the CLI — that's `cfg.repo_url` (typically a
+        # full https URL like "https://github.com/tandemstream/core"),
+        # NOT the GitHub `owner/name` slug. Using `event.repo_full_name`
+        # here would mint `tandemstream/core@<sha>:<path>` and miss every
+        # doc artifact whose `doc_id` was written with the URL form
+        # (codex r8 finding). Operators whose ingest used a different
+        # `repo_url` configure that via shadow-config.yaml.
         result = _doc_resolver(
             receipt,
             org_id=cfg.continuous_shadow_org_id,
-            repo=repo_full_name,
+            repo=cfg.repo_url,
             repo_path=cfg.core_repo_path,
         )
         atlas_answer_text = result.raw_text or ""
