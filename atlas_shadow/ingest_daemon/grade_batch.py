@@ -707,13 +707,16 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                         f"error={outcome.get('error')}",
                         file=sys.stderr,
                     )
-            elif not outcome.get("summaries"):
-                # Codex r3 P2 defensive: a packet that produces no
-                # summaries (qna log was unreadable, parser returned
-                # zero receipts, etc.) but still reports status="ok"
-                # represents an ungraded packet. Belt-and-suspenders
-                # alongside the commit-pinned discovery fix above —
-                # in case future failure modes reintroduce the gap.
+            elif sum(_summary_total(s) for s in outcome.get("summaries", [])) == 0:
+                # Codex r3 + r4 P2 defensive: an "ok" outcome with zero
+                # total receipts means the packet wasn't actually graded.
+                # Two sub-cases collapse into this check:
+                #   (a) outcome.summaries == []           (no summary appended)
+                #   (b) outcome.summaries has entries     (summary appended
+                #       but each has total=0 — e.g. qna log parsed but
+                #       receipt parser found zero usable receipts)
+                # Both look like "0% of nothing = success" to the aggregate
+                # math otherwise. Catches future failure modes too.
                 partial_failures += 1
                 outcome["status"] = "ok_but_no_receipts"
                 if not args.quiet:

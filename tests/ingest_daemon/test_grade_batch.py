@@ -292,22 +292,17 @@ def test_glob_to_regex_handles_recursive_globs(pattern, path, expected):
 # ───────── ok-but-no-receipts treatment (codex r3 defensive) ─────────
 
 
-def test_cmd_grade_packet_batch_flags_ok_but_no_receipts(tmp_path: Path, monkeypatch):
-    """If grade_one_packet returns status='ok' but no summaries, the
-    batch should treat that as a partial failure (zero-receipt soft
-    success is misleading)."""
+def _run_cmd_with_outcome(tmp_path: Path, monkeypatch, fake_outcome: dict) -> tuple[int, dict]:
+    """Helper: invoke cmd_grade_packet_batch with a single packet whose
+    grade_one_packet result is controlled by ``fake_outcome``. Returns
+    (rc, manifest)."""
     repo = tmp_path / "core-repo"
     repo.mkdir()
-    pkt = repo / "docs" / "work" / "2026-01-01-x"
-    pkt.mkdir(parents=True)
-    (pkt / "02-qna-log.md").write_text("# ignored — mocked")
-
     output_dir = tmp_path / "shadow-runs" / "baseline-test"
-
     cfg = SimpleNamespace(grader_model="sonnet", state_file=str(tmp_path / "s.json"))
     args = SimpleNamespace(
         core_repo_path=str(repo),
-        commit_sha=None,  # will fall back; we monkeypatch discovery anyway
+        commit_sha="deadbeef0000000000000000000000000000000",
         output_dir=str(output_dir),
         packet_glob="**/docs/work/*/02-qna-log.md",
         limit=None,
@@ -315,34 +310,68 @@ def test_cmd_grade_packet_batch_flags_ok_but_no_receipts(tmp_path: Path, monkeyp
         dry_run=False,
         quiet=True,
     )
-    # Bypass state-file lookup + commit-resolution.
     monkeypatch.setattr(
-        gb,
-        "discover_packet_qna_logs",
+        gb, "discover_packet_qna_logs",
         lambda *a, **kw: ["docs/work/2026-01-01-x/02-qna-log.md"],
     )
-    # Set a commit_sha so cmd doesn't try to read state file.
-    args.commit_sha = "deadbeef0000000000000000000000000000000"
-
-    monkeypatch.setattr(
-        gb,
-        "grade_one_packet",
-        lambda *a, **kw: {
-            "packet_slug": "2026-01-01-x",
-            "packet_qna_log_path": kw["qna_log_path"],
-            "status": "ok",
-            "summaries": [],  # ← empty
-            "base_sha": kw["commit_sha"],
-            "head_sha": kw["commit_sha"],
-            "pr_number": 0,
-            "repo_full_name": kw["repo_full_name"],
-        },
-    )
+    monkeypatch.setattr(gb, "grade_one_packet", lambda *a, **kw: fake_outcome)
     rc = gb.cmd_grade_packet_batch(cfg, args)
-    assert rc == 2  # partial failure for zero-receipt-ok
     manifest = json.loads((output_dir / "manifest.json").read_text())
-    # The outcome status got rewritten so it's visible in the manifest.
+    return rc, manifest
+
+
+def test_cmd_grade_packet_batch_flags_empty_summaries_list_as_no_receipts(
+    tmp_path: Path, monkeypatch
+):
+    """sub-case (a): outcome.summaries == []."""
+    rc, manifest = _run_cmd_with_outcome(tmp_path, monkeypatch, {
+        "packet_slug": "2026-01-01-x",
+        "packet_qna_log_path": "docs/work/2026-01-01-x/02-qna-log.md",
+        "status": "ok",
+        "summaries": [],
+        "base_sha": "deadbeef", "head_sha": "deadbeef",
+        "pr_number": 0, "repo_full_name": "tandemstream/core",
+    })
+    assert rc == 2
     assert manifest["per_packet_pct"]["2026-01-01-x"]["status"] == "ok_but_no_receipts"
+
+
+def test_cmd_grade_packet_batch_flags_zero_total_summaries_as_no_receipts(
+    tmp_path: Path, monkeypatch
+):
+    """sub-case (b) [codex r4 P2]: outcome.summaries is non-empty but
+    each summary has total=0. The naive `not summaries` check would
+    miss this; the receipt-sum check catches it."""
+    rc, manifest = _run_cmd_with_outcome(tmp_path, monkeypatch, {
+        "packet_slug": "2026-01-01-x",
+        "packet_qna_log_path": "docs/work/2026-01-01-x/02-qna-log.md",
+        "status": "ok",
+        "summaries": [
+            {"packet_id": "2026-01-01-x", "passed": True, "pass_pct": 0,
+             "pass_count": 0, "total": 0}
+        ],
+        "base_sha": "deadbeef", "head_sha": "deadbeef",
+        "pr_number": 0, "repo_full_name": "tandemstream/core",
+    })
+    assert rc == 2
+    assert manifest["per_packet_pct"]["2026-01-01-x"]["status"] == "ok_but_no_receipts"
+
+
+def test_cmd_grade_packet_batch_accepts_ok_with_any_receipts(
+    tmp_path: Path, monkeypatch
+):
+    """Positive control: status=ok with non-zero receipts is NOT flagged."""
+    rc, manifest = _run_cmd_with_outcome(tmp_path, monkeypatch, {
+        "packet_slug": "2026-01-01-x",
+        "packet_qna_log_path": "docs/work/2026-01-01-x/02-qna-log.md",
+        "status": "ok",
+        "summaries": [_mk_summary_dict("2026-01-01-x", [("full_match", "q1")])],
+        "code_revision_id": "rev-1",
+        "base_sha": "deadbeef", "head_sha": "deadbeef",
+        "pr_number": 0, "repo_full_name": "tandemstream/core",
+    })
+    assert rc == 0
+    assert manifest["per_packet_pct"]["2026-01-01-x"]["status"] == "ok"
 
 
 # ───────── _aggregate_run_totals ─────────────────────────────────────
