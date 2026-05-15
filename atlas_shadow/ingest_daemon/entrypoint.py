@@ -318,6 +318,10 @@ def main(argv: list[str] | None = None) -> int:
         help="T10 (P2): check env + paths for the pre-merge grading gate.",
     )
 
+    # Phase 3 batch-grading subcommand.
+    from . import grade_batch as grade_batch_mod
+    grade_batch_mod.build_subparser(sub)
+
     args = parser.parse_args(argv)
     cfg = load_config(Path(args.config))
     if args.cmd == "serve":
@@ -330,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(cfg)
     if args.cmd == "grading-verify":
         return cmd_grading_verify(cfg)
+    if args.cmd == "grade-packet-batch":
+        return grade_batch_mod.cmd_grade_packet_batch(cfg, args)
     parser.error(f"unknown command: {args.cmd}")
     return 2
 
