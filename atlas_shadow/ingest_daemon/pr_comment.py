@@ -78,18 +78,65 @@ class GradingSummary:
 
 
 def build_comment_markdown(summary: GradingSummary) -> str:
-    """Render the per-PR Markdown comment.
+    """Render the per-PR Markdown comment for a single packet.
 
-    Always includes a header (with the packet id + pinned revision +
-    threshold + outcome) and the per-receipt table. The table gains a
-    ``revision_binding`` column when at least one row is a doc receipt
-    (so code-only packets don't see an irrelevant column).
+    Backward-compatible single-packet wrapper around
+    :func:`build_comment_markdown_for_summaries` for callers that only
+    have one summary in hand (the common case).
+    """
+    return build_comment_markdown_for_summaries([summary])
+
+
+def build_comment_markdown_for_summaries(
+    summaries: list[GradingSummary],
+) -> str:
+    """Render a multi-packet Markdown comment.
+
+    Multi-packet PRs (rare but legal — a PR may touch more than one
+    ``02-qna-log.md``) get a single comment with one section per packet
+    plus an overall pass/fail badge. The single-packet case renders
+    identically to the prior ``build_comment_markdown(summary)`` shape
+    (one section, no aggregate header) so existing tests + downstream
+    parsers don't need to change.
+
+    Codex review on impl PR (2026-05-15) caught that posting one comment
+    per packet using the same marker would have the marker-based update
+    in :func:`post_or_update_pr_comment` PATCH-overwrite each prior
+    section — final comment would only contain the last packet's rows
+    even though the commit status aggregates all packets. Building ONE
+    comment from all summaries fixes that.
+    """
+    if not summaries:
+        return COMMENT_MARKER + "\n\n_No packet receipts found in this PR._\n"
+
+    sections: list[str] = [COMMENT_MARKER]
+    if len(summaries) > 1:
+        all_passed = all(s.passed for s in summaries)
+        total_pass = sum(s.pass_count for s in summaries)
+        total = sum(s.total for s in summaries)
+        overall_pct = int(round(total_pass * 100 / total)) if total else 0
+        overall_badge = "PASS" if all_passed else "FAIL"
+        sections.append(
+            f"## atlas-shadow grading — {len(summaries)} packets\n\n"
+            f"**Overall:** **{overall_badge}** "
+            f"({total_pass}/{total} = {overall_pct}% across all packets)\n"
+        )
+
+    for summary in summaries:
+        sections.append(_render_single_packet_section(summary))
+
+    return "\n".join(sections) + "\n"
+
+
+def _render_single_packet_section(summary: GradingSummary) -> str:
+    """Render one packet's section (header + table + warnings).
+
+    Used by both the single-packet wrapper and the multi-packet renderer.
     """
     has_doc = any(r.revision_binding for r in summary.rows)
     badge = "PASS" if summary.passed else "FAIL"
     rev = summary.code_revision_id or "(no code_revision_id — base SHA not yet ingested)"
     header = [
-        COMMENT_MARKER,
         "## atlas-shadow grading",
         "",
         f"**Packet:** `{summary.packet_id}`",
@@ -132,7 +179,7 @@ def build_comment_markdown(summary: GradingSummary) -> str:
     if warnings:
         body += "\n\n### Resolver warnings\n\n"
         body += "\n".join(f"- `{w}`" for w in warnings)
-    return body + "\n"
+    return body
 
 
 def _escape_cell(s: str, *, max_len: int) -> str:

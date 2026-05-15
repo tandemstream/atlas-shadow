@@ -1586,3 +1586,177 @@ def test_run_pr_grading_idempotent_rerun_updates_comment(daemon_config, db_path,
         if c["method"] == "POST" and "/statuses/" in c["url"]
     ]
     assert len(status_posts) == 4
+
+
+def test_run_pr_grading_multi_packet_pr_posts_aggregated_comment(daemon_config, db_path, tmp_path):
+    """Codex review on impl PR (2026-05-15): a PR touching MORE than one
+    `02-qna-log.md` must produce ONE PR comment with all packets'
+    sections, not one comment per packet (which would PATCH-overwrite
+    via the marker, leaving only the last packet's rows). And per-packet
+    artifacts must not collide on filename.
+    """
+    ledger_mod.insert_terminal_attempt(
+        db_path, commit_sha=BASE_SHA, status="succeeded",
+        started_at="2026-05-15T00:00:00+00:00", attempt_number=1,
+        code_revision_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        latency_ms=1,
+    )
+    from dataclasses import replace
+    cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "sr")
+    event = _StubEvent(
+        action="opened", repo_full_name="o/r", pr_number=42,
+        base_sha=BASE_SHA, base_ref="main", head_sha=HEAD_SHA, head_ref="f",
+    )
+
+    # Two packets touched on this PR.
+    import base64
+    pkt_a_path = "products/tandem/packages/python/atlas/docs/work/2026-05-14-packet-a-v1/02-qna-log.md"
+    pkt_b_path = "products/tandem/packages/python/atlas/docs/work/2026-05-14-packet-b-v1/02-qna-log.md"
+    qna_b64 = base64.b64encode(_SAMPLE_QNA_LOG.encode("utf-8")).decode()
+
+    # Stateful HTTP: track comment posts + status posts.
+    comments: list[dict] = []
+    status_posts: list[dict] = []
+
+    class TwoPacketHttp:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, *, method, url, body=None, headers=None, timeout=30):
+            from atlas_shadow.ingest_daemon.gh_check import HttpResponse
+            self.calls.append({"method": method, "url": url, "body": body})
+            if "/pulls/42/files" in url and method == "GET":
+                return HttpResponse(
+                    status=200,
+                    body=json.dumps([
+                        {"filename": pkt_a_path, "status": "added"},
+                        {"filename": pkt_b_path, "status": "added"},
+                    ]).encode(),
+                    headers={},
+                )
+            if "/contents/" in url and method == "GET":
+                return HttpResponse(
+                    status=200,
+                    body=json.dumps({"encoding": "base64", "content": qna_b64}).encode(),
+                    headers={},
+                )
+            if "/statuses/" in url and method == "POST":
+                status_posts.append(json.loads(body or b"{}"))
+                return HttpResponse(status=201, body=b'{"id":1}', headers={})
+            if "/issues/42/comments" in url and method == "GET":
+                return HttpResponse(
+                    status=200, body=json.dumps(comments).encode(), headers={}
+                )
+            if "/issues/42/comments" in url and method == "POST":
+                payload = json.loads(body or b"{}")
+                cid = 1000 + len(comments)
+                comments.append({"id": cid, "body": payload.get("body", "")})
+                return HttpResponse(status=201, body=json.dumps({"id": cid}).encode(), headers={})
+            if "/issues/comments/" in url and method == "PATCH":
+                cid = int(url.rsplit("/", 1)[1])
+                for c in comments:
+                    if c["id"] == cid:
+                        c["body"] = json.loads(body or b"{}").get("body", c["body"])
+                return HttpResponse(status=200, body=b"{}", headers={})
+            raise AssertionError(f"unexpected: {method} {url}")
+
+    http = TwoPacketHttp()
+    from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    outcome = grader_service_mod.run_pr_grading(
+        cfg, event, github_token="t",
+        _fetch_pr_files=lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
+        _fetch_file_at_ref=lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
+        _post_pending=lambda **kw: gh_check_mod.post_pending_status(_http=http, **kw),
+        _post_final=lambda **kw: gh_check_mod.post_final_status(_http=http, **kw),
+        _post_comment=lambda **kw: pr_comment_mod.post_or_update_pr_comment(_http=http, **kw),
+        _grade_one=lambda **kw: grader_service_mod._grade_one_receipt(
+            **kw, _runner_run_one=_fake_runner_run_one(), _grader_grade=_fake_grader(),
+        ),
+    )
+    assert outcome["status"] == "ok"
+    assert len(outcome["summaries"]) == 2
+    assert outcome["packet_paths"] == [pkt_a_path, pkt_b_path]
+
+    # Exactly ONE comment posted — not duplicated per packet.
+    assert len(comments) == 1
+    body = comments[0]["body"]
+    # Comment body contains BOTH packets' sections.
+    assert "2026-05-14-packet-a-v1" in body
+    assert "2026-05-14-packet-b-v1" in body
+    # And the multi-packet header.
+    assert "2 packets" in body or "Overall:" in body
+
+    # Two artifact files written (one per packet) — distinct filenames.
+    artifact_dir = cfg.shadow_runs_dir
+    artifacts = sorted(artifact_dir.glob("pr-42-*.json"))
+    assert len(artifacts) == 2
+    assert artifacts[0].name != artifacts[1].name
+    # Filenames include packet id (codex fix for the collision bug).
+    assert any("packet-a-v1" in a.name for a in artifacts)
+    assert any("packet-b-v1" in a.name for a in artifacts)
+
+    # Status: pending posted once + final posted once (NOT per packet).
+    pending_states = [s for s in status_posts if s["state"] == "pending"]
+    final_states = [s for s in status_posts if s["state"] in ("success", "failure")]
+    assert len(pending_states) == 1
+    assert len(final_states) == 1
+
+
+def test_build_comment_markdown_for_summaries_multi_section():
+    """Direct test of the multi-packet renderer: two summaries -> one
+    body with two `## atlas-shadow grading` sections + an overall header.
+    """
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    def _row(qid, grade):
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=qid, question="q", grade=grade, confidence=0.9,
+            rationale="ok", tool="find_code",
+        )
+
+    s1 = pr_comment_mod.GradingSummary(
+        packet_id="pkt-a-v1", code_revision_id=None, base_sha=BASE_SHA,
+        threshold_pct=50,
+        rows=[_row("q1", "full_match"), _row("q2", "no_match")],
+    )
+    s2 = pr_comment_mod.GradingSummary(
+        packet_id="pkt-b-v1", code_revision_id=None, base_sha=BASE_SHA,
+        threshold_pct=50,
+        rows=[_row("q1", "full_match"), _row("q2", "full_match")],
+    )
+    body = pr_comment_mod.build_comment_markdown_for_summaries([s1, s2])
+    # ONE marker (idempotency).
+    assert body.count(pr_comment_mod.COMMENT_MARKER) == 1
+    # Multi-packet aggregate header.
+    assert "2 packets" in body
+    # Both packet ids appear.
+    assert "pkt-a-v1" in body and "pkt-b-v1" in body
+    # FAIL badge present (pkt-a passes 1/2 = 50%, just at threshold; pkt-b 2/2).
+    # Overall pass count = 3, total = 4, pct = 75. All summary.passed checks:
+    # pkt-a's pass_pct = 50 >= 50 -> True; pkt-b 100 >= 50 -> True.
+    # So overall_passed = True -> Overall: PASS.
+    assert "Overall:" in body and "PASS" in body
+
+
+def test_build_comment_markdown_single_packet_backward_compat():
+    """The single-packet wrapper renders identically to the multi-packet
+    renderer with one summary (NO overall header, just the packet section).
+    """
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    summary = pr_comment_mod.GradingSummary(
+        packet_id="pkt-x", code_revision_id=None, base_sha=BASE_SHA,
+        threshold_pct=50,
+        rows=[pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+        )],
+    )
+    body = pr_comment_mod.build_comment_markdown(summary)
+    # No "N packets" aggregate header in single-packet form.
+    assert "packets" not in body.lower() or body.lower().count("packets") == 0
+    # Marker still present.
+    assert pr_comment_mod.COMMENT_MARKER in body
+    # The single packet's id appears in the section header.
+    assert "pkt-x" in body

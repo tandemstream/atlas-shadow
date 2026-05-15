@@ -815,16 +815,9 @@ def run_pr_grading(
                 rows=rows,
             )
 
-            # Render comment + post
-            body_md = pr_comment_mod.build_comment_markdown(summary)
-            _post_comment(
-                repo_full_name=event.repo_full_name,
-                pr_number=event.pr_number,
-                body=body_md,
-                github_token=github_token,
-            )
-
-            # Write artifact
+            # Write per-packet artifact (one JSON per packet — filename
+            # includes packet_id + a microsecond timestamp so multi-packet
+            # PRs in the same second don't overwrite).
             artifact_path = write_grading_artifact(
                 summary=summary,
                 pr_number=event.pr_number,
@@ -843,6 +836,27 @@ def run_pr_grading(
                 "total": summary.total,
                 "artifact_path": str(artifact_path),
             })
+            # Hold the live summary in a parallel list for the
+            # single-comment build below.
+            outcome.setdefault("_summary_objects", []).append(summary)
+
+        # AFTER all packets are graded: render ONE PR comment from ALL
+        # summaries. Codex review on impl PR (2026-05-15) caught that
+        # posting one comment per packet (which we used to do here) would
+        # have the marker-based update PATCH-overwrite each prior packet's
+        # section — the final comment would contain only the last packet's
+        # rows. Aggregating once fixes that.
+        summary_objects = outcome.pop("_summary_objects", [])
+        if summary_objects:
+            body_md = pr_comment_mod.build_comment_markdown_for_summaries(
+                summary_objects
+            )
+            _post_comment(
+                repo_full_name=event.repo_full_name,
+                pr_number=event.pr_number,
+                body=body_md,
+                github_token=github_token,
+            )
 
         # Compute overall state across packets — all must pass.
         all_passed = all(s["passed"] for s in outcome["summaries"]) if outcome["summaries"] else True
@@ -946,17 +960,29 @@ def write_grading_artifact(
     repo_full_name: str,
     now_iso: Optional[Callable[[], str]] = None,
 ) -> Path:
-    """Serialize a :class:`GradingSummary` to ``shadow-runs/pr-<n>-<ts>.json``.
+    """Serialize a :class:`GradingSummary` to
+    ``shadow-runs/pr-<n>-<ts>-<packet_id>.json``.
 
     Returns the artifact path. Mirrors the schema the PR comment renders
     so post-merge analysis can replay either form.
+
+    The filename includes ``packet_id`` and a microsecond-resolution
+    timestamp so multi-packet PRs in the same second produce distinct
+    artifacts (codex review on impl PR 2026-05-15 — the prior
+    seconds-resolution-without-packet-id format collided on multi-packet
+    runs).
     """
     if now_iso is None:
         now_iso = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = artifact_dir / f"pr-{pr_number}-{ts}.json"
+    # %f gives microseconds; strip to milliseconds for filename readability
+    # while keeping enough resolution to avoid collisions in the same second.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    # Slugify the packet_id (already filesystem-safe in practice but
+    # defend against weird inputs).
+    packet_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", summary.packet_id or "unknown")
+    out_path = artifact_dir / f"pr-{pr_number}-{ts}-{packet_slug}.json"
     payload = {
         "schema_version": "1.0",
         "produced_at": now_iso(),
