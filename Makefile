@@ -19,6 +19,18 @@
 #   ingest-status      — print /status payload (no HTTP needed)
 #   ingest-replay      — enqueue commit(s); pass COMMIT=<sha> or FROM=<sha>
 #
+#   webhook-forward-up-detached
+#                      — run `gh webhook forward` in the background (nohup)
+#                        so it survives the operator's shell exit. Logs to
+#                        .webhook-forwarder.log; pid in .webhook-forwarder.pid.
+#                        Mirrors the ingest-up-detached lifecycle pattern.
+#                        Override WEBHOOK_REPO / WEBHOOK_URL / WEBHOOK_SECRET_FILE
+#                        when defaults don't match.
+#   webhook-forward-down
+#                      — stop a detached forwarder (kill -TERM via pidfile).
+#   webhook-forward-status
+#                      — show pid + last 20 lines of the forwarder log.
+#
 #   grading-up         — alias for ingest-up. The daemon's FastAPI receiver
 #                        handles both push (ingest) and pull_request (grading)
 #                        events through a single endpoint; one process runs
@@ -40,6 +52,12 @@ FROM ?=
 SHADOW_CONFIG ?= shadow-config.yaml
 INGEST_LOG ?= .ingest-daemon.log
 INGEST_PIDFILE ?= .ingest-daemon.pid
+WEBHOOK_REPO ?= tandemstream/core
+WEBHOOK_EVENTS ?= push,pull_request
+WEBHOOK_URL ?= http://localhost:8765/webhook
+WEBHOOK_SECRET_FILE ?= $(HOME)/.atlas-shadow/webhook.secret
+WEBHOOK_FORWARDER_LOG ?= .webhook-forwarder.log
+WEBHOOK_FORWARDER_PIDFILE ?= .webhook-forwarder.pid
 
 .PHONY: setup
 setup:
@@ -117,6 +135,63 @@ ingest-replay:
 	    echo "Usage: make ingest-replay COMMIT=<sha>  OR  make ingest-replay FROM=<sha>"; \
 	    exit 2; \
 	fi
+
+.PHONY: webhook-forward-up-detached
+webhook-forward-up-detached:
+	@if [ ! -r "$(WEBHOOK_SECRET_FILE)" ]; then \
+	    echo "ERROR: webhook secret not readable at $(WEBHOOK_SECRET_FILE)"; \
+	    echo "Generate one with: openssl rand -hex 32 > $(WEBHOOK_SECRET_FILE) && chmod 600 $(WEBHOOK_SECRET_FILE)"; \
+	    exit 2; \
+	fi
+	@if [ -f $(WEBHOOK_FORWARDER_PIDFILE) ] && kill -0 $$(cat $(WEBHOOK_FORWARDER_PIDFILE)) 2>/dev/null; then \
+	    echo "webhook forwarder already running (pid=$$(cat $(WEBHOOK_FORWARDER_PIDFILE)))"; \
+	    exit 0; \
+	fi
+	nohup gh webhook forward \
+	    --repo=$(WEBHOOK_REPO) \
+	    --events=$(WEBHOOK_EVENTS) \
+	    --url=$(WEBHOOK_URL) \
+	    --secret="$$(cat $(WEBHOOK_SECRET_FILE))" \
+	    > $(WEBHOOK_FORWARDER_LOG) 2>&1 & echo $$! > $(WEBHOOK_FORWARDER_PIDFILE)
+	@sleep 1
+	@if kill -0 $$(cat $(WEBHOOK_FORWARDER_PIDFILE)) 2>/dev/null; then \
+	    echo "webhook-forwarder started (pid=$$(cat $(WEBHOOK_FORWARDER_PIDFILE)), log=$(WEBHOOK_FORWARDER_LOG))"; \
+	else \
+	    echo "ERROR: webhook-forwarder failed to start; tail of $(WEBHOOK_FORWARDER_LOG):"; \
+	    tail -n 20 $(WEBHOOK_FORWARDER_LOG); \
+	    rm -f $(WEBHOOK_FORWARDER_PIDFILE); \
+	    exit 1; \
+	fi
+
+.PHONY: webhook-forward-down
+webhook-forward-down:
+	@if [ -f $(WEBHOOK_FORWARDER_PIDFILE) ]; then \
+	    pid=$$(cat $(WEBHOOK_FORWARDER_PIDFILE)); \
+	    if kill -TERM $$pid 2>/dev/null; then \
+	        echo "sent SIGTERM to webhook-forwarder pid=$$pid"; \
+	    else \
+	        echo "webhook-forwarder pid=$$pid already dead"; \
+	    fi; \
+	    rm -f $(WEBHOOK_FORWARDER_PIDFILE); \
+	else \
+	    echo "no pidfile at $(WEBHOOK_FORWARDER_PIDFILE) — nothing to stop"; \
+	fi
+
+.PHONY: webhook-forward-status
+webhook-forward-status:
+	@if [ -f $(WEBHOOK_FORWARDER_PIDFILE) ]; then \
+	    pid=$$(cat $(WEBHOOK_FORWARDER_PIDFILE)); \
+	    if kill -0 $$pid 2>/dev/null; then \
+	        echo "webhook-forwarder: RUNNING (pid=$$pid)"; \
+	        ps -p $$pid -o pid,etime,comm; \
+	    else \
+	        echo "webhook-forwarder: DEAD (stale pidfile=$$pid). Run \`make webhook-forward-down\` to clean."; \
+	    fi; \
+	else \
+	    echo "webhook-forwarder: NOT RUNNING (no pidfile)"; \
+	fi
+	@echo "--- last 20 lines of $(WEBHOOK_FORWARDER_LOG) ---"
+	@if [ -f $(WEBHOOK_FORWARDER_LOG) ]; then tail -n 20 $(WEBHOOK_FORWARDER_LOG); else echo "(no log file)"; fi
 
 # T10 (P2 packet 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1) —
 # pre-merge grading gate targets.

@@ -53,6 +53,16 @@ DEFAULTS: dict[str, Any] = {
     # ingest.
     "doc_ingest_enabled": True,
     "doc_ingest_timeout_seconds": 1800,
+    # Reconciler — periodic poll of origin/main as a safety net for a
+    # dead webhook forwarder (see docs/shadow-mode-runbook.md "Known
+    # gaps"). When the forwarder dies the daemon never hears about new
+    # commits and the corpus silently freezes; the reconciler closes
+    # that gap by re-checking remote HEAD every N seconds and enqueueing
+    # the SHA when it differs from `latest_commit_ingested`. Disable via
+    # ``reconciler_enabled: false`` for code-only / replay-only runs.
+    "reconciler_enabled": True,
+    "reconciler_interval_seconds": 300,
+    "reconciler_ls_remote_timeout_seconds": 60,
     # T5 (P2 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1): grader
     # model + principal_id used by the PR-grading orchestrator. Mirror
     # the keys read by `atlas_shadow.cli` (which lives at atlas-shadow
@@ -87,6 +97,11 @@ class DaemonConfig:
     ingest_shell_out_timeout_seconds: int = DEFAULTS["ingest_shell_out_timeout_seconds"]
     doc_ingest_enabled: bool = DEFAULTS["doc_ingest_enabled"]
     doc_ingest_timeout_seconds: int = DEFAULTS["doc_ingest_timeout_seconds"]
+    reconciler_enabled: bool = DEFAULTS["reconciler_enabled"]
+    reconciler_interval_seconds: int = DEFAULTS["reconciler_interval_seconds"]
+    reconciler_ls_remote_timeout_seconds: int = DEFAULTS[
+        "reconciler_ls_remote_timeout_seconds"
+    ]
     webhook_secret: Optional[str] = None
     # T5 (P2): PR-grading config. Read from the top-level YAML (mirroring
     # ``atlas_shadow.cli``), NOT from ``ingest_daemon:`` section, because
@@ -171,6 +186,11 @@ def load_config(
         ingest_shell_out_timeout_seconds=int(merged["ingest_shell_out_timeout_seconds"]),
         doc_ingest_enabled=bool(merged["doc_ingest_enabled"]),
         doc_ingest_timeout_seconds=int(merged["doc_ingest_timeout_seconds"]),
+        reconciler_enabled=bool(merged["reconciler_enabled"]),
+        reconciler_interval_seconds=int(merged["reconciler_interval_seconds"]),
+        reconciler_ls_remote_timeout_seconds=int(
+            merged["reconciler_ls_remote_timeout_seconds"]
+        ),
         webhook_secret=os.environ.get("GITHUB_WEBHOOK_SECRET"),
         grader_model=grader_model,
         default_principal_id=default_principal_id,

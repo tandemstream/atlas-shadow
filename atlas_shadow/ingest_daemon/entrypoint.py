@@ -26,6 +26,7 @@ from pathlib import Path
 from . import grader_service as grader_service_mod
 from . import queue as queue_mod
 from . import receiver as receiver_mod
+from . import reconciler as reconciler_mod
 from . import worker as worker_mod
 from .config import DaemonConfig, load_config
 
@@ -83,6 +84,27 @@ def cmd_serve(cfg: DaemonConfig) -> int:
         daemon=True,
     )
     worker_thread.start()
+    reconciler_thread: threading.Thread | None = None
+    if cfg.reconciler_enabled:
+        reconciler_thread = threading.Thread(
+            target=reconciler_mod.run_loop,
+            args=(cfg, stop_event),
+            name="ingest-daemon-reconciler",
+            daemon=True,
+        )
+        reconciler_thread.start()
+        print(
+            f"[ingest-daemon] reconciler enabled "
+            f"(interval={cfg.reconciler_interval_seconds}s, "
+            f"core_repo_url={cfg.core_repo_url})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[ingest-daemon] reconciler disabled "
+            "(set ingest_daemon.reconciler_enabled: true to re-enable)",
+            file=sys.stderr,
+        )
     try:
         import uvicorn  # type: ignore
     except ImportError as exc:
@@ -112,6 +134,8 @@ def cmd_serve(cfg: DaemonConfig) -> int:
     finally:
         stop_event.set()
         worker_thread.join(timeout=10)
+        if reconciler_thread is not None:
+            reconciler_thread.join(timeout=10)
     return 0
 
 

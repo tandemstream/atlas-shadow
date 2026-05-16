@@ -172,15 +172,14 @@ cd /Users/ray/tandemstream/core--shadow-runtime/products/tandem/packages/python/
 gh extension install cli/gh-webhook
 
 # Start the webhook forwarder. Creates a transient webhook on the repo
-# the first time it runs.
-nohup gh webhook forward \
-    --repo=tandemstream/core \
-    --events=push,pull_request \
-    --url=http://localhost:8765/webhook \
-    --secret="$(cat ~/.atlas-shadow/webhook.secret)" \
-    > /tmp/gh-webhook-forward.log 2>&1 &
+# the first time it runs. The Makefile target wraps `gh webhook forward`
+# in nohup + pidfile so the forwarder survives the operator's shell
+# exit — the bare `gh webhook forward` is a child of the invoking shell
+# and dies with it (this was the 2026-05-15 30-commit-gap incident).
+make webhook-forward-up-detached
 
-# Confirm webhook is registered on GH:
+# Confirm forwarder is alive + webhook is registered on GH:
+make webhook-forward-status
 gh api /repos/tandemstream/core/hooks --jq '.[] | {id, active, events}'
 ```
 
@@ -259,11 +258,29 @@ make ingest-status
 **Verify the forwarder is alive** —
 
 ```bash
-pgrep -fa "gh-webhook forward"
-tail /tmp/gh-webhook-forward.log
+make webhook-forward-status
 gh api /repos/tandemstream/core/hooks --jq '.[] | {id, active, last_response: .last_response}'
 # last_response.status should be "active".
 ```
+
+If the forwarder died, the daemon's reconciler thread (see "Reconciler
+safety net" below) will still catch up the corpus to remote HEAD on the
+next tick (default every 300s) — but PR-grading events will be missed
+until the forwarder is back. Restart with:
+
+```bash
+make webhook-forward-down   # cleans stale pidfile, if any
+make webhook-forward-up-detached
+```
+
+> **Secret hygiene**: ``gh webhook forward`` only accepts the HMAC
+> secret via its ``--secret`` flag (no env/stdin support upstream), so
+> the secret is visible to anyone with ``ps`` access on this machine.
+> ``make webhook-forward-status`` deliberately uses ``ps -o comm``
+> (binary name only) to avoid surfacing it in operator-facing output —
+> but the broader exposure stays until upstream supports env-var or
+> stdin secret input. Don't run shadow-mode as a different user than
+> the one whose ``ps`` output you trust.
 
 **Restart after a reboot** — the daemon + forwarder do NOT survive
 reboot (no launchd plist yet — see "Known gaps"). After reboot:
@@ -274,17 +291,64 @@ reboot (no launchd plist yet — see "Known gaps"). After reboot:
 cd /Users/ray/tandemstream/atlas-shadow
 make ingest-up-detached
 
-# 3. Start forwarder:
-nohup gh webhook forward \
-    --repo=tandemstream/core \
-    --events=push,pull_request \
-    --url=http://localhost:8765/webhook \
-    --secret="$(cat ~/.atlas-shadow/webhook.secret)" \
-    > /tmp/gh-webhook-forward.log 2>&1 &
+# 3. Start forwarder (nohup + pidfile via Makefile so it survives shell exit):
+make webhook-forward-up-detached
 
-# 4. Backfill any commits that landed while down:
+# 4. Backfill any commits that landed while down. The reconciler will
+#    enqueue current origin/main on its next tick automatically, but
+#    if you want every intermediate SHA in the ledger, run replay:
 LAST=$(python3 -c "import json; print(json.load(open('.daemon-state.json'))['latest_commit_ingested'])")
 make ingest-replay FROM=$LAST
+```
+
+---
+
+## Reconciler safety net
+
+The daemon runs a background **reconciler** thread that polls
+``git ls-remote <core_repo_url> refs/heads/main`` every
+``reconciler_interval_seconds`` (default 300s). When the remote head
+SHA differs from ``.daemon-state.json:latest_commit_ingested`` it
+enqueues the remote SHA with ``source='reconciler'`` so the worker
+catches up — even if the webhook forwarder is dead.
+
+This closes the 2026-05-15 failure mode: ``gh webhook forward`` was run
+as a child of an interactive shell, the shell exited, the forwarder
+died with it, and the daemon fell 30 commits behind ``origin/main``
+before the operator noticed. With the reconciler running the same
+incident would self-heal within one tick (≤5 min by default).
+
+Behavior:
+
+- The reconciler enqueues only the *current* remote HEAD, not every
+  intermediate SHA — Atlas's ``file_memoization`` carries unchanged
+  files forward, so per-SHA history is usually unnecessary. If you
+  want every intermediate SHA in the ledger (e.g. for snapshot grading
+  at a historical commit), still run ``make ingest-replay FROM=<sha>``.
+- ``queue.enqueue`` is idempotent on ``commit_sha``; a reconciler tick
+  that races with the webhook short-circuits at ``already-queued`` /
+  ``already-running`` / ``dedup-succeeded`` (the outcome is logged to
+  stderr so you can audit).
+- The reconciler does NOT replace the webhook forwarder. PR-grading
+  events (``pull_request`` webhooks) still need the forwarder to fire
+  the grading orchestrator. The reconciler keeps the *code corpus*
+  current; PR-grade availability still depends on
+  ``make webhook-forward-up-detached``.
+
+Tuning knobs in ``shadow-config.yaml``:
+
+```yaml
+ingest_daemon:
+  reconciler_enabled: true               # set false for replay-only mode
+  reconciler_interval_seconds: 300       # poll cadence
+  reconciler_ls_remote_timeout_seconds: 60  # per-tick subprocess cap
+```
+
+Verifying the reconciler fired:
+
+```bash
+grep "reconciler:" .ingest-daemon.log
+# Non-"in-sync" outcomes (enqueued, skipped-*, no-remote) get one line each.
 ```
 
 ---
@@ -367,7 +431,9 @@ in the ledger). **Currently a TODO** — see "Known gaps".
 
 4. **🟡 Reboot persistence**. Daemon + forwarder are detached (`PPID=1`)
    so they survive shell exits, but they don't restart on reboot. Wrap
-   each in a launchd plist when shadow-mode becomes "always on."
+   each in a launchd plist when shadow-mode becomes "always on." (The
+   reconciler safety net mitigates a downed *forwarder* but not a
+   downed *daemon*; both still need a manual restart after reboot.)
 
 5. **🟢 Stable Cloudflare tunnel** (instead of `gh webhook forward`).
    Required if shadow-mode needs to keep grading while operator's laptop
@@ -424,13 +490,33 @@ echo "${SECRET:0:8}..."  # quick visual confirmation
 
 ### Daemon ledger has gaps after operator was offline
 
-`make ingest-replay FROM=<sha>` to backfill. The daemon does NOT
-auto-backfill — only forward-process via webhooks.
+The reconciler will auto-enqueue current ``origin/main`` HEAD on its
+next tick (default ≤5 min), so the corpus self-heals to the tip. But
+the reconciler does NOT walk the intermediate SHAs — if you want every
+commit in the ledger (for snapshot grading at a historical SHA), run
+``make ingest-replay`` explicitly:
 
 ```bash
 LAST=$(python3 -c "import json; print(json.load(open('.daemon-state.json'))['latest_commit_ingested'])")
 make ingest-replay FROM=$LAST
 ```
+
+### Daemon is in-sync but webhook forwarder is dead
+
+Symptom: ``make webhook-forward-status`` shows DEAD / NOT RUNNING, but
+``make ingest-status`` shows ``latest_commit_ingested`` at or near
+``origin/main`` HEAD. This is the reconciler doing its job — the code
+corpus is current. But PR-grading is not firing (``pull_request`` events
+need the forwarder). Restart it:
+
+```bash
+make webhook-forward-down       # cleans pidfile
+make webhook-forward-up-detached
+```
+
+If you see this happen often, check ``.webhook-forwarder.log`` for an
+underlying ``gh webhook forward`` crash and consider the launchd plist
+(see Known gap 4).
 
 ### Batch hangs on a single packet
 
@@ -460,5 +546,6 @@ make ingest-replay COMMIT=<your-target-sha>
 - **Daemon state**: `atlas-shadow/.daemon-state.json`
 - **SQLite ledger**: `~/.atlas-shadow/ingest.db`
 - **Worktrees + SCIP cache**: `~/.atlas-shadow/cache/`
-- **Forwarder log**: `/tmp/gh-webhook-forward.log` (or wherever you redirected)
+- **Forwarder log**: `atlas-shadow/.webhook-forwarder.log`
+- **Forwarder pid**: `atlas-shadow/.webhook-forwarder.pid`
 - **Dashboard root**: `atlas-shadow/shadow-runs/`

@@ -30,3 +30,10 @@ shadow-runs/*/
 # Local D4 ingest cache (sha → org_id mapping)
 .ingest-cache/
 .ingest-cache.json
+
+# D5 ingest daemon + webhook forwarder runtime artifacts
+.ingest-daemon.log
+.ingest-daemon.pid
+.daemon-state.json
+.webhook-forwarder.log
+.webhook-forwarder.pid
