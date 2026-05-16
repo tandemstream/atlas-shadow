@@ -38,8 +38,11 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
                             CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     attempt_count   INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
+    -- source is validated in Python (see queue.enqueue's assert). The
+    -- CHECK constraint was removed when the reconciler was added (and
+    -- the assert is the only writer's gate), so future source values
+    -- can ship without a SQLite migration.
     source          TEXT    NOT NULL DEFAULT 'webhook'
-                            CHECK (source IN ('webhook', 'replay', 'startup-recover'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingest_queue_status_id

@@ -48,10 +48,68 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def init_db(db_path: Path) -> None:
     """Apply ``schema.sql`` to the DB at ``db_path``. Idempotent (the
-    schema uses ``CREATE TABLE IF NOT EXISTS``)."""
+    schema uses ``CREATE TABLE IF NOT EXISTS``).
+
+    Also runs forward-only migrations for live DBs that pre-date a
+    schema change — currently the one migration is "drop the source
+    CHECK constraint" added when ``source='reconciler'`` joined the
+    enum.
+    """
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     with connect(db_path) as conn:
         conn.executescript(schema)
+        _migrate_drop_source_check(conn)
+
+
+def _migrate_drop_source_check(conn: sqlite3.Connection) -> None:
+    """If the live ``ingest_queue`` table still carries the old
+    ``CHECK (source IN ('webhook', 'replay', 'startup-recover'))``
+    clause, rebuild it without that constraint.
+
+    SQLite can't alter a CHECK constraint in place; the documented
+    pattern is "create new, copy rows, drop old, rename." Wrapped in
+    a transaction so a partial migration leaves the original table
+    untouched.
+    """
+    cur = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='ingest_queue'"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return
+    create_sql = (row["sql"] if isinstance(row, sqlite3.Row) else row[0]) or ""
+    if "CHECK (source IN" not in create_sql and "CHECK(source IN" not in create_sql:
+        return  # already migrated (or freshly created without the CHECK)
+    conn.executescript(
+        """
+        BEGIN;
+        CREATE TABLE ingest_queue__new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_sha      TEXT    NOT NULL UNIQUE,
+            enqueued_at     TEXT    NOT NULL,
+            started_at      TEXT,
+            finished_at     TEXT,
+            status          TEXT    NOT NULL DEFAULT 'queued'
+                                    CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            last_error      TEXT,
+            source          TEXT    NOT NULL DEFAULT 'webhook'
+        );
+        INSERT INTO ingest_queue__new
+            (id, commit_sha, enqueued_at, started_at, finished_at,
+             status, attempt_count, last_error, source)
+        SELECT id, commit_sha, enqueued_at, started_at, finished_at,
+               status, attempt_count, last_error, source
+          FROM ingest_queue;
+        DROP TABLE ingest_queue;
+        ALTER TABLE ingest_queue__new RENAME TO ingest_queue;
+        CREATE INDEX IF NOT EXISTS idx_ingest_queue_status_id
+            ON ingest_queue (status, id);
+        CREATE INDEX IF NOT EXISTS idx_ingest_queue_finished_at
+            ON ingest_queue (finished_at);
+        COMMIT;
+        """
+    )
 
 
 def enqueue(
@@ -73,7 +131,7 @@ def enqueue(
             "queue_id": int,  # the row id in ingest_queue
         }
     """
-    assert source in ("webhook", "replay", "startup-recover")
+    assert source in ("webhook", "replay", "startup-recover", "reconciler")
     sha = (commit_sha or "").strip().lower()
     if not sha:
         raise ValueError("commit_sha must be a non-empty string")

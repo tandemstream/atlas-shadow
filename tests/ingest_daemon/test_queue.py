@@ -120,3 +120,83 @@ def test_mark_terminal_rejects_bad_status(db_path):
     claim = queue_mod.claim_next(db_path)
     with pytest.raises(ValueError):
         queue_mod.mark_terminal(db_path, claim["queue_id"], status="running")
+
+
+def test_enqueue_accepts_reconciler_source(db_path):
+    """Reconciler ticks set ``source='reconciler'``; queue.enqueue must
+    accept it (and the SQL CHECK constraint that previously rejected
+    unknown sources must no longer be in place — see schema.sql)."""
+    res = queue_mod.enqueue(db_path, SHA_A, source="reconciler")
+    assert res["queued"] is True
+    assert res["reason"] == "new"
+
+
+def test_init_db_migrates_old_source_check_constraint(tmp_path):
+    """A DB created before the reconciler's schema change still carries
+    the old ``CHECK (source IN ('webhook', 'replay', 'startup-recover'))``
+    clause. ``init_db`` must transparently migrate it so existing
+    operator databases pick up ``source='reconciler'`` without manual
+    ``rm`` + ``bootstrap``.
+    """
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    # Hand-create the legacy schema.
+    with sqlite3.connect(str(db)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE ingest_queue (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                commit_sha      TEXT    NOT NULL UNIQUE,
+                enqueued_at     TEXT    NOT NULL,
+                started_at      TEXT,
+                finished_at     TEXT,
+                status          TEXT    NOT NULL DEFAULT 'queued'
+                                        CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+                attempt_count   INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT,
+                source          TEXT    NOT NULL DEFAULT 'webhook'
+                                        CHECK (source IN ('webhook', 'replay', 'startup-recover'))
+            );
+            INSERT INTO ingest_queue (commit_sha, enqueued_at, source)
+            VALUES ('deadbeef' || '0' || '000000000000000000000000000000', '2026-05-15T00:00:00+00:00', 'webhook');
+            """
+        )
+    # Sanity: legacy CHECK rejects the new source.
+    with sqlite3.connect(str(db)) as conn:
+        import pytest
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO ingest_queue (commit_sha, enqueued_at, source) "
+                "VALUES ('a' || '0' || '00000000000000000000000000000000000000', '2026-05-15T00:00:01+00:00', 'reconciler')"
+            )
+    # Run init_db; migration drops the source CHECK.
+    queue_mod.init_db(db)
+    # Existing row preserved.
+    res = queue_mod.enqueue(db, SHA_B, source="reconciler")
+    assert res["queued"] is True
+    # Original webhook row is still there.
+    with sqlite3.connect(str(db)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT commit_sha, source FROM ingest_queue ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["source"] == "webhook"
+    assert rows[1]["source"] == "reconciler"
+
+
+def test_init_db_migration_is_idempotent(db_path):
+    """Running ``init_db`` a second time on an already-migrated DB
+    must be a no-op (no migration runs, no rows lost)."""
+    queue_mod.enqueue(db_path, SHA_A, source="reconciler")
+    queue_mod.init_db(db_path)  # second invocation
+    queue_mod.init_db(db_path)  # third for good measure
+    import sqlite3
+
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT commit_sha, source FROM ingest_queue").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "reconciler"

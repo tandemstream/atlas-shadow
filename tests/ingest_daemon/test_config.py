@@ -82,3 +82,36 @@ def test_load_config_reads_webhook_secret_from_env(tmp_path, monkeypatch):
 def test_load_config_missing_path_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         config_mod.load_config(tmp_path / "nope.yaml")
+
+
+def test_load_config_reconciler_defaults(tmp_path):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+        },
+    )
+    cfg = config_mod.load_config(p)
+    assert cfg.reconciler_enabled is True
+    assert cfg.reconciler_interval_seconds == 300
+    assert cfg.reconciler_ls_remote_timeout_seconds == 60
+
+
+def test_load_config_reconciler_overrides(tmp_path):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+            "ingest_daemon": {
+                "reconciler_enabled": False,
+                "reconciler_interval_seconds": 60,
+                "reconciler_ls_remote_timeout_seconds": 15,
+            },
+        },
+    )
+    cfg = config_mod.load_config(p)
+    assert cfg.reconciler_enabled is False
+    assert cfg.reconciler_interval_seconds == 60
+    assert cfg.reconciler_ls_remote_timeout_seconds == 15
