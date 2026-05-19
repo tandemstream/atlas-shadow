@@ -47,6 +47,9 @@ class ReceiptGradingRow:
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
+    source_snapshot_status: Optional[str] = None
+    source_snapshot_hash_match: Optional[bool] = None
+    source_snapshot_sha256: Optional[str] = None
 
 
 @dataclass(frozen=True)

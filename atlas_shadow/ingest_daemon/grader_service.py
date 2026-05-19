@@ -524,6 +524,7 @@ from . import ledger as ledger_mod  # noqa: E402
 from . import pr_comment as pr_comment_mod  # noqa: E402
 from . import state_file as state_file_mod  # noqa: E402
 from . import doc_resolver as doc_resolver_mod  # noqa: E402
+from . import code_snapshot as code_snapshot_mod  # noqa: E402
 
 
 def _fetch_pr_files(
@@ -621,6 +622,7 @@ def _grade_one_receipt(
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
+    source_snapshot = None
     tool_label = ""
 
     if isinstance(translation, DocQuery):
@@ -676,6 +678,10 @@ def _grade_one_receipt(
         atlas_returncode = atlas_response.returncode
         atlas_exception = atlas_response.exception
         atlas_stderr_head = (atlas_response.stderr or "")[:1000] or None
+        source_snapshot = code_snapshot_mod.resolve_code_receipt_snapshot(
+            receipt,
+            repo_path=cfg.core_repo_path,
+        )
         tool_label = translation.tool
 
     # Grade
@@ -706,6 +712,15 @@ def _grade_one_receipt(
             atlas_returncode=atlas_returncode,
             atlas_exception=atlas_exception,
             atlas_stderr_head=atlas_stderr_head,
+            source_snapshot_status=(
+                source_snapshot.status if source_snapshot is not None else None
+            ),
+            source_snapshot_hash_match=(
+                source_snapshot.hash_match if source_snapshot is not None else None
+            ),
+            source_snapshot_sha256=(
+                source_snapshot.resolved_sha256 if source_snapshot is not None else None
+            ),
         )
 
     return pr_comment_mod.ReceiptGradingRow(
@@ -724,6 +739,15 @@ def _grade_one_receipt(
         atlas_returncode=atlas_returncode,
         atlas_exception=atlas_exception,
         atlas_stderr_head=atlas_stderr_head,
+        source_snapshot_status=(
+            source_snapshot.status if source_snapshot is not None else None
+        ),
+        source_snapshot_hash_match=(
+            source_snapshot.hash_match if source_snapshot is not None else None
+        ),
+        source_snapshot_sha256=(
+            source_snapshot.resolved_sha256 if source_snapshot is not None else None
+        ),
     )
 
 
@@ -1150,4 +1174,7 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "atlas_returncode": row.atlas_returncode,
         "atlas_exception": row.atlas_exception,
         "atlas_stderr_head": row.atlas_stderr_head,
+        "source_snapshot_status": row.source_snapshot_status,
+        "source_snapshot_hash_match": row.source_snapshot_hash_match,
+        "source_snapshot_sha256": row.source_snapshot_sha256,
     }
