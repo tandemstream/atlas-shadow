@@ -216,26 +216,20 @@ def parse_command_text(command_text: Optional[str]) -> Optional[dict[str, Any]]:
         return {"op": "ls", "path": args[0]}
 
     if op == "find":
-        # find <path> ...flags
-        # We accept ``find <path>`` and ``find <path> -type d/-f``;
-        # other flag combinations fall back to unsupported. Pure-tree
-        # listing keeps things deterministic.
-        if not args or args[0].startswith("-"):
+        # find <path>  — flags NOT accepted in v1.
+        #
+        # Earlier drafts whitelisted ``-type``, ``-name``, etc., but
+        # ``_handle_find`` delegates to ``_handle_ls`` and ignores
+        # filters. With filters accepted but not applied, an absence
+        # receipt for ``find docs -type d -name agents`` could be
+        # contradicted by *any* unrelated file under ``docs/`` — a
+        # false ``found_but_expected_absent`` exclusion from the
+        # clean denominator. v2 can implement real filter semantics;
+        # for now reject filtered forms so they fall through to the
+        # normal grading path.
+        if len(args) != 1 or args[0].startswith("-"):
             return None
-        # Whitelist a small set of safe flags.
-        allowed_flags = {
-            "-type", "-maxdepth", "-mindepth", "-name", "-path",
-            "-not", "-iname",
-        }
-        i = 1
-        while i < len(args):
-            tok = args[i]
-            if tok in allowed_flags:
-                i += 2  # flag + value
-                continue
-            # Any other token = unsupported.
-            return None
-        return {"op": "find", "path": args[0], "extra": args[1:]}
+        return {"op": "find", "path": args[0], "extra": []}
 
     if op == "wc":
         # wc -l <path>
@@ -536,12 +530,11 @@ def _handle_find(
     repo_path: Path,
     _subprocess_run: Callable,
 ) -> CommandSnapshotResult:
-    """``find <path>`` is treated the same as ``ls <path>`` for our
-    purposes — both enumerate entries under the path at the receipt's
-    commit. We don't honor every find flag here (deliberately
-    whitelisted in the parser); the simplification is acceptable
-    because the result-set semantics (empty vs. non-empty) are what
-    drive the score_status decision.
+    """``find <path>`` (no flags — see parser) is treated the same as
+    ``ls <path>``: both enumerate entries under the path at the
+    receipt's commit. Filtered forms are rejected at parse time so
+    we don't silently ignore ``-type``/``-name`` and produce wrong
+    absence-search verdicts.
     """
     return _handle_ls(receipt, parsed, repo_path=repo_path,
                       _subprocess_run=_subprocess_run)

@@ -132,11 +132,24 @@ def test_parse_ls():
     assert p == {"op": "ls", "path": "src/example.py"}
 
 
-def test_parse_find_with_whitelisted_flags():
-    p = cs_mod.parse_command_text("find docs -type d -name agents")
-    assert p["op"] == "find"
-    assert p["path"] == "docs"
-    assert "-type" in p["extra"]
+def test_parse_find_bare_path_only():
+    p = cs_mod.parse_command_text("find scripts")
+    assert p == {"op": "find", "path": "scripts", "extra": []}
+
+
+def test_parse_find_rejects_flags():
+    """v1 rejects any find flags. The handler delegates to ls and
+    ignores filters, so accepting -type/-name would produce wrong
+    absence-search verdicts (any unrelated file under the search
+    root would falsely contradict the absence claim).
+    """
+    for cmd in [
+        "find docs -type d -name agents",
+        "find docs -type f",
+        "find docs -maxdepth 1",
+        "find docs -name '*.md'",
+    ]:
+        assert cs_mod.parse_command_text(cmd) is None, cmd
 
 
 def test_parse_wc_l():
@@ -308,14 +321,32 @@ def test_ls_path_missing(git_fixture):
     assert result.status == cs_mod.STATUS_SOURCE_MISSING
 
 
-def test_find_treated_as_ls(git_fixture):
+def test_find_bare_treated_as_ls(git_fixture):
     repo, commit, _body = git_fixture
     r = _make_receipt(
         source_commit=commit,
-        command_text="find scripts -type f",
+        command_text="find scripts",
     )
     result = cs_mod.resolve_command_snapshot(r, repo_path=repo)
     assert result.status == cs_mod.STATUS_MATCH
+
+
+def test_find_with_flags_falls_through_to_unsupported(git_fixture):
+    """Codex's P1 from PR #20 review: filtered find forms must not
+    silently behave like ``ls <path>``. Bare absence claim:
+    ``find docs -type d -name agents`` against a repo where
+    ``docs/agents`` is absent but ``docs/other/`` exists must NOT
+    return found_but_expected_absent. The fix is to reject the
+    parse so the row falls through to normal grading.
+    """
+    repo, commit, _body = git_fixture
+    r = _make_receipt(
+        source_commit=commit,
+        evidence_type="absence_search",
+        command_text="find scripts -type d -name nonexistent",
+    )
+    result = cs_mod.resolve_command_snapshot(r, repo_path=repo)
+    assert result.status == cs_mod.STATUS_UNSUPPORTED
 
 
 def test_wc_l_counts_lines(git_fixture):
