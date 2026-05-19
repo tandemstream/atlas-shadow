@@ -70,6 +70,15 @@ def git_fixture(tmp_path):
     (repo / "docs" / "spec.md").write_text("# Spec\nheading_path is forbidden\n", encoding="utf-8")
     (repo / "scripts").mkdir()
     (repo / "scripts" / "build.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    schema = repo / "products" / "tandem" / "packages" / "python" / "atlas" / "schema_v0.2.sql"
+    schema.parent.mkdir(parents=True)
+    schema.write_text(
+        "create table artifact_chunks (\n"
+        "    id uuid primary key,\n"
+        "    artifact_id uuid not null\n"
+        ");\n",
+        encoding="utf-8",
+    )
     subprocess.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
     subprocess.run(
         ["git", "commit", "-q", "-m", "initial"],
@@ -250,6 +259,32 @@ def test_sed_range_matches_excerpt_sha(git_fixture):
     )
     result = cs_mod.resolve_command_snapshot(r, repo_path=repo)
     assert result.status == cs_mod.STATUS_MATCH
+
+
+def test_sed_range_uses_source_ref_for_atlas_leaf_path(git_fixture):
+    """Command text is often Atlas-package-relative while source_ref.path
+    is monorepo-rooted. The source_ref anchor should resolve the git
+    path instead of reporting command_snapshot_source_missing.
+    """
+    repo, commit, _body = git_fixture
+    source_path = "products/tandem/packages/python/atlas/schema_v0.2.sql"
+    full_body = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{source_path}"],
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout
+    sliced = "\n".join(full_body.splitlines()[1:3])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    expected = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+    r = _make_receipt(
+        source_path=source_path,
+        source_commit=commit,
+        excerpt_sha256=expected,
+        command_text="scripts/qa_lookup.sh sed-range schema_v0.2.sql 2 3",
+    )
+    result = cs_mod.resolve_command_snapshot(r, repo_path=repo)
+    assert result.status == cs_mod.STATUS_MATCH
+    assert result.parsed["resolved_path"] == source_path
 
 
 def test_sed_range_mismatch_returns_mismatch(git_fixture):
