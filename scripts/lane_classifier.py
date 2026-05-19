@@ -64,6 +64,7 @@ class Classified:
     bucket: str
     receipt_anchors: dict  # source_path / source_lines / source_commit / excerpt_sha
     snap_status: Optional[str]
+    run_snap_status: Optional[str]  # PR #15
     answer_len: Optional[int]
     rationale: str
     confidence: Optional[float]
@@ -107,6 +108,7 @@ def _classify_one(
     tool = row.get("tool")
     grade = row.get("grade", "")
     snap = row.get("source_snapshot_status")
+    run_snap = row.get("run_snapshot_status")  # PR #15
     rationale = (row.get("rationale") or "")
     confidence = row.get("confidence")
     rec = receipts_by_qid.get(qid)
@@ -175,26 +177,42 @@ def _classify_one(
                 else:
                     bucket = "exact_source_path_missing"
             elif snap == "git_source_hash_match":
-                # ``source_snapshot_status=git_source_hash_match`` means
-                # the receipt's pinned ``source_commit`` renders the
-                # expected excerpt. It does NOT prove the same path/lines
-                # still render the expected excerpt at the grading
-                # ``run_commit``. See
-                # `atlas_shadow/ingest_daemon/code_snapshot.py:73`.
-                #
-                # A ``no_match + git_source_hash_match`` row stays
-                # ``score_status=counted`` until PR #15 adds the
-                # ``run_snapshot_status`` field that checks the same
-                # path/lines against the actual run-commit SHA. Until
-                # then, classify as ``needs_run_commit_snapshot`` — NOT
-                # as ``exact_source_fast_path_didnt_fire``, which would
-                # incorrectly attribute the miss to atlas when the
-                # actual cause may be ``run_commit_line_drift``.
-                bucket = "needs_run_commit_snapshot"
+                # Receipt is internally consistent at authoring time.
+                # PR #15's run_snapshot lets us tell run-commit drift
+                # apart from a genuine fast-path failure.
+                if run_snap == "run_commit_hash_mismatch":
+                    # File was edited between receipt commit and run
+                    # commit. Atlas returned the right line range at
+                    # the run commit but those lines now contain
+                    # different code than the receipt described. Not
+                    # an Atlas miss — the receipt's line anchor moved.
+                    # (At grading time this row also lands
+                    # ``score_status=skipped_run_commit_line_drift``
+                    # and is excluded from the clean denominator.)
+                    bucket = "run_commit_line_drift"
+                elif run_snap == "run_commit_hash_match":
+                    # Both snapshots match — receipt is internally
+                    # consistent AND the same line range still renders
+                    # the expected content at the run commit. Atlas
+                    # still returned wrong content. This is the
+                    # genuine fast-path failure case.
+                    bucket = "exact_source_fast_path_didnt_fire"
+                elif run_snap == "run_commit_source_missing":
+                    # Path itself disappeared at run commit. Edge case —
+                    # bucket as drift too (the receipt's anchor target
+                    # is gone, not Atlas's fault).
+                    bucket = "run_commit_line_drift"
+                else:
+                    # PR #15 field absent (pre-#15 artifact) or
+                    # not_applicable / no_line_range. Fall back to the
+                    # PR #14 interim bucket name so legacy artifacts
+                    # still parse without crashing.
+                    bucket = "needs_run_commit_snapshot"
             else:
-                # snap is None / not_applicable / no_line_range — receipt
-                # didn't carry enough anchor for the snapshot check.
-                # Same diagnostic gap as above.
+                # snap is None / not_applicable / no_line_range — the
+                # receipt didn't carry enough anchor for the
+                # receipt-side snapshot check, so we can't reliably
+                # compare to the run-side either.
                 bucket = "needs_run_commit_snapshot"
         elif grade == "atlas_not_found":
             bucket = "atlas_returned_nothing"
@@ -234,6 +252,7 @@ def _classify_one(
         bucket=bucket,
         receipt_anchors=anchors,
         snap_status=snap,
+        run_snap_status=run_snap,
         answer_len=row.get("atlas_answer_len"),
         rationale=rationale[:400],
         confidence=confidence,

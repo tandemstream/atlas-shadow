@@ -601,6 +601,7 @@ def _grade_one_receipt(
     receipt: PacketReceipt,
     code_revision_id: Optional[str],
     repo_full_name: str,
+    run_commit: Optional[str] = None,
     _runner_run_one: Optional[Callable] = None,
     _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
     _grader_grade: Optional[Callable] = None,
@@ -610,6 +611,13 @@ def _grade_one_receipt(
     Injection seams (``_runner_run_one``, ``_doc_resolver``, ``_grader_grade``)
     keep this testable without standing up Atlas / a real DB / the
     Anthropic SDK.
+
+    PR #15: ``run_commit`` is the grading-anchor commit (typically
+    ``event.base_sha``). When provided + the receipt carries
+    source_path+source_lines, a parallel snapshot at this commit lets
+    the daemon distinguish "Atlas missed" from
+    "run-commit-line-drift." Pass ``None`` to skip the second snapshot
+    (e.g. callers without a grading commit available).
     """
     translation = translate_receipt_to_query(receipt)
 
@@ -623,6 +631,7 @@ def _grade_one_receipt(
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
     source_snapshot = None
+    run_snapshot = None  # PR #15: only resolved on the code path
     tool_label = ""
 
     if isinstance(translation, DocQuery):
@@ -682,6 +691,15 @@ def _grade_one_receipt(
             receipt,
             repo_path=cfg.core_repo_path,
         )
+        # PR #15: parallel snapshot at the grading run commit. Only
+        # resolves when (a) caller passed a run_commit and (b) the
+        # receipt is itself eligible (path + lines + commit present —
+        # the resolver short-circuits otherwise).
+        run_snapshot = code_snapshot_mod.resolve_code_receipt_run_snapshot(
+            receipt,
+            repo_path=cfg.core_repo_path,
+            run_commit=run_commit,
+        )
         tool_label = translation.tool
 
     # Grade
@@ -698,15 +716,19 @@ def _grade_one_receipt(
     except Exception as exc:  # noqa: BLE001 — preserve Atlas diagnostics
         # The grader threw before producing a verdict. Grade is forced
         # to no_match per existing behavior, but lane + score_status
-        # still apply — the receipt's anchor shape is known and the
-        # source_snapshot was already resolved upstream.
+        # still apply — the receipt's anchor shape is known and both
+        # snapshots were already resolved upstream.
         snap_status = (
             source_snapshot.status if source_snapshot is not None else None
+        )
+        run_snap_status = (
+            run_snapshot.status if run_snapshot is not None else None
         )
         lane = _infer_lane(tool_label=tool_label, receipt=receipt)
         score_status, clean_reason = _derive_score_status(
             grade="no_match",
             source_snapshot_status=snap_status,
+            run_snapshot_status=run_snap_status,
         )
         return pr_comment_mod.ReceiptGradingRow(
             question_id=receipt.question_id,
@@ -731,6 +753,13 @@ def _grade_one_receipt(
             source_snapshot_sha256=(
                 source_snapshot.resolved_sha256 if source_snapshot is not None else None
             ),
+            run_snapshot_status=run_snap_status,
+            run_snapshot_hash_match=(
+                run_snapshot.hash_match if run_snapshot is not None else None
+            ),
+            run_snapshot_sha256=(
+                run_snapshot.resolved_sha256 if run_snapshot is not None else None
+            ),
             lane=lane,
             score_status=score_status,
             clean_excluded_reason=clean_reason,
@@ -739,10 +768,14 @@ def _grade_one_receipt(
     snap_status = (
         source_snapshot.status if source_snapshot is not None else None
     )
+    run_snap_status = (
+        run_snapshot.status if run_snapshot is not None else None
+    )
     lane = _infer_lane(tool_label=tool_label, receipt=receipt)
     score_status, clean_reason = _derive_score_status(
         grade=grading.grade,
         source_snapshot_status=snap_status,
+        run_snapshot_status=run_snap_status,
     )
     return pr_comment_mod.ReceiptGradingRow(
         question_id=receipt.question_id,
@@ -766,6 +799,13 @@ def _grade_one_receipt(
         ),
         source_snapshot_sha256=(
             source_snapshot.resolved_sha256 if source_snapshot is not None else None
+        ),
+        run_snapshot_status=run_snap_status,
+        run_snapshot_hash_match=(
+            run_snapshot.hash_match if run_snapshot is not None else None
+        ),
+        run_snapshot_sha256=(
+            run_snapshot.resolved_sha256 if run_snapshot is not None else None
         ),
         lane=lane,
         score_status=score_status,
@@ -817,17 +857,33 @@ def _derive_score_status(
     *,
     grade: str,
     source_snapshot_status: Optional[str],
+    run_snapshot_status: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Decide whether this row should count toward the clean denominator.
 
-    Returns ``(score_status, clean_excluded_reason)``:
+    Returns ``(score_status, clean_excluded_reason)``. Order of checks
+    matters — narrower (receipt-stale) wins over broader (run-commit
+    line drift) when both apply.
+
+      - ``("skipped_receipt_stale", "receipt_stale")`` (PR #14): the
+        cited path/lines don't exist at the receipt's pinned commit
+        (``source_snapshot_status == "git_source_missing"``) AND the
+        grader said ``no_match``. Atlas isn't being measured on a real
+        receipt — the receipt itself drifted at authoring time.
+
+      - ``("skipped_run_commit_line_drift", "run_commit_line_drift")``
+        (PR #15): the receipt-commit snapshot matched (receipt is
+        internally consistent at authoring time), but the run-commit
+        snapshot doesn't (the file was edited between receipt commit
+        and run commit, so the cited line numbers now point at
+        different code) AND the grader said ``no_match``. Atlas
+        returned the right line range at the run commit — but those
+        lines now contain different content than the receipt
+        described. Not an Atlas miss; the receipt's line anchor is the
+        moving target.
+
       - ``("counted", None)`` is the default — row participates in
         both ``raw_pass_pct`` and ``clean_pass_pct`` denominators.
-      - ``("skipped_receipt_stale", "receipt_stale")`` when the cited
-        path/lines don't exist at the run commit (PR #13 surfaces
-        this as ``source_snapshot_status == "git_source_missing"``)
-        AND the grader said ``no_match``. Atlas isn't being measured
-        on a real receipt — the receipt itself drifted.
 
     Future statuses (e.g. ``skipped_doc_corpus_excluded``,
     ``skipped_non_repo_evidence``) plug in here without touching the
@@ -837,8 +893,21 @@ def _derive_score_status(
     (full_match | partial_match | no_match | atlas_not_found). The
     skip is bookkeeping on a separate field, not a fifth grade value.
     """
-    if grade == "no_match" and source_snapshot_status == "git_source_missing":
+    if grade != "no_match":
+        return ("counted", None)
+    # Receipt-side stale takes precedence — atlas was never measured on
+    # a renderable receipt commit.
+    if source_snapshot_status == "git_source_missing":
         return ("skipped_receipt_stale", "receipt_stale")
+    # Run-commit line drift: receipt matched at authoring, but the file
+    # moved by the time we graded. We require an explicit receipt-snap
+    # match before drifting — without that anchor, the receipt itself
+    # could be the issue.
+    if (
+        source_snapshot_status == "git_source_hash_match"
+        and run_snapshot_status == "run_commit_hash_mismatch"
+    ):
+        return ("skipped_run_commit_line_drift", "run_commit_line_drift")
     return ("counted", None)
 
 
@@ -1033,6 +1102,12 @@ def run_pr_grading(
                         receipt=receipt,
                         code_revision_id=code_revision_id,
                         repo_full_name=event.repo_full_name,
+                        # PR #15: the grading-anchor commit. For the
+                        # PR-gate path this is the merge base; for
+                        # grade-packet-batch it's --commit-sha
+                        # (propagated through event.base_sha by the
+                        # synthetic PrEvent in grade_batch).
+                        run_commit=event.base_sha,
                     )
                 except Exception as exc:
                     rows.append(
@@ -1084,6 +1159,11 @@ def run_pr_grading(
                 "clean_total": summary.clean_total,
                 "excluded_count": summary.excluded_count,
                 "skipped_receipt_stale_count": summary.skipped_receipt_stale_count,
+                # PR #15: distinct counter for run-commit line drift skips
+                # (rows where the receipt-commit snapshot matched but the
+                # run-commit snapshot mismatched).
+                "skipped_run_commit_line_drift_count":
+                    summary.skipped_run_commit_line_drift_count,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the
@@ -1283,6 +1363,11 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "source_snapshot_status": row.source_snapshot_status,
         "source_snapshot_hash_match": row.source_snapshot_hash_match,
         "source_snapshot_sha256": row.source_snapshot_sha256,
+        # PR #15: run-commit snapshot (None on non-code receipts or
+        # when no run_commit was supplied to _grade_one_receipt).
+        "run_snapshot_status": row.run_snapshot_status,
+        "run_snapshot_hash_match": row.run_snapshot_hash_match,
+        "run_snapshot_sha256": row.run_snapshot_sha256,
         # PR #14: lane + clean-denominator bookkeeping.
         "lane": row.lane,
         "score_status": row.score_status,

@@ -238,10 +238,13 @@ def _format_md(
     lines.append(
         "_**Raw %** counts every receipt in the denominator (legacy score). "
         "**Clean %** excludes rows the daemon flagged as not measuring "
-        "Atlas retrieval — today that's receipt-stale anchors "
-        "(`score_status=skipped_receipt_stale`, "
-        "`clean_excluded_reason=receipt_stale`). Pre-PR-14 baselines render "
-        "Clean % as `n/a` because the bookkeeping wasn't captured at the time._"
+        "Atlas retrieval: receipt-stale anchors "
+        "(`score_status=skipped_receipt_stale`) and (PR #15) run-commit "
+        "line drift (`score_status=skipped_run_commit_line_drift` — the "
+        "file moved between receipt commit and grading commit so the cited "
+        "line numbers now point at different code). The two breakouts are "
+        "available per-run in `baseline-<date>/manifest.json`. Pre-PR-14 "
+        "baselines render Clean % as `n/a`._"
     )
     lines.append("")
     lines.append(
@@ -277,6 +280,12 @@ def _format_json(
                 "total_excluded": r.get("total_excluded", 0),
                 "total_skipped_receipt_stale": r.get(
                     "total_skipped_receipt_stale", 0
+                ),
+                # PR #15: run-commit drift breakout. Legacy manifests
+                # render zero; consumers can chart receipt-stale vs.
+                # run-drift independently.
+                "total_skipped_run_commit_line_drift": r.get(
+                    "total_skipped_run_commit_line_drift", 0
                 ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),

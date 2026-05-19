@@ -81,10 +81,20 @@ class ReceiptGradingRow:
     source_snapshot_status: Optional[str] = None
     source_snapshot_hash_match: Optional[bool] = None
     source_snapshot_sha256: Optional[str] = None
+    # PR #15: parallel snapshot at the grading run_commit (not the
+    # receipt's pinned source_commit). Lets `_derive_score_status`
+    # distinguish "Atlas missed" from "the file moved between receipt
+    # commit and grading commit." Values come from
+    # ``code_snapshot.STATUS_RUN_COMMIT_*`` (e.g. ``run_commit_hash_match``).
+    # ``None`` when no run_commit was available (e.g. doc_resolver
+    # receipts or receipts without source_path+source_lines).
+    run_snapshot_status: Optional[str] = None
+    run_snapshot_hash_match: Optional[bool] = None
+    run_snapshot_sha256: Optional[str] = None
     # PR #14: lane + clean-denominator bookkeeping.
     lane: Optional[str] = None  # explicit_source_fast_path|fuzzy_find_code|scan_search|doc_resolver
-    score_status: str = "counted"  # counted | skipped_receipt_stale | …
-    clean_excluded_reason: Optional[str] = None  # receipt_stale | …
+    score_status: str = "counted"  # counted | skipped_receipt_stale | skipped_run_commit_line_drift | …
+    clean_excluded_reason: Optional[str] = None  # receipt_stale | run_commit_line_drift | …
 
 
 @dataclass(frozen=True)
@@ -145,6 +155,21 @@ class GradingSummary:
         return sum(
             1 for r in self.rows
             if r.score_status == "skipped_receipt_stale"
+        )
+
+    @property
+    def skipped_run_commit_line_drift_count(self) -> int:
+        """PR #15: how many rows in this packet were skipped because the
+        cited line range still renders at the receipt commit but the
+        file was edited between receipt commit and grading run commit?
+        Surfaced separately so operators can chart receipt-anchor drift
+        vs. grading-commit drift independently — they hint at different
+        upstream fixes (receipt-authoring discipline vs. fast-moving
+        codebases that need run-commit-aware anchors).
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_run_commit_line_drift"
         )
 
     @property
