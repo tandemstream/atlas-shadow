@@ -1,11 +1,15 @@
 """cli — entry points for the make targets.
 
-Three top-level subcommands:
+Top-level subcommands:
 
-- ``shadow-run``       — parse fixture → run Atlas → grade → write JSONL
-- ``shadow-grade``     — re-grade an existing pre-grade JSONL (rare; used
-                         to swap grader models without re-querying Atlas)
-- ``shadow-aggregate`` — write the cross-packet comparison report
+- ``shadow-run``           — parse fixture → run Atlas → grade → write JSONL
+- ``shadow-grade``         — re-grade an existing pre-grade JSONL (rare;
+                             used to swap grader models without
+                             re-querying Atlas)
+- ``shadow-aggregate``     — write the cross-packet comparison report
+- ``shadow-compare-runs``  — diff two ``shadow-runs/baseline-*`` runs
+                             (probe-comparison tool — see
+                             :mod:`atlas_shadow.ingest_daemon.compare_runs`)
 
 The shadow-run path is the main one. Out-of-band mode (`--commit <sha>`)
 invokes :mod:`atlas_shadow.ingest` first to spin up a fresh org at that
@@ -30,6 +34,7 @@ from . import grader as grader_mod
 from . import ingest as ingest_mod
 from . import parser as parser_mod
 from . import runner as runner_mod
+from .ingest_daemon import compare_runs as compare_runs_mod
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -264,6 +269,87 @@ def shadow_aggregate(config_path: Path, shadow_runs_dir: Path, out_path: Path) -
         f"(total_packets={summary['total_packets']})",
         err=True,
     )
+
+
+@main.command("shadow-compare-runs")
+@click.option(
+    "--before",
+    "before_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Path to the BEFORE run's baseline-* directory.",
+)
+@click.option(
+    "--after",
+    "after_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Path to the AFTER run's baseline-* directory.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    required=False,
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help=(
+        "Directory to write comparison-report.{md,json} into. Defaults "
+        "to shadow-runs/_compare/<before>-vs-<after>/."
+    ),
+)
+def shadow_compare_runs(
+    before_dir: Path,
+    after_dir: Path,
+    output_dir: Optional[Path],
+) -> None:
+    """Diff two shadow-runs/baseline-* directories.
+
+    Loads each run's manifest.json + per-packet JSONs, classifies
+    per-receipt transitions (newly_passing / newly_failing /
+    newly_skipped / un_skipped_* / etc.), and writes a Markdown
+    report + JSON payload under ``--output-dir`` (or the default
+    ``shadow-runs/_compare/<before>-vs-<after>/``).
+
+    Typical workflow: re-run a probe after landing a tuning PR, then::
+
+        .venv/bin/python -m atlas_shadow shadow-compare-runs \\
+            --before shadow-runs/baseline-2026-05-15 \\
+            --after  shadow-runs/baseline-2026-05-20
+
+    The Markdown report leads with run-level deltas, then breaks down
+    by skip category, evidence type, and per-packet receipt
+    transitions — useful for confirming "did q12 exit the denominator
+    via #20?" or "where did the new passes come from?"
+    """
+    comparison = compare_runs_mod.compare_runs(before_dir, after_dir)
+    if output_dir is None:
+        # Conventional default location alongside the runs themselves.
+        # Both run dirs are expected to live under ``shadow-runs/`` so
+        # walking up two parents from the after-run lands at
+        # ``shadow-runs/``.
+        shadow_runs_root = after_dir.parent
+        slug = f"{comparison.before_run_name}-vs-{comparison.after_run_name}"
+        output_dir = shadow_runs_root / "_compare" / slug
+    md_path, json_path = compare_runs_mod.write_reports(comparison, output_dir)
+    click.echo(
+        f"[atlas-shadow] wrote {md_path} and {json_path}",
+        err=True,
+    )
+    # Surface the headline numbers on stdout for quick scripting.
+    click.echo(
+        f"clean: {_fmt_pct(comparison.before_clean_pct)} → "
+        f"{_fmt_pct(comparison.after_clean_pct)} "
+        f"(Δ {comparison.clean_pct_delta_pp})"
+    )
+
+
+def _fmt_pct(v: Optional[float]) -> str:
+    """Tiny CLI-local helper. The renderer module has its own copy
+    for its internal use; we don't re-export it to avoid a public
+    surface that callers might depend on."""
+    if not isinstance(v, (int, float)):
+        return "n/a"
+    return f"{v:.1f}%"
 
 
 @main.command("purge-orphans")
