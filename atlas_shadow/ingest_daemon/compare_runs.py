@@ -98,6 +98,19 @@ EVIDENCE_TYPE_BUCKETS: tuple[str, ...] = (
     "other",
 )
 
+# Lane buckets — kept in sync with
+# :mod:`atlas_shadow.ingest_daemon.grade_batch.LANE_BUCKETS`. The
+# delta computation here mirrors :data:`EVIDENCE_TYPE_BUCKETS` — it
+# rolls up whichever lane the row carries without re-classifying.
+LANE_BUCKETS: tuple[str, ...] = (
+    "explicit_source_fast_path",
+    "fuzzy_find_code",
+    "scan_search",
+    "doc_resolver",
+    "non_retrieval",
+    "other",
+)
+
 
 # ─── Result dataclasses ───────────────────────────────────────────────
 
@@ -151,6 +164,10 @@ class RunComparison:
     # ``{bucket: {"before_clean_pct", "after_clean_pct", "delta_pp",
     #             "before_receipts", "after_receipts"}}``
     by_evidence_type_delta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Same shape as ``by_evidence_type_delta`` but keyed by retrieval
+    # lane. Empty when either side's manifest lacks ``total_by_lane``
+    # (pre-by-lane baseline).
+    by_lane_delta: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_packet: list[PacketComparison] = field(default_factory=list)
     transition_counts: dict[str, int] = field(default_factory=dict)
 
@@ -372,17 +389,20 @@ def _compare_packet(
     )
 
 
-def _by_evidence_type_delta(
+def _bucket_delta(
     before_breakdown: Optional[dict[str, Any]],
     after_breakdown: Optional[dict[str, Any]],
+    buckets: tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
-    """Compute per-bucket clean-pct delta. Returns empty dict if either
-    side lacks the breakdown (pre-PR-evidence-breakdown manifest).
+    """Generic per-bucket clean-pct delta. Returns empty dict if either
+    side lacks the breakdown (pre-rollup manifest). Used by both
+    :func:`_by_evidence_type_delta` and :func:`_by_lane_delta` — both
+    rollups have identical shape so the math is shared.
     """
     if not isinstance(before_breakdown, dict) or not isinstance(after_breakdown, dict):
         return {}
     out: dict[str, dict[str, Any]] = {}
-    for bucket in EVIDENCE_TYPE_BUCKETS:
+    for bucket in buckets:
         b = before_breakdown.get(bucket) or {}
         a = after_breakdown.get(bucket) or {}
         b_cp = b.get("clean_pct")
@@ -400,6 +420,29 @@ def _by_evidence_type_delta(
             "delta_pp": delta,
         }
     return out
+
+
+def _by_evidence_type_delta(
+    before_breakdown: Optional[dict[str, Any]],
+    after_breakdown: Optional[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Compute per-evidence-type clean-pct delta. Empty dict if either
+    side lacks the breakdown (pre-PR-evidence-breakdown manifest).
+    """
+    return _bucket_delta(
+        before_breakdown, after_breakdown, EVIDENCE_TYPE_BUCKETS,
+    )
+
+
+def _by_lane_delta(
+    before_breakdown: Optional[dict[str, Any]],
+    after_breakdown: Optional[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Compute per-lane clean-pct delta. Mirror of
+    :func:`_by_evidence_type_delta`. Empty dict if either side lacks
+    ``total_by_lane`` (pre-by-lane manifest).
+    """
+    return _bucket_delta(before_breakdown, after_breakdown, LANE_BUCKETS)
 
 
 def _skip_category_deltas(
@@ -464,6 +507,10 @@ def compare_runs(before_dir: Path, after_dir: Path) -> RunComparison:
         by_evidence_type_delta=_by_evidence_type_delta(
             before_manifest.get("total_by_evidence_type"),
             after_manifest.get("total_by_evidence_type"),
+        ),
+        by_lane_delta=_by_lane_delta(
+            before_manifest.get("total_by_lane"),
+            after_manifest.get("total_by_lane"),
         ),
         per_packet=per_packet,
         transition_counts=run_transition_counts,
@@ -577,6 +624,33 @@ def render_markdown(comparison: RunComparison) -> str:
             )
         lines.append("")
 
+    # By-lane delta. Sibling section to by-evidence-type — surfaces
+    # which retrieval surface contributed the clean % movement. A
+    # doc-resolver fix should show movement only in the doc_resolver
+    # row, etc.
+    if comparison.by_lane_delta:
+        lines.append("## Clean % by retrieval lane")
+        lines.append("")
+        lines.append(
+            "| Lane | Before clean % | After clean % | Δ | "
+            "Receipts (B/A) |"
+        )
+        lines.append("|---|---|---|---|---|")
+        for bucket in LANE_BUCKETS:
+            row = comparison.by_lane_delta.get(bucket, {})
+            br = int(row.get("before_receipts", 0) or 0)
+            ar = int(row.get("after_receipts", 0) or 0)
+            if br == 0 and ar == 0:
+                continue
+            lines.append(
+                f"| `{bucket}` | "
+                f"{_fmt_pct(row.get('before_clean_pct'))} | "
+                f"{_fmt_pct(row.get('after_clean_pct'))} | "
+                f"{_fmt_delta_pp(row.get('delta_pp'))} | "
+                f"{br} / {ar} |"
+            )
+        lines.append("")
+
     # Run-level transitions.
     lines.append("## Receipt transitions (run-level)")
     lines.append("")
@@ -669,6 +743,7 @@ def render_json(comparison: RunComparison) -> str:
         "clean_pct_delta_pp": comparison.clean_pct_delta_pp,
         "skip_category_deltas": comparison.skip_category_deltas,
         "by_evidence_type_delta": comparison.by_evidence_type_delta,
+        "by_lane_delta": comparison.by_lane_delta,
         "transition_counts": comparison.transition_counts,
         "per_packet": [
             {

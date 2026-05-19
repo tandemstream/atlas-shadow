@@ -426,6 +426,89 @@ def test_compare_runs_legacy_manifest_no_evidence_breakdown(tmp_path: Path):
     after = _write_run(tmp_path, "baseline-after")
     result = cr.compare_runs(before, after)
     assert result.by_evidence_type_delta == {}
+    # Same back-compat contract for by_lane_delta.
+    assert result.by_lane_delta == {}
+
+
+def test_compare_runs_by_lane_delta(tmp_path: Path):
+    """Run-level by_lane_delta reflects per-lane clean-pct changes.
+    Mirror of the by_evidence_type delta test. The whole point of
+    this rollup is so a lane-specific fix (e.g. Codex's doc_resolver
+    work) shows movement in exactly one bucket — this test pins that
+    semantic."""
+    before_bd = {
+        "explicit_source_fast_path": {
+            "receipts": 10, "correct": 5, "excluded": 0,
+            "clean_total": 10, "clean_pct": 50.0,
+        },
+        # doc_resolver lane was failing pre-fix.
+        "doc_resolver": {
+            "receipts": 5, "correct": 1, "excluded": 0,
+            "clean_total": 5, "clean_pct": 20.0,
+        },
+        "fuzzy_find_code": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "scan_search": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "non_retrieval": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "other": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+    }
+    after_bd = {
+        # fast_path lane unchanged.
+        "explicit_source_fast_path": {
+            "receipts": 10, "correct": 5, "excluded": 0,
+            "clean_total": 10, "clean_pct": 50.0,
+        },
+        # doc_resolver lane moved up after Codex's fix landed.
+        "doc_resolver": {
+            "receipts": 5, "correct": 4, "excluded": 0,
+            "clean_total": 5, "clean_pct": 80.0,
+        },
+        "fuzzy_find_code": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "scan_search": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "non_retrieval": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+        "other": {
+            "receipts": 0, "correct": 0, "excluded": 0,
+            "clean_total": 0, "clean_pct": None,
+        },
+    }
+    before = _write_run(tmp_path, "baseline-before", manifest_overrides={
+        "total_by_lane": before_bd,
+    })
+    after = _write_run(tmp_path, "baseline-after", manifest_overrides={
+        "total_by_lane": after_bd,
+    })
+    result = cr.compare_runs(before, after)
+    # fast_path stayed flat — its delta is zero.
+    fp = result.by_lane_delta["explicit_source_fast_path"]
+    assert fp["before_clean_pct"] == 50.0
+    assert fp["after_clean_pct"] == 50.0
+    assert fp["delta_pp"] == 0.0
+    # doc_resolver lane moved +60pp — exactly the attribution the
+    # rollup is supposed to surface.
+    dr = result.by_lane_delta["doc_resolver"]
+    assert dr["before_clean_pct"] == 20.0
+    assert dr["after_clean_pct"] == 80.0
+    assert dr["delta_pp"] == 60.0
 
 
 def test_compare_runs_missing_manifest_raises(tmp_path: Path):

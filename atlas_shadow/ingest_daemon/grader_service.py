@@ -1649,6 +1649,11 @@ def run_pr_grading(
                 # across packets AND so per-packet drilldowns show
                 # which evidence_type the receipts came from.
                 "by_evidence_type": summary.by_evidence_type,
+                # Per-lane breakdown — symmetric with by_evidence_type.
+                # Surfaces which retrieval surface (doc_resolver /
+                # explicit_source_fast_path / fuzzy_find_code /
+                # scan_search / non_retrieval) the row was scored on.
+                "by_lane": summary.by_lane,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the

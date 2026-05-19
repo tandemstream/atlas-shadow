@@ -3064,6 +3064,142 @@ def test_grading_summary_by_evidence_type_empty_summary():
         assert bd[bucket]["clean_pct"] is None
 
 
+# ─── by_lane breakdown (sibling of by_evidence_type) ──────────────────
+
+
+def test_grading_summary_by_lane_partitions_rows():
+    """Every row lands in exactly one lane bucket; counts + clean math
+    match the per-bucket denominators. Mirror of the
+    by_evidence_type partitioning test."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        # explicit_source_fast_path: 2 receipts, 1 correct, 0 excluded → 50.0%
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            lane="explicit_source_fast_path",
+            score_status="counted",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="no_match",
+            confidence=1.0, rationale="missed", tool="find_code",
+            lane="explicit_source_fast_path",
+            score_status="counted",
+        ),
+        # fuzzy_find_code: 1 counted-pass
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="partial_match",
+            confidence=0.7, rationale="meh", tool="find_code",
+            lane="fuzzy_find_code",
+            score_status="counted",
+        ),
+        # doc_resolver: 1 row, all excluded → clean_total=0, clean_pct=None
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q4", question="q4", grade="no_match",
+            confidence=1.0, rationale="r", tool="doc_resolver",
+            lane="doc_resolver",
+            score_status="skipped_unavailable_source_ref",
+        ),
+        # non_retrieval: 1 row from the pre-Atlas skip path
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q5", question="q5", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            lane="non_retrieval",
+            score_status="skipped_command_snapshot",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    bd = s.by_lane
+
+    assert bd["explicit_source_fast_path"]["receipts"] == 2
+    assert bd["explicit_source_fast_path"]["correct"] == 1
+    assert bd["explicit_source_fast_path"]["clean_total"] == 2
+    assert bd["explicit_source_fast_path"]["clean_pct"] == 50.0
+
+    assert bd["fuzzy_find_code"]["receipts"] == 1
+    assert bd["fuzzy_find_code"]["correct"] == 1  # partial_match counts
+    assert bd["fuzzy_find_code"]["clean_pct"] == 100.0
+
+    assert bd["doc_resolver"]["receipts"] == 1
+    assert bd["doc_resolver"]["excluded"] == 1
+    assert bd["doc_resolver"]["clean_total"] == 0
+    assert bd["doc_resolver"]["clean_pct"] is None
+
+    assert bd["non_retrieval"]["receipts"] == 1
+    assert bd["non_retrieval"]["clean_total"] == 0
+    assert bd["non_retrieval"]["clean_pct"] is None
+
+    # scan_search bucket was empty but still zero-filled.
+    assert bd["scan_search"]["receipts"] == 0
+    assert bd["scan_search"]["clean_total"] == 0
+    assert bd["scan_search"]["clean_pct"] is None
+
+    # Receipts across buckets sum to row count (no double counting).
+    total = sum(b["receipts"] for b in bd.values())
+    assert total == len(rows)
+
+
+def test_grading_summary_by_lane_unknown_value_routes_to_other():
+    """Future / unexpected lane values land in 'other' rather than
+    silently corrupting a canonical bucket. Important per Codex's
+    guidance: don't invent meaning — preserve the row's classification
+    by routing unknowns into other."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            lane="some_future_lane",
+            score_status="counted",
+        ),
+        # Also: rows with lane=None (e.g. legacy artifacts) land in
+        # 'other' — we do NOT collapse them into source_excerpt-style
+        # defaults the way by_evidence_type does, because lane has no
+        # documented default in :mod:`grader_service`.
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="no_match",
+            confidence=1.0, rationale="r", tool="find_code",
+            lane=None,
+            score_status="counted",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    bd = s.by_lane
+    assert bd["other"]["receipts"] == 2
+    assert bd["other"]["correct"] == 1
+    assert bd["other"]["clean_total"] == 2
+    assert bd["other"]["clean_pct"] == 50.0
+    # Canonical buckets stayed empty — no leakage.
+    assert bd["explicit_source_fast_path"]["receipts"] == 0
+    assert bd["doc_resolver"]["receipts"] == 0
+
+
+def test_grading_summary_by_lane_empty_summary():
+    """No rows → every lane bucket zero-filled, no exceptions."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=[],
+    )
+    bd = s.by_lane
+    for bucket in (
+        "explicit_source_fast_path", "fuzzy_find_code",
+        "scan_search", "doc_resolver", "non_retrieval", "other",
+    ):
+        assert bd[bucket]["receipts"] == 0
+        assert bd[bucket]["clean_total"] == 0
+        assert bd[bucket]["clean_pct"] is None
+
+
 # ─── PR #18 review fix: doc receipts defer source-unavailable to doc_resolver ───
 
 

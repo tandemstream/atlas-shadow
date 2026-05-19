@@ -46,6 +46,20 @@ _EVIDENCE_TYPE_RENDER_ORDER: tuple[str, ...] = (
     "other",
 )
 
+# Canonical bucket order for the by-lane breakdown. Kept in sync with
+# :data:`atlas_shadow.ingest_daemon.grade_batch.LANE_BUCKETS`. Same
+# rationale as _EVIDENCE_TYPE_RENDER_ORDER — both modules render the
+# same column order so a chart consumer reading the JSON doesn't have
+# to detect order.
+_LANE_RENDER_ORDER: tuple[str, ...] = (
+    "explicit_source_fast_path",
+    "fuzzy_find_code",
+    "scan_search",
+    "doc_resolver",
+    "non_retrieval",
+    "other",
+)
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` via tempfile → fsync → rename.
@@ -260,6 +274,62 @@ def _format_md(
             )
             lines.append("")
 
+    # Per-lane breakdown for the LATEST run only — sibling section of
+    # the by-evidence-type breakdown above. Surfaces which retrieval
+    # surface the clean denominator is dominated by, so when a lane-
+    # specific fix lands (e.g. a doc_resolver improvement) its impact
+    # can be attributed to that lane's clean_pct movement without the
+    # operator having to drill into per-receipt rows. Latest-run-only
+    # for the same reason as the evidence-type section: a per-run
+    # breakdown would balloon the markdown; the JSON exposes every
+    # run.
+    if runs:
+        latest_lane_breakdown = runs[-1].get("total_by_lane")
+        if isinstance(latest_lane_breakdown, dict) and any(
+            (latest_lane_breakdown.get(b) or {}).get("receipts", 0)
+            for b in _LANE_RENDER_ORDER
+        ):
+            lines.append("## Latest run — by retrieval lane")
+            lines.append("")
+            lines.append(
+                "| Lane | Receipts | Excluded | Clean total | "
+                "Correct | Clean % |"
+            )
+            lines.append("|---|---|---|---|---|---|")
+            for bucket in _LANE_RENDER_ORDER:
+                vals = latest_lane_breakdown.get(bucket) or {}
+                receipts = int(vals.get("receipts", 0) or 0)
+                # Suppress all-zero rows for readability; full
+                # breakdown is in the JSON.
+                if receipts == 0:
+                    continue
+                excluded = int(vals.get("excluded", 0) or 0)
+                clean_total = int(vals.get("clean_total", 0) or 0)
+                correct = int(vals.get("correct", 0) or 0)
+                clean_pct = vals.get("clean_pct")
+                clean_pct_str = (
+                    f"{clean_pct:.1f}%" if isinstance(clean_pct, (int, float))
+                    else "—"
+                )
+                lines.append(
+                    f"| `{bucket}` | {receipts} | {excluded} | "
+                    f"{clean_total} | {correct} | {clean_pct_str} |"
+                )
+            lines.append("")
+            lines.append(
+                "_Lane = the retrieval surface this receipt was "
+                "scored on. ``explicit_source_fast_path`` is "
+                "PR #426 fast-path eligible (find_code with "
+                "path+lines anchor); ``fuzzy_find_code`` is "
+                "find_code without an anchor; ``doc_resolver`` "
+                "is the docs-RAG path; ``non_retrieval`` is the "
+                "pre-Atlas skip path (command_snapshot / non-repo "
+                "evidence / unavailable source ref). A lane-specific "
+                "fix should move that lane's `clean_pct` without "
+                "disturbing the others._"
+            )
+            lines.append("")
+
     lines.append("## Run history")
     lines.append("")
     # PR #14: dashboard now shows raw + clean pct side by side. Legacy
@@ -373,6 +443,9 @@ def _format_json(
                 # treat None as "no breakdown available" rather than
                 # "all buckets at zero."
                 "total_by_evidence_type": r.get("total_by_evidence_type"),
+                # Per-lane breakdown (run level). Same back-compat
+                # contract as total_by_evidence_type.
+                "total_by_lane": r.get("total_by_lane"),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }
