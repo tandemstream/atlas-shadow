@@ -723,7 +723,7 @@ def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
     receipt = grader_service_mod.PacketReceipt(
         question_id="q1",
         question="Which code path writes chunks?",
-        source_path="products/tandem/packages/python/atlas/core/ingest/pipeline.py",
+        source_path="missing.py",
         source_lines="1-5",
         source_commit=BASE_SHA,
         oracle_excerpt="excerpt",
@@ -746,6 +746,7 @@ def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
     assert row.atlas_answer_len == len("stub atlas response")
     assert row.atlas_returncode == 0
     assert "exception:RuntimeError" in row.warnings
+    assert row.source_snapshot_status == "git_source_missing"
 
 
 def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monkeypatch):
