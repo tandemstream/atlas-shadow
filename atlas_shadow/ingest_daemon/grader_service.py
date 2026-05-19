@@ -696,6 +696,18 @@ def _grade_one_receipt(
             model=cfg.grader_model,
         )
     except Exception as exc:  # noqa: BLE001 — preserve Atlas diagnostics
+        # The grader threw before producing a verdict. Grade is forced
+        # to no_match per existing behavior, but lane + score_status
+        # still apply — the receipt's anchor shape is known and the
+        # source_snapshot was already resolved upstream.
+        snap_status = (
+            source_snapshot.status if source_snapshot is not None else None
+        )
+        lane = _infer_lane(tool_label=tool_label, receipt=receipt)
+        score_status, clean_reason = _derive_score_status(
+            grade="no_match",
+            source_snapshot_status=snap_status,
+        )
         return pr_comment_mod.ReceiptGradingRow(
             question_id=receipt.question_id,
             question=receipt.question,
@@ -712,17 +724,26 @@ def _grade_one_receipt(
             atlas_returncode=atlas_returncode,
             atlas_exception=atlas_exception,
             atlas_stderr_head=atlas_stderr_head,
-            source_snapshot_status=(
-                source_snapshot.status if source_snapshot is not None else None
-            ),
+            source_snapshot_status=snap_status,
             source_snapshot_hash_match=(
                 source_snapshot.hash_match if source_snapshot is not None else None
             ),
             source_snapshot_sha256=(
                 source_snapshot.resolved_sha256 if source_snapshot is not None else None
             ),
+            lane=lane,
+            score_status=score_status,
+            clean_excluded_reason=clean_reason,
         )
 
+    snap_status = (
+        source_snapshot.status if source_snapshot is not None else None
+    )
+    lane = _infer_lane(tool_label=tool_label, receipt=receipt)
+    score_status, clean_reason = _derive_score_status(
+        grade=grading.grade,
+        source_snapshot_status=snap_status,
+    )
     return pr_comment_mod.ReceiptGradingRow(
         question_id=receipt.question_id,
         question=receipt.question,
@@ -739,16 +760,86 @@ def _grade_one_receipt(
         atlas_returncode=atlas_returncode,
         atlas_exception=atlas_exception,
         atlas_stderr_head=atlas_stderr_head,
-        source_snapshot_status=(
-            source_snapshot.status if source_snapshot is not None else None
-        ),
+        source_snapshot_status=snap_status,
         source_snapshot_hash_match=(
             source_snapshot.hash_match if source_snapshot is not None else None
         ),
         source_snapshot_sha256=(
             source_snapshot.resolved_sha256 if source_snapshot is not None else None
         ),
+        lane=lane,
+        score_status=score_status,
+        clean_excluded_reason=clean_reason,
     )
+
+
+def _infer_lane(
+    *,
+    tool_label: str,
+    receipt: PacketReceipt,
+) -> str:
+    """Infer the retrieval lane this receipt was scored on.
+
+    Per Codex's PR #14 design note, the lane is persisted on the row
+    rather than re-inferred downstream. v1 inference uses:
+
+      1. ``tool_label`` (the dispatch we made: doc_resolver /
+         scan_search / find_code).
+      2. The receipt's anchor shape — find_code w/ both
+         ``source_path`` AND ``source_lines`` is PR #426 fast-path
+         eligible.
+
+    Returns one of:
+      - ``"doc_resolver"``
+      - ``"scan_search"``
+      - ``"explicit_source_fast_path"`` — find_code receipt with
+        path+lines anchor
+      - ``"fuzzy_find_code"`` — find_code receipt w/o anchor (or
+        tool_label fell through to error)
+
+    A future iteration should consult the atlas response's
+    ``retrieval_plan.explicit_source_fast_path`` flag for ground
+    truth — that requires plumbing ``atlas_retrieval_plan`` from the
+    runner first (separate PR).
+    """
+    if tool_label == "doc_resolver":
+        return "doc_resolver"
+    if tool_label == "scan_search":
+        return "scan_search"
+    has_path = bool((receipt.source_path or "").strip())
+    has_lines = bool((receipt.source_lines or "").strip())
+    if has_path and has_lines:
+        return "explicit_source_fast_path"
+    return "fuzzy_find_code"
+
+
+def _derive_score_status(
+    *,
+    grade: str,
+    source_snapshot_status: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """Decide whether this row should count toward the clean denominator.
+
+    Returns ``(score_status, clean_excluded_reason)``:
+      - ``("counted", None)`` is the default — row participates in
+        both ``raw_pass_pct`` and ``clean_pass_pct`` denominators.
+      - ``("skipped_receipt_stale", "receipt_stale")`` when the cited
+        path/lines don't exist at the run commit (PR #13 surfaces
+        this as ``source_snapshot_status == "git_source_missing"``)
+        AND the grader said ``no_match``. Atlas isn't being measured
+        on a real receipt — the receipt itself drifted.
+
+    Future statuses (e.g. ``skipped_doc_corpus_excluded``,
+    ``skipped_non_repo_evidence``) plug in here without touching the
+    ``grade`` enum.
+
+    Per Codex's PR #14 design note: ``grade`` stays narrow
+    (full_match | partial_match | no_match | atlas_not_found). The
+    skip is bookkeeping on a separate field, not a fifth grade value.
+    """
+    if grade == "no_match" and source_snapshot_status == "git_source_missing":
+        return ("skipped_receipt_stale", "receipt_stale")
+    return ("counted", None)
 
 
 def run_pr_grading(
@@ -982,9 +1073,17 @@ def run_pr_grading(
             outcome["summaries"].append({
                 "packet_id": packet_id,
                 "passed": summary.passed,
+                # Raw score — denominator is total rows (legacy).
                 "pass_pct": summary.pass_pct,
                 "pass_count": summary.pass_count,
                 "total": summary.total,
+                # PR #14: clean-denominator score. Excludes rows whose
+                # score_status != "counted" (today: receipt-stale skips
+                # from PR #13's source_snapshot mismatch).
+                "clean_pass_pct": summary.clean_pass_pct,
+                "clean_total": summary.clean_total,
+                "excluded_count": summary.excluded_count,
+                "skipped_receipt_stale_count": summary.skipped_receipt_stale_count,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the
@@ -1158,6 +1257,13 @@ def write_grading_artifact(
 
 
 def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
+    """Serialize one grading row to the per-packet JSON artifact.
+
+    PR #14 adds ``lane`` / ``score_status`` / ``clean_excluded_reason``
+    so downstream classifiers can apply the clean-denominator filter
+    without re-inferring lane or stale-receipt status from rationale
+    text.
+    """
     return {
         "question_id": row.question_id,
         "question": row.question,
@@ -1177,4 +1283,8 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "source_snapshot_status": row.source_snapshot_status,
         "source_snapshot_hash_match": row.source_snapshot_hash_match,
         "source_snapshot_sha256": row.source_snapshot_sha256,
+        # PR #14: lane + clean-denominator bookkeeping.
+        "lane": row.lane,
+        "score_status": row.score_status,
+        "clean_excluded_reason": row.clean_excluded_reason,
     }

@@ -209,6 +209,38 @@ shadow-runs/
     └── artifacts/                ← raw orchestrator output (mostly redundant)
 ```
 
+#### Two scores: raw vs clean (PR #14)
+
+Every PR #14+ run emits **two** percentages — `overall_pct` (raw, legacy)
+and `clean_overall_pct` (PR #14's clean denominator). Both appear in
+`manifest.json`, `summary.md`, and the cross-run `overall-summary.md`
+dashboard.
+
+| Field | What it counts | Use when |
+|---|---|---|
+| `overall_pct` | passes / (every row, including stale-receipt skips) | comparing against pre-PR-14 baselines for trend continuity |
+| `clean_overall_pct` | passes / (rows where `score_status == "counted"` — excludes receipt-stale anchors and future similar bookkeeping skips) | judging Atlas's actual retrieval performance |
+
+A receipt's `02-qna-log.md` anchor can drift out of sync with the run
+commit (the cited file was refactored, deleted, or its lines moved).
+PR #13 surfaces that via `source_snapshot_status: "git_source_missing"`
+on the row. PR #14 turns the per-row signal into a per-run score: such
+no_match rows get `score_status: "skipped_receipt_stale"` +
+`clean_excluded_reason: "receipt_stale"`, and the clean denominator
+drops them from BOTH numerator and denominator so the score reflects
+retrieval performance, not receipt drift.
+
+The `grade` enum stays narrow (`full_match` / `partial_match` /
+`no_match` / `atlas_not_found`) — the skip is bookkeeping on a
+separate `score_status` field, not a fifth grade value. Downstream
+code that branches on grade values continues to see no_match for
+stale receipts; the clean filter happens at aggregation time via
+`score_status`.
+
+Legacy `baseline-*/manifest.json` files (pre-PR-14) don't carry
+`clean_overall_pct`; the cross-run dashboard renders `n/a` for those
+runs rather than zero so the trendline doesn't get corrupted.
+
 ---
 
 ## Ongoing operation

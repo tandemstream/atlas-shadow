@@ -30,7 +30,38 @@ COMMENT_MARKER = "<!-- atlas-shadow-grading -->"
 
 @dataclass(frozen=True)
 class ReceiptGradingRow:
-    """One row in the PR comment table (one per receipt)."""
+    """One row in the PR comment table (one per receipt).
+
+    Grading-bookkeeping fields (PR #14 — clean-denominator grading):
+      - ``grade`` is the raw grader verdict — kept narrow
+        (full_match | partial_match | no_match | atlas_not_found) so
+        downstream code branching on grade values doesn't need a fifth
+        case. Per Codex's PR #14 design note, ``skipped_receipt_stale``
+        is NOT a grade value.
+      - ``score_status`` is the new bookkeeping field that says how this
+        row should be counted. ``counted`` contributes to both
+        ``raw_pass_pct`` and ``clean_pass_pct``;
+        ``skipped_receipt_stale`` (or any non-``counted`` value)
+        contributes to ``raw_pass_pct`` only — ``clean_pass_pct``
+        removes the row from BOTH numerator and denominator so the
+        operator score reflects retrieval performance, not receipt
+        drift.
+      - ``clean_excluded_reason`` carries the why for ``score_status``,
+        machine-readable. Today's only value is ``receipt_stale``
+        (cited anchor doesn't exist at run commit — from PR #13's
+        ``source_snapshot_status == git_source_missing`` paired with
+        grade ``no_match``). Reserved for future expansion:
+        ``docs_work_excluded_by_design`` (PR #277 exclusion),
+        ``non_repo_evidence`` (``external_tool_docs`` / ``user_context``
+        / ``absence_search`` receipts).
+      - ``lane`` is the inferred retrieval surface this receipt was
+        scored on: ``explicit_source_fast_path`` (find_code w/ a
+        ``source_path + source_lines`` anchor — PR #426 fast-path
+        eligible), ``fuzzy_find_code`` (find_code w/o eligible
+        anchor), ``scan_search``, or ``doc_resolver``. Inferred at
+        row-construction time so the per-row classification persists
+        in the artifact JSON.
+    """
 
     question_id: str
     question: str
@@ -50,6 +81,10 @@ class ReceiptGradingRow:
     source_snapshot_status: Optional[str] = None
     source_snapshot_hash_match: Optional[bool] = None
     source_snapshot_sha256: Optional[str] = None
+    # PR #14: lane + clean-denominator bookkeeping.
+    lane: Optional[str] = None  # explicit_source_fast_path|fuzzy_find_code|scan_search|doc_resolver
+    score_status: str = "counted"  # counted | skipped_receipt_stale | …
+    clean_excluded_reason: Optional[str] = None  # receipt_stale | …
 
 
 @dataclass(frozen=True)
@@ -75,6 +110,13 @@ class GradingSummary:
 
     @property
     def pass_pct(self) -> int:
+        """Raw pass percentage — denominator includes excluded rows.
+
+        Kept as the legacy operator score for trend continuity. New
+        consumers should prefer :attr:`clean_pass_pct` once the daemon
+        has been emitting ``score_status`` long enough that
+        comparisons are apples-to-apples.
+        """
         if not self.rows:
             return 0
         return int(round(self.pass_count * 100 / self.total))
@@ -82,6 +124,47 @@ class GradingSummary:
     @property
     def passed(self) -> bool:
         return self.pass_pct >= self.threshold_pct
+
+    # ── PR #14: clean-denominator score (excludes rows that aren't
+    # ── actually measuring Atlas retrieval — receipt-stale anchors
+    # ── and future similar bookkeeping skips).
+    @property
+    def excluded_count(self) -> int:
+        """Rows excluded from the clean denominator. Counted by
+        ``score_status != "counted"`` rather than by inspecting
+        ``clean_excluded_reason`` so the boolean stays true even if a
+        future ``score_status`` value lacks an explicit reason.
+        """
+        return sum(1 for r in self.rows if r.score_status != "counted")
+
+    @property
+    def skipped_receipt_stale_count(self) -> int:
+        """Convenience: how many rows in this packet were stale-receipt
+        skips? Surfaced separately because operators often want to
+        track receipt-drift independently of other exclusions."""
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_receipt_stale"
+        )
+
+    @property
+    def clean_total(self) -> int:
+        """Denominator for :attr:`clean_pass_pct`."""
+        return self.total - self.excluded_count
+
+    @property
+    def clean_pass_pct(self) -> Optional[int]:
+        """Pass percentage with excluded rows removed from BOTH
+        numerator and denominator. ``None`` when ``clean_total == 0``
+        (every row was excluded — score is undefined, not zero).
+        """
+        if self.clean_total <= 0:
+            return None
+        # ``pass_count`` filters by grade — passing rows are by
+        # definition ``score_status='counted'`` (we never emit
+        # skipped+pass tuples), so it remains the clean-numerator
+        # without further filtering.
+        return int(round(self.pass_count * 100 / self.clean_total))
 
 
 def build_comment_markdown(summary: GradingSummary) -> str:

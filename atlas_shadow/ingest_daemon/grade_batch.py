@@ -513,41 +513,95 @@ def _summary_pass_count(summary) -> int:
     return getattr(summary, "pass_count", 0)
 
 
+def _summary_excluded_count(summary) -> int:
+    """Read ``excluded_count`` (PR #14) with backward-compat zero.
+
+    Pre-PR-14 baselines + tests-using-dataclasses don't carry this
+    field — treat them as zero-excluded so legacy aggregates keep
+    working without rewriting old artifacts.
+    """
+    if isinstance(summary, dict):
+        return int(summary.get("excluded_count", 0) or 0)
+    return getattr(summary, "excluded_count", 0) or 0
+
+
+def _summary_skipped_receipt_stale_count(summary) -> int:
+    """Read ``skipped_receipt_stale_count`` (PR #14) with backward-compat zero."""
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_receipt_stale_count", 0) or 0)
+    return getattr(summary, "skipped_receipt_stale_count", 0) or 0
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
     "Correct" mirrors ``GradingSummary.pass_count`` — full_match or
     partial_match. Reads from the dict shape ``run_pr_grading``
     returns (codex r1 fix).
+
+    PR #14 added the clean-denominator score: rows whose
+    ``score_status != "counted"`` (today: receipt-stale skips) are
+    removed from BOTH numerator and denominator so the operator score
+    reflects retrieval performance, not receipt drift. The raw
+    ``overall_pct`` is preserved for trend continuity with pre-PR-14
+    baselines. Both scores are emitted in the manifest; consumers can
+    choose which to chart.
     """
     total_packets = len(packet_outcomes)
     total_receipts = 0
     total_correct = 0
+    total_excluded = 0
+    total_skipped_receipt_stale = 0
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
         packet_receipts = 0
         packet_correct = 0
+        packet_excluded = 0
+        packet_stale = 0
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
+            packet_excluded += _summary_excluded_count(summary)
+            packet_stale += _summary_skipped_receipt_stale_count(summary)
         total_receipts += packet_receipts
         total_correct += packet_correct
+        total_excluded += packet_excluded
+        total_skipped_receipt_stale += packet_stale
+        packet_clean_total = packet_receipts - packet_excluded
+        packet_clean_pct = (
+            round(packet_correct * 100 / packet_clean_total, 1)
+            if packet_clean_total > 0 else None
+        )
         per_packet_pct[slug] = {
             "receipts": packet_receipts,
             "correct": packet_correct,
             "pct": (round(packet_correct * 100 / packet_receipts, 1)
                     if packet_receipts else 0.0),
+            "clean_pct": packet_clean_pct,
+            "clean_total": packet_clean_total,
+            "excluded": packet_excluded,
+            "skipped_receipt_stale": packet_stale,
             "status": outcome.get("status"),
         }
     overall_pct = (
         round(total_correct * 100 / total_receipts, 1) if total_receipts else 0.0
     )
+    clean_total = total_receipts - total_excluded
+    clean_pass_pct = (
+        round(total_correct * 100 / clean_total, 1) if clean_total > 0 else None
+    )
     return {
         "total_packets": total_packets,
         "total_receipts": total_receipts,
         "total_correct": total_correct,
+        # Raw score — kept for legacy comparison with pre-PR-14 runs.
         "overall_pct": overall_pct,
+        # PR #14: clean-denominator score (excludes receipt-stale rows).
+        "clean_overall_pct": clean_pass_pct,
+        "clean_total": clean_total,
+        "total_excluded": total_excluded,
+        "total_skipped_receipt_stale": total_skipped_receipt_stale,
         "per_packet_pct": per_packet_pct,
     }
 
@@ -610,10 +664,30 @@ def write_per_run_summary_md(
     overall_pct: float,
     total_receipts: int,
     total_correct: int,
+    clean_overall_pct: Optional[float] = None,
+    clean_total: Optional[int] = None,
+    total_excluded: int = 0,
+    total_skipped_receipt_stale: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
+
+    PR #14: surfaces both ``overall_pct`` (raw — denominator includes
+    excluded rows) and ``clean_overall_pct`` (denominator excludes
+    receipt-stale skips and other non-counted bookkeeping). Per-packet
+    rows show both columns so operators can see where staleness is
+    moving the score.
     """
+    clean_line = ""
+    if clean_overall_pct is not None and clean_total is not None:
+        clean_line = (
+            f"- **Clean correct:** {total_correct} of {clean_total} "
+            f"({clean_overall_pct:.1f}%) "
+            f"_(excludes {total_excluded} row(s): "
+            f"{total_skipped_receipt_stale} receipt-stale)_"
+        )
+    else:
+        clean_line = "- **Clean score:** _n/a (no rows counted)_"
     lines = [
         f"# {run_name}",
         "",
@@ -621,27 +695,38 @@ def write_per_run_summary_md(
         f"- **Packet SHA mode:** `{packet_sha_mode}`",
         f"- **Packets graded:** {len(packet_outcomes)}",
         f"- **Total receipts:** {total_receipts}",
-        f"- **Correct:** {total_correct} ({overall_pct:.1f}%)",
+        f"- **Raw correct:** {total_correct} ({overall_pct:.1f}%)",
+        clean_line,
         "",
         "## Per-packet results",
         "",
-        "| Packet | Receipts | Correct | Pct | Status |",
-        "|---|---|---|---|---|",
+        "| Packet | Receipts | Correct | Raw % | Clean % | Excluded | Status |",
+        "|---|---|---|---|---|---|---|",
     ]
-    # Sort by ascending pct (worst first) — easier to spot problems.
+    # Sort by ascending raw pct (worst first) — easier to spot problems.
     rows = []
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
         receipts = 0
         correct = 0
+        excluded = 0
         for summary in outcome.get("summaries", []):
             receipts += _summary_total(summary)
             correct += _summary_pass_count(summary)
-        pct = (round(correct * 100 / receipts, 1) if receipts else 0.0)
-        rows.append((pct, slug, receipts, correct, outcome.get("status", "ok")))
+            excluded += _summary_excluded_count(summary)
+        raw_pct = (round(correct * 100 / receipts, 1) if receipts else 0.0)
+        clean_denom = receipts - excluded
+        clean_pct = (round(correct * 100 / clean_denom, 1)
+                     if clean_denom > 0 else None)
+        rows.append((raw_pct, slug, receipts, correct, clean_pct,
+                     excluded, outcome.get("status", "ok")))
     rows.sort(key=lambda r: r[0])
-    for pct, slug, receipts, correct, status in rows:
-        lines.append(f"| {slug} | {receipts} | {correct} | {pct:.1f}% | {status} |")
+    for raw_pct, slug, receipts, correct, clean_pct, excluded, status in rows:
+        clean_str = f"{clean_pct:.1f}%" if clean_pct is not None else "n/a"
+        lines.append(
+            f"| {slug} | {receipts} | {correct} | "
+            f"{raw_pct:.1f}% | {clean_str} | {excluded} | {status} |"
+        )
     lines.append("")
 
     target = output_dir / "summary.md"
@@ -891,6 +976,11 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         overall_pct=totals["overall_pct"],
         total_receipts=totals["total_receipts"],
         total_correct=totals["total_correct"],
+        # PR #14: clean denominator passthrough.
+        clean_overall_pct=totals.get("clean_overall_pct"),
+        clean_total=totals.get("clean_total"),
+        total_excluded=totals.get("total_excluded", 0),
+        total_skipped_receipt_stale=totals.get("total_skipped_receipt_stale", 0),
     )
 
     # Regenerate cross-run dashboard from on-disk manifests.
