@@ -230,6 +230,23 @@ no_match rows get `score_status: "skipped_receipt_stale"` +
 drops them from BOTH numerator and denominator so the score reflects
 retrieval performance, not receipt drift.
 
+**Gotcha — `source_snapshot_status` validates the *receipt* commit,
+not the *run* commit.** `code_snapshot.resolve_code_receipt_snapshot`
+fetches `<receipt.source_commit>:<source_path>` and compares against
+`receipt.excerpt_sha256`. So `git_source_hash_match` means "the
+receipt is internally consistent at authoring time" — it does **not**
+say "at the run commit, those line numbers still contain the same
+content." A receipt with `git_source_hash_match` + `grade=no_match`
+can be either (a) the fast path failed at the run commit, or
+(b) the fast path fired correctly but the file was edited between
+receipt commit and run commit so `<run_commit>:<path>:<lines>` now
+contains different code (call this `run_commit_line_drift`). Phase 1
+of PR #14 cannot distinguish these — a follow-up will add a second
+snapshot check against the run commit that lets `_derive_score_status`
+emit a separate `score_status: "skipped_run_commit_line_drift"` for
+case (b). Until then, these rows stay `counted` (conservative — better
+to under-skip than over-skip).
+
 The `grade` enum stays narrow (`full_match` / `partial_match` /
 `no_match` / `atlas_not_found`) — the skip is bookkeeping on a
 separate `score_status` field, not a fifth grade value. Downstream

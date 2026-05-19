@@ -175,13 +175,41 @@ def _classify_one(
                 else:
                     bucket = "exact_source_path_missing"
             elif snap == "git_source_hash_match":
-                # Path+lines render exactly, but atlas surfaced wrong
-                # content. Fast path didn't fire (or fired and returned
-                # the wrong span within the same file). Codex's Phase 2
-                # raw_result.retrieval_plan check refines this further.
-                bucket = "exact_source_fast_path_didnt_fire"
+                # IMPORTANT: ``source_snapshot_status`` validates against
+                # ``receipt.source_commit`` (the receipt's pinned
+                # authoring SHA), NOT the run commit — see
+                # `atlas_shadow/ingest_daemon/code_snapshot.py:73`. So
+                # ``git_source_hash_match`` only confirms the receipt is
+                # internally consistent at authoring time; it doesn't say
+                # anything about whether the same line range still
+                # contains the same content at the run commit.
+                #
+                # Two distinct failure modes live under this row shape:
+                #
+                #   (a) ``run_commit_line_drift`` — the fast path fired
+                #       correctly at the run commit and returned the
+                #       cited line range, but the file was edited between
+                #       receipt commit and run commit so the run-commit
+                #       bytes at those lines are different code than the
+                #       receipt expected. (Codex's q12 content-dedup case.)
+                #
+                #   (b) ``exact_source_fast_path_didnt_fire`` — the fast
+                #       path didn't engage and atlas returned wrong
+                #       content within the same file via fuzzy fallback.
+                #
+                # Phase 1 of PR #14 doesn't compute a run-commit snapshot
+                # so we cannot tell (a) from (b) from this row alone.
+                # Phase 2 (separate PR — add ``source_run_commit_*``
+                # fields that hash bytes at <run_commit>:<path>:<lines>
+                # and compare to receipt's excerpt_sha256) will let us
+                # bucket cleanly. Until then, collapse into a single
+                # "needs further diagnostics" bucket.
+                bucket = "exact_source_post_snapshot_mismatch"
             else:
-                bucket = "exact_source_fast_path_didnt_fire"
+                # snap is None / not_applicable / no_line_range — receipt
+                # didn't carry enough anchor for the snapshot check.
+                # Same diagnostic gap as above.
+                bucket = "exact_source_post_snapshot_mismatch"
         elif grade == "atlas_not_found":
             bucket = "atlas_returned_nothing"
         else:
