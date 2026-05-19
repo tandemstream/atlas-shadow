@@ -2959,14 +2959,42 @@ def test_classify_pre_atlas_skip_code_receipt_with_git_source_missing_pre_skippe
 
 
 def test_derive_score_status_doc_unresolved_source_ref_post_resolver():
-    """Doc receipts that doc_resolver returns ``unresolved_source_ref``
+    """Doc receipts that doc_resolver returns the unresolved binding
     for land in skipped_unavailable_source_ref post-grading. Captures
     the case where the alias-aware resolver tried and still couldn't
-    materialize the source."""
+    materialize the source.
+
+    PR #19 fix: doc_resolver emits ``BINDING_NONE = "none"`` (string)
+    on the row's ``revision_binding`` field — not the longer
+    ``"unresolved_source_ref"`` status name. _derive_score_status now
+    accepts both for forward compat.
+    """
+    # Real-world value emitted by doc_resolver:
     assert grader_service_mod._derive_score_status(
         grade="atlas_not_found",
-        source_snapshot_status="git_source_missing",  # raw git says missing
-        revision_binding="unresolved_source_ref",  # resolver also said no
+        source_snapshot_status="git_source_missing",
+        revision_binding="none",  # actual BINDING_NONE value
+    ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
+    # Forward-compat: also accept the longer status form
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_missing",
+        revision_binding="unresolved_source_ref",
+    ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
+
+
+def test_derive_score_status_doc_binding_none_with_clean_snapshot_still_skips():
+    """PR #19 regression: q10-shape — doc_resolver returned ``"none"``
+    binding (couldn't resolve) but source_snapshot_status is
+    ``"no_line_range"`` (not git_source_missing). The legacy fallback
+    branch would have left this counted; PR #19 catches it as
+    skipped_unavailable_source_ref because the resolver explicitly
+    said no.
+    """
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="no_line_range",
+        revision_binding="none",
     ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
 
 
