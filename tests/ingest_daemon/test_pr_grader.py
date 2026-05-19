@@ -576,11 +576,15 @@ def _mk_receipt(**kw) -> grader_service_mod.PacketReceipt:
 def test_translate_sed_range_to_find_code():
     r = _mk_receipt(
         source_path="src/foo.py",
+        source_lines="10-20",
         command_text="scripts/qa_lookup.sh sed-range src/foo.py 10 20",
     )
     out = grader_service_mod.translate_receipt_to_query(r)
     assert isinstance(out, grader_service_mod.CodeQuery)
     assert out.tool == "find_code"
+    assert "source_path: src/foo.py" in out.question
+    assert "source_lines: 10-20" in out.question
+    assert "command_text: scripts/qa_lookup.sh sed-range src/foo.py 10 20" in out.question
 
 
 def test_translate_grep_to_scan_search():

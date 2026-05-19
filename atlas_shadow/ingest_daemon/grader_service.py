@@ -478,7 +478,21 @@ def translate_receipt_to_query(receipt: "PacketReceipt"):
     if _is_doc_path(receipt.source_path):
         return DocQuery(receipt=receipt)
     tool = _classify_code_tool(receipt)
-    return CodeQuery(tool=tool, question=receipt.question, receipt=receipt)
+    return CodeQuery(tool=tool, question=_code_receipt_query_text(receipt), receipt=receipt)
+
+
+def _code_receipt_query_text(receipt: "PacketReceipt") -> str:
+    """Build code-query text from the receipt plus its strongest anchors."""
+    parts = [receipt.question.strip()]
+    if receipt.query_hint:
+        parts.append(f"query_hint: {receipt.query_hint.strip()}")
+    if receipt.source_path:
+        parts.append(f"source_path: {receipt.source_path.strip()}")
+    if receipt.source_lines:
+        parts.append(f"source_lines: {receipt.source_lines.strip()}")
+    if receipt.command_text:
+        parts.append(f"command_text: {receipt.command_text.strip()}")
+    return "\n".join(part for part in parts if part)
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +652,7 @@ def _grade_one_receipt(
 
         runner_receipt = RunnerReceipt(
             question_id=receipt.question_id,
-            question=receipt.question,
+            question=translation.question,
             oracle_excerpt=receipt.oracle_excerpt,
             oracle_claim=receipt.oracle_claim,
             source_path=receipt.source_path,
