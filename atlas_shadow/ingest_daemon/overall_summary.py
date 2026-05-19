@@ -287,6 +287,21 @@ def _format_json(
                 "total_skipped_run_commit_line_drift": r.get(
                     "total_skipped_run_commit_line_drift", 0
                 ),
+                # PR #17: four non-retrieval skip totals — each has a
+                # distinct upstream fix so consumers can chart them
+                # independently. Legacy manifests render zero.
+                "total_skipped_non_repo_evidence": r.get(
+                    "total_skipped_non_repo_evidence", 0
+                ),
+                "total_skipped_absence_search": r.get(
+                    "total_skipped_absence_search", 0
+                ),
+                "total_skipped_unavailable_source_ref": r.get(
+                    "total_skipped_unavailable_source_ref", 0
+                ),
+                "total_skipped_doc_corpus_excluded": r.get(
+                    "total_skipped_doc_corpus_excluded", 0
+                ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }

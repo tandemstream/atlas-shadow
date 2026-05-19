@@ -230,6 +230,35 @@ no_match rows get `score_status: "skipped_receipt_stale"` +
 drops them from BOTH numerator and denominator so the score reflects
 retrieval performance, not receipt drift.
 
+**Pre-atlas skips (PR #17):** Some receipts shouldn't go through
+find_code/scan_search/doc_resolver at all — either because the
+question is by-construction non-retrieval, the receipt's source
+can't be materialized, or the receipt's corpus is deliberately
+excluded by an upstream policy. The daemon detects these BEFORE
+calling atlas and emits a skip row with `lane=non_retrieval` +
+`tool=skipped`. Atlas isn't invoked, no atlas-side cost, and the
+clean denominator drops the row.
+
+| score_status | clean_excluded_reason | Trigger |
+|---|---|---|
+| `skipped_non_repo_evidence` | `non_repo_evidence` | `evidence_type ∈ {external_tool_docs, user_context}` — receipt cites information outside the shadow corpus's repo (Claude Code docs, user-provided empirical data). |
+| `skipped_absence_search` | `absence_search` | `evidence_type=absence_search` — receipt claims "X does NOT exist in the repo." find_code can't prove a negative; absence checks need a deterministic grep tool. |
+| `skipped_unavailable_source_ref` | `unavailable_source_ref` | `source_snapshot_status=git_source_missing` — receipt's cited source can't be materialized at `source_commit` (commit not in repo / file not at that commit). Supersedes PR #14's `skipped_receipt_stale` (same condition, caught pre-atlas now). |
+| `skipped_doc_corpus_excluded` | `doc_corpus_excluded` | `source_path` matches `docs/work/**` — PR #277 deliberately excludes these from shadow doc ingest to prevent grading ground-truth leakage. |
+
+Each total surfaces in `manifest.json` (`total_skipped_non_repo_evidence`
++ `total_skipped_absence_search` +
+`total_skipped_unavailable_source_ref` +
+`total_skipped_doc_corpus_excluded`) and in the cross-run
+`overall-summary.json` dashboard, so operators can chart each
+category independently — they hint at different upstream fixes
+(corpus completeness, grader routing, source-ref repair, exclusion-
+policy review).
+
+`summary.md`'s exclusion-line breakout names every non-zero
+component so the operator-facing per-run page surfaces which
+category is driving exclusions.
+
 **Raw retrieval diagnostics (PR #16):** Every code-path row also
 carries the workspace_atlas_query response shape so downstream
 classifiers can analyze atlas's actual retrieval plan without

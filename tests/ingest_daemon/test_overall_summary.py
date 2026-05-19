@@ -422,3 +422,36 @@ def test_regenerate_legacy_run_drift_defaults_zero(tmp_path: Path):
     _, json_path = os_mod.regenerate(tmp_path)
     run = json.loads(json_path.read_text())["runs"][0]
     assert run["total_skipped_run_commit_line_drift"] == 0
+
+
+# ─── PR #17: non-retrieval skip totals in dashboard ───────────────────
+
+
+def test_regenerate_pr17_skip_totals_land_in_json(tmp_path: Path):
+    """PR #17's four non-retrieval skip totals surface in the
+    overall-summary.json so consumers can chart each category
+    independently."""
+    _write_run(
+        tmp_path, "baseline-pr17",
+        total_skipped_non_repo_evidence=2,
+        total_skipped_absence_search=1,
+        total_skipped_unavailable_source_ref=3,
+        total_skipped_doc_corpus_excluded=1,
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_skipped_non_repo_evidence"] == 2
+    assert run["total_skipped_absence_search"] == 1
+    assert run["total_skipped_unavailable_source_ref"] == 3
+    assert run["total_skipped_doc_corpus_excluded"] == 1
+
+
+def test_regenerate_legacy_pr17_totals_default_zero(tmp_path: Path):
+    """Pre-PR-17 manifests get zero for all four new totals."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_skipped_non_repo_evidence"] == 0
+    assert run["total_skipped_absence_search"] == 0
+    assert run["total_skipped_unavailable_source_ref"] == 0
+    assert run["total_skipped_doc_corpus_excluded"] == 0

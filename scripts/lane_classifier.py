@@ -129,7 +129,14 @@ def _classify_one(
     }
 
     # ----- lane inference -----
-    if tool == "doc_resolver":
+    # PR #17: rows that the daemon pre-skipped (no atlas dispatch)
+    # carry ``lane="non_retrieval"`` on the artifact. Honor that as-is
+    # — re-inferring would lose the "we never went through atlas"
+    # signal.
+    row_lane = row.get("lane")
+    if row_lane == "non_retrieval":
+        lane = "non_retrieval"
+    elif tool == "doc_resolver":
         lane = "doc_resolver"
     elif anchors["source_path"] and anchors["source_lines"]:
         # PR #426 fast-path-eligible. Whether it actually fired is a Phase 2
@@ -143,7 +150,19 @@ def _classify_one(
     rat_l = rationale.lower()
 
     # Universal short-circuits
-    if grade in ("error", "grader_error") or any("exception:" in w for w in (row.get("warnings") or [])):
+    # PR #17: pre-atlas skip rows surface as their own buckets so they
+    # don't get mixed in with retrieval-lane analyses. Check before the
+    # other universal short-circuits because score_status is a more
+    # specific signal than tool/grade for these rows.
+    row_score_status = row.get("score_status") or "counted"
+    if row_score_status in (
+        "skipped_non_repo_evidence",
+        "skipped_absence_search",
+        "skipped_unavailable_source_ref",
+        "skipped_doc_corpus_excluded",
+    ):
+        bucket = row_score_status  # use the full status name as bucket
+    elif grade in ("error", "grader_error") or any("exception:" in w for w in (row.get("warnings") or [])):
         bucket = "grader_or_rubric_issue"
     elif grade == "revision_not_indexed":
         bucket = "revision_not_indexed"

@@ -74,6 +74,11 @@ class ReceiptGradingRow:
     chunk_id: Optional[str] = None
     heading_path: Optional[list[str]] = None
     warnings: list[str] = field(default_factory=list)
+    # PR #17: receipt's authoring intent. Preserved on the row so
+    # downstream classifiers can chart non-retrieval categories
+    # (external_tool_docs / user_context / absence_search) separately
+    # from source_excerpt receipts. None for legacy artifacts.
+    evidence_type: Optional[str] = None
     atlas_answer_len: int = 0
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
@@ -187,6 +192,58 @@ class GradingSummary:
         return sum(
             1 for r in self.rows
             if r.score_status == "skipped_run_commit_line_drift"
+        )
+
+    # ── PR #17: four new pre-atlas skip categories.
+    @property
+    def skipped_non_repo_evidence_count(self) -> int:
+        """Rows whose ``evidence_type`` is ``external_tool_docs`` or
+        ``user_context`` — receipts that cite information outside the
+        shadow corpus's repo entirely (Claude Code docs, user-provided
+        empirical data). Atlas can't be expected to retrieve these.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_non_repo_evidence"
+        )
+
+    @property
+    def skipped_absence_search_count(self) -> int:
+        """Rows whose ``evidence_type`` is ``absence_search`` —
+        receipts claiming "X does NOT exist in the repo." find_code /
+        scan_search can't prove a negative; absence checks need a
+        deterministic grep tool, not an LLM-grader-friendly retrieval
+        surface. Surfaced separately because the upstream fix is
+        different from corpus completeness or receipt-authoring.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_absence_search"
+        )
+
+    @property
+    def skipped_unavailable_source_ref_count(self) -> int:
+        """Rows where the receipt's cited source can't be materialized
+        at ``source_commit`` (commit not in repo / file path doesn't
+        exist at that commit). Parallel to ``skipped_receipt_stale``
+        but covers doc receipts too. Atlas isn't being tested fairly
+        when the receipt's anchor itself is unreachable.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_unavailable_source_ref"
+        )
+
+    @property
+    def skipped_doc_corpus_excluded_count(self) -> int:
+        """Rows whose ``source_path`` is under ``docs/work/**`` —
+        PR #277 deliberately excludes these from shadow doc ingest to
+        prevent grading ground-truth leakage. Counted separately so
+        operators can confirm the exclusion is working as designed.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_doc_corpus_excluded"
         )
 
     @property

@@ -605,6 +605,7 @@ def _grade_one_receipt(
     _runner_run_one: Optional[Callable] = None,
     _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
     _grader_grade: Optional[Callable] = None,
+    _classify_skip: Optional[Callable] = None,
 ) -> "pr_comment_mod.ReceiptGradingRow":
     """Translate, dispatch to runner/doc_resolver, and grade one receipt.
 
@@ -630,14 +631,40 @@ def _grade_one_receipt(
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
-    source_snapshot = None
-    run_snapshot = None  # PR #15: only resolved on the code path
+    # PR #17: receipt-side snapshot resolves for ALL receipts (doc +
+    # code) so the unavailable-source-ref skip can apply to both.
+    # Resolver short-circuits internally on receipts without
+    # source_path/source_commit, so this is safe for non-source
+    # receipts too.
+    source_snapshot = code_snapshot_mod.resolve_code_receipt_snapshot(
+        receipt,
+        repo_path=cfg.core_repo_path,
+    )
+    run_snapshot = None  # PR #15: still only resolved on the code path
     # PR #16: raw retrieval diagnostics. Initialized to the "no
     # raw_result available" shape so the doc_resolver path (which
     # doesn't go through the runner) lands well-defined Nones in the
     # row rather than missing fields.
     atlas_diagnostics: dict[str, Any] = _atlas_raw_result_diagnostics(None)
     tool_label = ""
+
+    # PR #17: pre-atlas skip check. Routes non-retrieval receipts
+    # (external_tool_docs / user_context / absence_search), receipts
+    # under PR #277's docs/work/** exclusion, and receipts whose
+    # source can't be materialized straight to a skipped row without
+    # spending an atlas query. ``_classify_skip`` is the injection
+    # seam — tests focused on post-atlas behavior can pass
+    # ``lambda *_, **__: None`` to disable the skip and exercise the
+    # full grading flow.
+    classify_skip = _classify_skip or _classify_pre_atlas_skip
+    pre_skip = classify_skip(receipt, source_snapshot=source_snapshot)
+    if pre_skip is not None:
+        return _build_pre_atlas_skip_row(
+            receipt=receipt,
+            source_snapshot=source_snapshot,
+            score_status=pre_skip[0],
+            clean_excluded_reason=pre_skip[1],
+        )
 
     if isinstance(translation, DocQuery):
         # T4a path. `repo` in the doc_id is whatever P1's SCIP-path
@@ -699,14 +726,10 @@ def _grade_one_receipt(
         atlas_diagnostics = _atlas_raw_result_diagnostics(
             atlas_response.raw_result
         )
-        source_snapshot = code_snapshot_mod.resolve_code_receipt_snapshot(
-            receipt,
-            repo_path=cfg.core_repo_path,
-        )
-        # PR #15: parallel snapshot at the grading run commit. Only
-        # resolves when (a) caller passed a run_commit and (b) the
-        # receipt is itself eligible (path + lines + commit present —
-        # the resolver short-circuits otherwise).
+        # ``source_snapshot`` already resolved before the pre-atlas
+        # skip check above. PR #15: still parallel-snapshot at the
+        # grading run commit on the code path so the run-drift skip
+        # can fire.
         run_snapshot = code_snapshot_mod.resolve_code_receipt_run_snapshot(
             receipt,
             repo_path=cfg.core_repo_path,
@@ -779,6 +802,7 @@ def _grade_one_receipt(
             run_snapshot_sha256=(
                 run_snapshot.resolved_sha256 if run_snapshot is not None else None
             ),
+            evidence_type=receipt.evidence_type,
             lane=lane,
             score_status=score_status,
             clean_excluded_reason=clean_reason,
@@ -833,6 +857,7 @@ def _grade_one_receipt(
         run_snapshot_sha256=(
             run_snapshot.resolved_sha256 if run_snapshot is not None else None
         ),
+        evidence_type=receipt.evidence_type,
         lane=lane,
         score_status=score_status,
         clean_excluded_reason=clean_reason,
@@ -911,6 +936,172 @@ def _atlas_raw_result_diagnostics(raw_result: Any) -> dict[str, Any]:
         ),
         "reranker_top_k_count": len(top_k) if isinstance(top_k, list) else None,
     }
+
+
+# ─── PR #17: pre-atlas skip classification ─────────────────────────────
+#
+# A receipt is "pre-atlas skipped" when it falls into a category the
+# daemon shouldn't even ask Atlas about — either because the question
+# is by-construction non-retrieval, the receipt's source can't be
+# materialized, or the receipt's corpus is deliberately excluded by an
+# upstream policy. Skipping BEFORE calling atlas saves the runner
+# subprocess and gives the score_status a clean, machine-readable
+# reason that the clean denominator can drop.
+
+# Evidence types where the receipt cites information outside the
+# shadow corpus's repo entirely. find_code / scan_search can't be
+# expected to retrieve answers from Claude Code docs or user-provided
+# empirical data.
+_NON_REPO_EVIDENCE_TYPES = frozenset({"external_tool_docs", "user_context"})
+
+# Evidence types claiming "X does NOT exist in the repo." LLM-grader-
+# friendly retrieval surfaces can't prove a negative; absence checks
+# need a deterministic grep tool. Surfaced as a distinct skip from
+# `_NON_REPO_EVIDENCE_TYPES` because the upstream fix is different.
+_ABSENCE_SEARCH_EVIDENCE_TYPES = frozenset({"absence_search"})
+
+# Path prefix(es) the doc-ingest pipeline deliberately excludes from
+# the shadow corpus (PR #277 — prevents grading ground-truth leakage).
+# A doc_resolver miss on a path under this prefix is by-design, not a
+# retrieval failure.
+_DOCS_WORK_EXCLUDED_PREFIXES = ("docs/work/",)
+
+
+def _classify_pre_atlas_skip(
+    receipt: PacketReceipt,
+    *,
+    source_snapshot: Optional[Any] = None,
+) -> Optional[tuple[str, str]]:
+    """Decide whether this receipt should be skipped BEFORE calling
+    atlas. PR #17.
+
+    Returns ``(score_status, clean_excluded_reason)`` when the receipt
+    qualifies for a pre-atlas skip; ``None`` when it should proceed
+    through the normal routing path (find_code / scan_search /
+    doc_resolver).
+
+    Order matters — narrower categories first so a receipt that
+    technically falls into multiple skip buckets gets the most
+    specific status:
+
+      1. ``skipped_doc_corpus_excluded`` — source_path in docs/work/**
+         (PR #277 exclusion). The path itself is the discriminator,
+         independent of evidence_type or snapshot state.
+      2. ``skipped_non_repo_evidence`` — evidence_type in
+         {external_tool_docs, user_context}. The receipt's claim lives
+         outside the repo entirely.
+      3. ``skipped_absence_search`` — evidence_type = absence_search.
+         Receipt claims a negative.
+      4. ``skipped_unavailable_source_ref`` — receipt has source anchors
+         but the snapshot resolver said ``git_source_missing`` (commit
+         not in repo / file not at that commit). Atlas isn't being
+         tested fairly when its anchor target is unreachable.
+
+    Pass-grades never reach this helper — the call site invokes it
+    BEFORE atlas dispatch, so by definition no grade exists yet.
+    """
+    source_path = (receipt.source_path or "").strip()
+    if source_path:
+        # The docs/work/** prefix can appear with or without a leading
+        # path component (e.g. ``docs/work/2026-…`` vs
+        # ``products/tandem/.../docs/work/2026-…``). Match anywhere.
+        if any(prefix in source_path for prefix in _DOCS_WORK_EXCLUDED_PREFIXES):
+            return ("skipped_doc_corpus_excluded", "doc_corpus_excluded")
+
+    evidence_type = (receipt.evidence_type or "").strip()
+    if evidence_type in _NON_REPO_EVIDENCE_TYPES:
+        return ("skipped_non_repo_evidence", "non_repo_evidence")
+    if evidence_type in _ABSENCE_SEARCH_EVIDENCE_TYPES:
+        return ("skipped_absence_search", "absence_search")
+
+    # Source-materialization check: code + doc receipts alike. We use
+    # the receipt-commit snapshot's ``git_source_missing`` status as
+    # the signal — that's the only condition where ``git show`` failed
+    # to materialize the cited bytes at the receipt's pinned commit.
+    if source_snapshot is not None:
+        snap_status = getattr(source_snapshot, "status", None)
+        if snap_status == "git_source_missing":
+            return (
+                "skipped_unavailable_source_ref",
+                "unavailable_source_ref",
+            )
+
+    return None
+
+
+def _build_pre_atlas_skip_row(
+    *,
+    receipt: PacketReceipt,
+    source_snapshot: Optional[Any],
+    score_status: str,
+    clean_excluded_reason: str,
+) -> "pr_comment_mod.ReceiptGradingRow":
+    """Construct a ``ReceiptGradingRow`` for a receipt that's being
+    skipped before any atlas dispatch (PR #17).
+
+    The row exists for accounting — it shows up in the per-packet JSON
+    artifact + counts toward ``total`` so operators can see WHICH
+    receipts were skipped and why — but ``score_status != "counted"``
+    drops it from the clean denominator.
+
+    Grading verdict policy:
+      - ``grade`` is ``"atlas_not_found"`` (the narrowest existing
+        enum value that semantically fits "atlas returned nothing,"
+        which is true here — we didn't ask).
+      - ``tool`` is ``"skipped"`` so downstream tool-distribution
+        analyses don't conflate these with real find_code /
+        scan_search / doc_resolver calls.
+      - ``lane`` is ``"non_retrieval"`` — a new lane value for rows
+        that never went through any retrieval surface.
+      - ``rationale`` records the human-readable reason so the
+        PR-comment markdown shows operators the skip cause.
+
+    Per Codex's PR #17 spec: grade enum stays narrow; all the
+    bookkeeping happens via ``score_status`` and
+    ``clean_excluded_reason``.
+    """
+    rationale = (
+        f"Skipped pre-atlas: {clean_excluded_reason} "
+        f"(evidence_type={receipt.evidence_type or 'n/a'}, "
+        f"source_path={receipt.source_path or 'n/a'})"
+    )
+    snap_status = (
+        source_snapshot.status if source_snapshot is not None else None
+    )
+    snap_hash_match = (
+        source_snapshot.hash_match if source_snapshot is not None else None
+    )
+    snap_sha256 = (
+        source_snapshot.resolved_sha256 if source_snapshot is not None else None
+    )
+    return pr_comment_mod.ReceiptGradingRow(
+        question_id=receipt.question_id,
+        question=receipt.question,
+        grade="atlas_not_found",
+        confidence=1.0,
+        rationale=rationale,
+        tool="skipped",
+        warnings=[],
+        atlas_answer_len=0,
+        atlas_returncode=None,
+        atlas_exception=None,
+        atlas_stderr_head=None,
+        atlas_retrieval_plan=None,
+        atlas_citation_locations=[],
+        atlas_citation_count=None,
+        atlas_reranker_candidates_considered=None,
+        atlas_reranker_top_k_count=None,
+        source_snapshot_status=snap_status,
+        source_snapshot_hash_match=snap_hash_match,
+        source_snapshot_sha256=snap_sha256,
+        run_snapshot_status=None,  # not resolved on the skip path
+        run_snapshot_hash_match=None,
+        run_snapshot_sha256=None,
+        evidence_type=receipt.evidence_type,
+        lane="non_retrieval",
+        score_status=score_status,
+        clean_excluded_reason=clean_excluded_reason,
+    )
 
 
 def _infer_lane(
@@ -1236,6 +1427,11 @@ def run_pr_grading(
                             rationale=f"grading_error: {type(exc).__name__}: {exc}",
                             tool="error",
                             warnings=[f"exception:{type(exc).__name__}"],
+                            # PR #17: preserve the receipt's authoring
+                            # intent on the grading-error row too —
+                            # downstream classifiers may want to chart
+                            # error rates by evidence_type.
+                            evidence_type=receipt.evidence_type,
                         )
                     )
                     continue
@@ -1281,6 +1477,17 @@ def run_pr_grading(
                 # run-commit snapshot mismatched).
                 "skipped_run_commit_line_drift_count":
                     summary.skipped_run_commit_line_drift_count,
+                # PR #17: four new non-retrieval skip counts. Each has
+                # a distinct upstream fix so they're surfaced separately
+                # rather than lumped.
+                "skipped_non_repo_evidence_count":
+                    summary.skipped_non_repo_evidence_count,
+                "skipped_absence_search_count":
+                    summary.skipped_absence_search_count,
+                "skipped_unavailable_source_ref_count":
+                    summary.skipped_unavailable_source_ref_count,
+                "skipped_doc_corpus_excluded_count":
+                    summary.skipped_doc_corpus_excluded_count,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the
@@ -1498,4 +1705,7 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "lane": row.lane,
         "score_status": row.score_status,
         "clean_excluded_reason": row.clean_excluded_reason,
+        # PR #17: receipt authoring intent (e.g. ``source_excerpt`` /
+        # ``external_tool_docs`` / ``user_context`` / ``absence_search``).
+        "evidence_type": row.evidence_type,
     }

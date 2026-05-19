@@ -541,6 +541,33 @@ def _summary_skipped_run_commit_line_drift_count(summary) -> int:
     return getattr(summary, "skipped_run_commit_line_drift_count", 0) or 0
 
 
+# ─── PR #17: four new non-retrieval skip counters ─────────────────────
+
+
+def _summary_skipped_non_repo_evidence_count(summary) -> int:
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_non_repo_evidence_count", 0) or 0)
+    return getattr(summary, "skipped_non_repo_evidence_count", 0) or 0
+
+
+def _summary_skipped_absence_search_count(summary) -> int:
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_absence_search_count", 0) or 0)
+    return getattr(summary, "skipped_absence_search_count", 0) or 0
+
+
+def _summary_skipped_unavailable_source_ref_count(summary) -> int:
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_unavailable_source_ref_count", 0) or 0)
+    return getattr(summary, "skipped_unavailable_source_ref_count", 0) or 0
+
+
+def _summary_skipped_doc_corpus_excluded_count(summary) -> int:
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_doc_corpus_excluded_count", 0) or 0)
+    return getattr(summary, "skipped_doc_corpus_excluded_count", 0) or 0
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
@@ -562,6 +589,11 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_excluded = 0
     total_skipped_receipt_stale = 0
     total_skipped_run_commit_line_drift = 0
+    # PR #17: four new non-retrieval skip totals.
+    total_skipped_non_repo_evidence = 0
+    total_skipped_absence_search = 0
+    total_skipped_unavailable_source_ref = 0
+    total_skipped_doc_corpus_excluded = 0
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
@@ -570,17 +602,29 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_excluded = 0
         packet_stale = 0
         packet_run_drift = 0
+        packet_non_repo = 0
+        packet_absence = 0
+        packet_unavailable = 0
+        packet_corpus_excluded = 0
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
             packet_excluded += _summary_excluded_count(summary)
             packet_stale += _summary_skipped_receipt_stale_count(summary)
             packet_run_drift += _summary_skipped_run_commit_line_drift_count(summary)
+            packet_non_repo += _summary_skipped_non_repo_evidence_count(summary)
+            packet_absence += _summary_skipped_absence_search_count(summary)
+            packet_unavailable += _summary_skipped_unavailable_source_ref_count(summary)
+            packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
         total_receipts += packet_receipts
         total_correct += packet_correct
         total_excluded += packet_excluded
         total_skipped_receipt_stale += packet_stale
         total_skipped_run_commit_line_drift += packet_run_drift
+        total_skipped_non_repo_evidence += packet_non_repo
+        total_skipped_absence_search += packet_absence
+        total_skipped_unavailable_source_ref += packet_unavailable
+        total_skipped_doc_corpus_excluded += packet_corpus_excluded
         packet_clean_total = packet_receipts - packet_excluded
         packet_clean_pct = (
             round(packet_correct * 100 / packet_clean_total, 1)
@@ -597,6 +641,11 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "skipped_receipt_stale": packet_stale,
             # PR #15: per-packet run-commit drift count.
             "skipped_run_commit_line_drift": packet_run_drift,
+            # PR #17: per-packet non-retrieval skip breakouts.
+            "skipped_non_repo_evidence": packet_non_repo,
+            "skipped_absence_search": packet_absence,
+            "skipped_unavailable_source_ref": packet_unavailable,
+            "skipped_doc_corpus_excluded": packet_corpus_excluded,
             "status": outcome.get("status"),
         }
     overall_pct = (
@@ -612,8 +661,10 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_correct": total_correct,
         # Raw score — kept for legacy comparison with pre-PR-14 runs.
         "overall_pct": overall_pct,
-        # PR #14/#15: clean-denominator score now excludes both
-        # receipt-stale skips and run-commit-line-drift skips.
+        # PR #14/#15/#17: clean-denominator score now excludes all
+        # six categories of non-measurement: receipt-stale, run-commit
+        # drift, non-repo evidence, absence search, unavailable source
+        # ref, doc-corpus-excluded.
         "clean_overall_pct": clean_pass_pct,
         "clean_total": clean_total,
         "total_excluded": total_excluded,
@@ -621,6 +672,14 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         # PR #15: distinct totals for run-commit drift so operators can
         # chart it independently of receipt-staleness.
         "total_skipped_run_commit_line_drift": total_skipped_run_commit_line_drift,
+        # PR #17: four new non-retrieval skip totals. Each has a
+        # distinct upstream fix (corpus completeness, grader routing,
+        # source-ref repair, exclusion-policy review) so they're
+        # surfaced separately rather than lumped.
+        "total_skipped_non_repo_evidence": total_skipped_non_repo_evidence,
+        "total_skipped_absence_search": total_skipped_absence_search,
+        "total_skipped_unavailable_source_ref": total_skipped_unavailable_source_ref,
+        "total_skipped_doc_corpus_excluded": total_skipped_doc_corpus_excluded,
         "per_packet_pct": per_packet_pct,
     }
 
@@ -688,6 +747,11 @@ def write_per_run_summary_md(
     total_excluded: int = 0,
     total_skipped_receipt_stale: int = 0,
     total_skipped_run_commit_line_drift: int = 0,
+    # PR #17: four new non-retrieval skip totals.
+    total_skipped_non_repo_evidence: int = 0,
+    total_skipped_absence_search: int = 0,
+    total_skipped_unavailable_source_ref: int = 0,
+    total_skipped_doc_corpus_excluded: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
@@ -704,10 +768,19 @@ def write_per_run_summary_md(
     """
     clean_line = ""
     if clean_overall_pct is not None and clean_total is not None:
-        breakdown = (
-            f"{total_skipped_receipt_stale} receipt-stale, "
-            f"{total_skipped_run_commit_line_drift} run-commit-line-drift"
-        )
+        # PR #17: surface all six skip components when non-zero so
+        # operators can spot which category is driving exclusions.
+        # Drop zero-count components from the line to keep it readable.
+        components = [
+            (total_skipped_receipt_stale, "receipt-stale"),
+            (total_skipped_run_commit_line_drift, "run-commit-line-drift"),
+            (total_skipped_unavailable_source_ref, "unavailable-source-ref"),
+            (total_skipped_doc_corpus_excluded, "doc-corpus-excluded"),
+            (total_skipped_non_repo_evidence, "non-repo-evidence"),
+            (total_skipped_absence_search, "absence-search"),
+        ]
+        non_zero = [f"{n} {label}" for n, label in components if n > 0]
+        breakdown = ", ".join(non_zero) if non_zero else "no breakdown"
         clean_line = (
             f"- **Clean correct:** {total_correct} of {clean_total} "
             f"({clean_overall_pct:.1f}%) "
@@ -1011,6 +1084,19 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         # PR #15: run-commit drift breakout for the per-run summary line.
         total_skipped_run_commit_line_drift=totals.get(
             "total_skipped_run_commit_line_drift", 0
+        ),
+        # PR #17: four non-retrieval skip breakouts.
+        total_skipped_non_repo_evidence=totals.get(
+            "total_skipped_non_repo_evidence", 0
+        ),
+        total_skipped_absence_search=totals.get(
+            "total_skipped_absence_search", 0
+        ),
+        total_skipped_unavailable_source_ref=totals.get(
+            "total_skipped_unavailable_source_ref", 0
+        ),
+        total_skipped_doc_corpus_excluded=totals.get(
+            "total_skipped_doc_corpus_excluded", 0
         ),
     )
 

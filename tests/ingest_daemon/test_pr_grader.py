@@ -738,6 +738,12 @@ def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
         repo_full_name="tandemstream/core",
         _runner_run_one=_fake_runner_run_one(),
         _grader_grade=broken_grader,
+        # Test focuses on the grader-exception path. PR #17 added a
+        # pre-atlas skip for receipts whose source can't be materialized
+        # (which is true here — missing.py doesn't exist in the test
+        # repo). Disable the skip so we still exercise the original
+        # grading-flow + diagnostic-preservation logic.
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
 
     assert row.grade == "no_match"
@@ -824,6 +830,11 @@ def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monke
             repo_full_name=repo_full_name,
             _runner_run_one=_fake_runner_run_one(),
             _grader_grade=_fake_grader(grade="full_match", confidence=0.9),
+            # PR #17: bypass pre-atlas skip — orchestrator test
+            # focuses on the end-to-end happy path; the sample qna log's
+            # paths don't exist in the tmp test repo so the skip would
+            # otherwise fire on every receipt.
+            _classify_skip=lambda *_args, **_kwargs: None,
         )
 
     # 6. Run the orchestrator.
@@ -1390,6 +1401,9 @@ def test_run_pr_grading_continues_on_partial_grader_failure(daemon_config, db_pa
             **kw,
             _runner_run_one=_fake_runner_run_one(),
             _grader_grade=_fake_grader(grade="full_match"),
+            # PR #17: bypass pre-atlas skip — orchestrator test focuses
+            # on the partial-failure recovery path, not the new skips.
+            _classify_skip=lambda *_args, **_kwargs: None,
         )
 
     outcome = grader_service_mod.run_pr_grading(
@@ -2261,10 +2275,13 @@ def test_grading_summary_skipped_run_commit_line_drift_count():
 
 def test_grade_one_populates_lane_and_score_status_for_stale_receipt(daemon_config):
     """End-to-end through _grade_one_receipt: a code receipt whose
-    cited path doesn't exist at run commit should come out
-    score_status=skipped_receipt_stale + clean_excluded_reason=receipt_stale
-    when the grader returns no_match. Lane is the fast-path lane
-    because the receipt carries path+lines."""
+    cited source can't be materialized at source_commit hits the
+    PR #17 pre-atlas skip with the new ``skipped_unavailable_source_ref``
+    status. (Supersedes PR #14's ``skipped_receipt_stale`` — same
+    underlying condition, caught earlier and emitted under the new
+    name.) The pre-atlas path uses ``lane=non_retrieval`` because we
+    never went through find_code/scan_search/doc_resolver.
+    """
     receipt = grader_service_mod.PacketReceipt(
         question_id="q1",
         question="missing.py exists?",
@@ -2273,9 +2290,6 @@ def test_grade_one_populates_lane_and_score_status_for_stale_receipt(daemon_conf
         source_commit=BASE_SHA,
         oracle_excerpt="excerpt",
         oracle_claim="claim",
-        # `sed-range` routes to find_code (translate_receipt_to_query
-        # heuristic) — required so lane=explicit_source_fast_path can
-        # apply (find_code lane + path+lines anchor).
         command_text="scripts/qa_lookup.sh sed-range missing-at-head.py 10 20",
     )
 
@@ -2288,16 +2302,30 @@ def test_grade_one_populates_lane_and_score_status_for_stale_receipt(daemon_conf
         _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
     )
 
-    assert row.grade == "no_match"  # grade enum stays narrow
+    # PR #17: the row is constructed by ``_build_pre_atlas_skip_row``
+    # (we never reached the runner stub). Grade enum stays narrow —
+    # the skip uses ``atlas_not_found`` to mean "atlas returned
+    # nothing" (true: we didn't ask).
+    assert row.grade == "atlas_not_found"
     assert row.source_snapshot_status == "git_source_missing"
-    assert row.lane == "explicit_source_fast_path"
-    assert row.score_status == "skipped_receipt_stale"
-    assert row.clean_excluded_reason == "receipt_stale"
+    assert row.lane == "non_retrieval"
+    assert row.tool == "skipped"
+    assert row.score_status == "skipped_unavailable_source_ref"
+    assert row.clean_excluded_reason == "unavailable_source_ref"
 
 
 def test_grade_one_populates_lane_and_counted_for_passing_receipt(daemon_config):
     """A passing find_code receipt should land score_status=counted
-    regardless of snapshot status."""
+    regardless of snapshot status — pass-grades are never flipped.
+
+    With PR #17, a source-missing receipt now pre-atlas-skips
+    BEFORE the grader runs (so the "grader returns full_match"
+    scenario never reaches the row). To preserve the original
+    test intent — verifying pass-grades aren't accidentally
+    flipped by snapshot-derived bookkeeping — we pass
+    ``_classify_skip=lambda *_, **__: None`` to bypass the
+    pre-atlas skip and exercise the post-atlas path.
+    """
     receipt = grader_service_mod.PacketReceipt(
         question_id="q1",
         question="ok?",
@@ -2316,6 +2344,7 @@ def test_grade_one_populates_lane_and_counted_for_passing_receipt(daemon_config)
         repo_full_name="tandemstream/core",
         _runner_run_one=_fake_runner_run_one(),
         _grader_grade=_fake_grader(grade="full_match", confidence=0.95, rationale="ok"),
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
 
     assert row.grade == "full_match"
@@ -2552,6 +2581,10 @@ def test_grade_one_populates_raw_result_fields_on_code_path(daemon_config, tmp_p
         repo_full_name="tandemstream/core",
         _runner_run_one=runner_with_raw_result,
         _grader_grade=_fake_grader(grade="full_match", confidence=0.9, rationale="ok"),
+        # PR #17: test focuses on raw_result field population. Bypass
+        # the pre-atlas skip so we still exercise the runner path even
+        # though the test's core_repo_path is non-existent.
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
     assert row.atlas_retrieval_plan == {"lanes_run": ["symbol_exact"]}
     assert row.atlas_citation_locations == ["core/ai.py:50-75"]
@@ -2593,6 +2626,9 @@ def test_grade_one_raw_result_none_on_doc_resolver_path(daemon_config):
         repo_full_name="tandemstream/core",
         _doc_resolver=stub_resolver,
         _grader_grade=_fake_grader(grade="full_match", confidence=0.9, rationale="ok"),
+        # PR #17: bypass pre-atlas skip — test focuses on the
+        # doc_resolver-path raw_result defaults.
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
     assert row.tool == "doc_resolver"
     assert row.atlas_retrieval_plan is None
@@ -2647,3 +2683,228 @@ def test_serialize_row_includes_pr14_fields():
     assert out["score_status"] == "skipped_receipt_stale"
     assert out["clean_excluded_reason"] == "receipt_stale"
     assert out["source_snapshot_status"] == "git_source_missing"
+
+
+# ─── PR #17: non-retrieval skip categories ────────────────────────────
+
+
+def _mk_skip_receipt(*, evidence_type=None, source_path=None, source_lines=None,
+                     source_commit=None, command_text=""):
+    """Compact receipt builder for the skip-classifier tests."""
+    return grader_service_mod.PacketReceipt(
+        question_id="q",
+        question="q",
+        oracle_claim="c",
+        oracle_excerpt="e",
+        evidence_type=evidence_type,
+        source_path=source_path,
+        source_lines=source_lines,
+        source_commit=source_commit,
+        command_text=command_text,
+    )
+
+
+def test_classify_pre_atlas_skip_external_tool_docs():
+    r = _mk_skip_receipt(evidence_type="external_tool_docs")
+    assert grader_service_mod._classify_pre_atlas_skip(r) == (
+        "skipped_non_repo_evidence", "non_repo_evidence",
+    )
+
+
+def test_classify_pre_atlas_skip_user_context():
+    r = _mk_skip_receipt(evidence_type="user_context")
+    assert grader_service_mod._classify_pre_atlas_skip(r) == (
+        "skipped_non_repo_evidence", "non_repo_evidence",
+    )
+
+
+def test_classify_pre_atlas_skip_absence_search():
+    r = _mk_skip_receipt(evidence_type="absence_search")
+    assert grader_service_mod._classify_pre_atlas_skip(r) == (
+        "skipped_absence_search", "absence_search",
+    )
+
+
+def test_classify_pre_atlas_skip_docs_work_excluded():
+    """A source_path in docs/work/** triggers the corpus-exclusion
+    skip regardless of evidence_type or snapshot state."""
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="products/tandem/packages/python/atlas/docs/work/2026-05-01-x/04-postmortem.md",
+    )
+    assert grader_service_mod._classify_pre_atlas_skip(r) == (
+        "skipped_doc_corpus_excluded", "doc_corpus_excluded",
+    )
+
+
+def test_classify_pre_atlas_skip_unavailable_source_ref():
+    """When the snapshot resolver returns git_source_missing, the
+    receipt's cited source can't be materialized — skip pre-atlas."""
+    from atlas_shadow.ingest_daemon.code_snapshot import (
+        CodeSnapshotResult, STATUS_SOURCE_MISSING,
+    )
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="core/missing.py",
+        source_lines="1-10",
+        source_commit=BASE_SHA,
+    )
+    snap = CodeSnapshotResult(status=STATUS_SOURCE_MISSING)
+    assert grader_service_mod._classify_pre_atlas_skip(
+        r, source_snapshot=snap,
+    ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
+
+
+def test_classify_pre_atlas_skip_returns_none_for_normal_receipt():
+    """A source_excerpt receipt with a materializable snapshot doesn't
+    qualify for any skip — falls through to normal atlas routing."""
+    from atlas_shadow.ingest_daemon.code_snapshot import (
+        CodeSnapshotResult, STATUS_MATCH,
+    )
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="core/ai.py",
+        source_lines="100-110",
+        source_commit=BASE_SHA,
+    )
+    snap = CodeSnapshotResult(status=STATUS_MATCH, hash_match=True)
+    assert grader_service_mod._classify_pre_atlas_skip(
+        r, source_snapshot=snap,
+    ) is None
+
+
+def test_classify_pre_atlas_skip_priority_docs_work_beats_evidence_type():
+    """docs/work/** check runs first — even if evidence_type would
+    qualify for another skip, the path-based exclusion wins (it's the
+    most specific upstream policy)."""
+    r = _mk_skip_receipt(
+        evidence_type="absence_search",
+        source_path="docs/work/2026-05-01-x/02-qna-log.md",
+    )
+    result = grader_service_mod._classify_pre_atlas_skip(r)
+    assert result[0] == "skipped_doc_corpus_excluded"
+
+
+def test_grade_one_short_circuits_external_tool_docs(daemon_config):
+    """End-to-end: an external_tool_docs receipt bypasses runner +
+    doc_resolver entirely. Lane = non_retrieval, tool = "skipped"."""
+    receipt = _mk_skip_receipt(evidence_type="external_tool_docs")
+
+    runner_called = []
+
+    def runner_should_not_fire(*args, **kwargs):
+        runner_called.append(True)
+        raise AssertionError("runner should not be called for skipped receipt")
+
+    def resolver_should_not_fire(*args, **kwargs):
+        runner_called.append(True)
+        raise AssertionError("doc_resolver should not be called for skipped receipt")
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=runner_should_not_fire,
+        _doc_resolver=resolver_should_not_fire,
+    )
+    assert runner_called == []
+    assert row.grade == "atlas_not_found"
+    assert row.tool == "skipped"
+    assert row.lane == "non_retrieval"
+    assert row.score_status == "skipped_non_repo_evidence"
+    assert row.clean_excluded_reason == "non_repo_evidence"
+    assert row.evidence_type == "external_tool_docs"
+
+
+def test_grade_one_short_circuits_absence_search(daemon_config):
+    receipt = _mk_skip_receipt(evidence_type="absence_search")
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+    )
+    assert row.score_status == "skipped_absence_search"
+    assert row.clean_excluded_reason == "absence_search"
+
+
+def test_grade_one_short_circuits_docs_work_excluded(daemon_config):
+    receipt = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="docs/work/2026-05-01-x/04-postmortem.md",
+    )
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+    )
+    assert row.score_status == "skipped_doc_corpus_excluded"
+    assert row.clean_excluded_reason == "doc_corpus_excluded"
+
+
+def test_grading_summary_pr17_skip_counts():
+    """All four PR #17 skip counts isolate correctly when rows
+    sample each category."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_non_repo_evidence",
+            clean_excluded_reason="non_repo_evidence",
+            evidence_type="external_tool_docs",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_absence_search",
+            clean_excluded_reason="absence_search",
+            evidence_type="absence_search",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_unavailable_source_ref",
+            clean_excluded_reason="unavailable_source_ref",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q4", question="q4", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_doc_corpus_excluded",
+            clean_excluded_reason="doc_corpus_excluded",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q5", question="q5", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            score_status="counted",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.skipped_non_repo_evidence_count == 1
+    assert s.skipped_absence_search_count == 1
+    assert s.skipped_unavailable_source_ref_count == 1
+    assert s.skipped_doc_corpus_excluded_count == 1
+    assert s.excluded_count == 4
+    assert s.clean_total == 1
+    assert s.clean_pass_pct == 100
+
+
+def test_serialize_row_includes_evidence_type():
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q", question="q", grade="atlas_not_found",
+        confidence=1.0, rationale="r", tool="skipped",
+        evidence_type="absence_search",
+        score_status="skipped_absence_search",
+    )
+    out = gs._serialize_row(row)
+    assert out["evidence_type"] == "absence_search"
+    assert out["score_status"] == "skipped_absence_search"

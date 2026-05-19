@@ -1321,3 +1321,116 @@ def test_write_per_run_summary_md_renders_both_scores(tmp_path: Path):
     assert "2 receipt-stale" in text
     # Table header shows both pct columns.
     assert "Raw %" in text and "Clean %" in text and "Excluded" in text
+
+
+# ─── PR #17: non-retrieval skip aggregation ───────────────────────────
+
+
+def _mk_summary_dict_pr17(
+    packet_id: str,
+    *,
+    pass_count: int,
+    total: int,
+    non_repo: int = 0,
+    absence: int = 0,
+    unavailable: int = 0,
+    corpus_excluded: int = 0,
+) -> dict:
+    """PR #17: dict shape including all four new skip counters."""
+    excluded = non_repo + absence + unavailable + corpus_excluded
+    clean_total = total - excluded
+    clean_pct = (
+        int(round(pass_count * 100 / clean_total)) if clean_total > 0 else None
+    )
+    return {
+        "packet_id": packet_id,
+        "passed": False,
+        "pass_pct": int(round(pass_count * 100 / total)) if total else 0,
+        "pass_count": pass_count,
+        "total": total,
+        "clean_pass_pct": clean_pct,
+        "clean_total": clean_total,
+        "excluded_count": excluded,
+        "skipped_receipt_stale_count": 0,
+        "skipped_run_commit_line_drift_count": 0,
+        "skipped_non_repo_evidence_count": non_repo,
+        "skipped_absence_search_count": absence,
+        "skipped_unavailable_source_ref_count": unavailable,
+        "skipped_doc_corpus_excluded_count": corpus_excluded,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_separates_pr17_skip_categories():
+    """PR #17's four non-retrieval skips contribute distinct totals
+    to the manifest, all rolled up into total_excluded."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_pr17(
+            "p1", pass_count=3, total=10,
+            non_repo=2, absence=1, unavailable=3, corpus_excluded=1,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_excluded"] == 7  # 2+1+3+1
+    assert totals["total_skipped_non_repo_evidence"] == 2
+    assert totals["total_skipped_absence_search"] == 1
+    assert totals["total_skipped_unavailable_source_ref"] == 3
+    assert totals["total_skipped_doc_corpus_excluded"] == 1
+    assert totals["clean_total"] == 3
+    assert totals["clean_overall_pct"] == 100.0
+    # Per-packet breakouts too.
+    pp = totals["per_packet_pct"]["p1"]
+    assert pp["skipped_non_repo_evidence"] == 2
+    assert pp["skipped_absence_search"] == 1
+    assert pp["skipped_unavailable_source_ref"] == 3
+    assert pp["skipped_doc_corpus_excluded"] == 1
+
+
+def test_aggregate_run_totals_legacy_summaries_pr17_zero():
+    """Pre-PR-17 summaries (no new fields) get zero across the board."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict("p1", [("full_match", "q1")])],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_skipped_non_repo_evidence"] == 0
+    assert totals["total_skipped_absence_search"] == 0
+    assert totals["total_skipped_unavailable_source_ref"] == 0
+    assert totals["total_skipped_doc_corpus_excluded"] == 0
+
+
+def test_write_per_run_summary_md_breaks_out_pr17_components(tmp_path: Path):
+    """The exclusion-line breakout names every non-zero PR #17 skip
+    component when present."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_pr17(
+            "p1", pass_count=3, total=10,
+            non_repo=2, unavailable=2, corpus_excluded=1,
+        )],
+    }]
+    path = gb.write_per_run_summary_md(
+        "baseline-pr17",
+        tmp_path,
+        commit_sha="d9a5d53c97ad" + "0" * 28,
+        packet_outcomes=outcomes,
+        overall_pct=30.0,
+        total_receipts=10,
+        total_correct=3,
+        clean_overall_pct=60.0,
+        clean_total=5,
+        total_excluded=5,
+        total_skipped_non_repo_evidence=2,
+        total_skipped_unavailable_source_ref=2,
+        total_skipped_doc_corpus_excluded=1,
+    )
+    text = path.read_text()
+    assert "2 non-repo-evidence" in text
+    assert "2 unavailable-source-ref" in text
+    assert "1 doc-corpus-excluded" in text
+    # Categories with zero count don't appear in the breakdown line.
+    assert "absence-search" not in text or "0 absence-search" not in text
