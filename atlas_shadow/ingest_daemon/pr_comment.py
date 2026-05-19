@@ -43,6 +43,10 @@ class ReceiptGradingRow:
     chunk_id: Optional[str] = None
     heading_path: Optional[list[str]] = None
     warnings: list[str] = field(default_factory=list)
+    atlas_answer_len: int = 0
+    atlas_returncode: Optional[int] = None
+    atlas_exception: Optional[str] = None
+    atlas_stderr_head: Optional[str] = None
 
 
 @dataclass(frozen=True)

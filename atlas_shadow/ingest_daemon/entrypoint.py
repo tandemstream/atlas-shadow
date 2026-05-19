@@ -27,6 +27,7 @@ from . import grader_service as grader_service_mod
 from . import queue as queue_mod
 from . import receiver as receiver_mod
 from . import reconciler as reconciler_mod
+from . import visibility_bootstrap as visibility_bootstrap_mod
 from . import worker as worker_mod
 from .config import DaemonConfig, load_config
 
@@ -76,6 +77,23 @@ def _worker_loop(cfg: DaemonConfig, stop_event: threading.Event) -> None:
 def cmd_serve(cfg: DaemonConfig) -> int:
     """Run the daemon in the foreground."""
     queue_mod.init_db(cfg.db_path)
+    try:
+        result = visibility_bootstrap_mod.ensure_shadow_runner_visibility(
+            org_id=cfg.continuous_shadow_org_id,
+            principal_id=cfg.default_principal_id,
+        )
+        print(
+            f"[ingest-daemon] visibility bootstrap ok "
+            f"(role={result.role_name}, active_grants={result.active_grant_count})",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(
+            f"[ingest-daemon] WARN: visibility bootstrap failed; "
+            f"code retrieval may return empty for the default principal "
+            f"({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
     stop_event = threading.Event()
     worker_thread = threading.Thread(
         target=_worker_loop,
@@ -202,6 +220,24 @@ def cmd_bootstrap(cfg: DaemonConfig) -> int:
     """Apply schema to a fresh DB."""
     queue_mod.init_db(cfg.db_path)
     print(f"[ingest-daemon] bootstrap: schema applied at {cfg.db_path}")
+    return 0
+
+
+def cmd_bootstrap_visibility(cfg: DaemonConfig) -> int:
+    """Ensure the shadow runner principal can see internal corpus chunks."""
+    try:
+        result = visibility_bootstrap_mod.ensure_shadow_runner_visibility(
+            org_id=cfg.continuous_shadow_org_id,
+            principal_id=cfg.default_principal_id,
+        )
+    except Exception as exc:
+        print(
+            f"[ingest-daemon] visibility bootstrap failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(result.__dict__, indent=2, sort_keys=True))
     return 0
 
 
@@ -336,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--commit", help="Single SHA to enqueue.")
     rp.add_argument("--from", dest="from_sha", help="Enqueue range <sha>..origin/main.")
     sub.add_parser("bootstrap", help="Apply DB schema (idempotent).")
+    sub.add_parser(
+        "bootstrap-visibility",
+        help="Grant the default shadow principal visibility over internal chunks.",
+    )
     sub.add_parser("status", help="Print /status payload (no HTTP needed).")
     sub.add_parser(
         "grading-verify",
@@ -354,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_replay(cfg, commit=args.commit, from_sha=args.from_sha)
     if args.cmd == "bootstrap":
         return cmd_bootstrap(cfg)
+    if args.cmd == "bootstrap-visibility":
+        return cmd_bootstrap_visibility(cfg)
     if args.cmd == "status":
         return cmd_status(cfg)
     if args.cmd == "grading-verify":

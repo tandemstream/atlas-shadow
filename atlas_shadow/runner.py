@@ -30,6 +30,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -115,26 +116,34 @@ class ShadowResponse:
     extra: dict = field(default_factory=dict)
 
 
-def _workspace_launcher() -> list[str]:
-    """Resolve the workspace CLI launcher.
+def _atlas_query_launcher(*, atlas_python: Optional[str] = None) -> list[str]:
+    """Resolve the Atlas query launcher.
 
     Order of precedence:
-      1. ``ATLAS_SHADOW_WORKSPACE_CMD`` env var (space-split argv).
-      2. ``WORKSPACE_PY`` + ``WORKSPACE_VENV_PY`` env vars (Atlas shell-
-         function convention) — if both set, return
+      1. ``ATLAS_SHADOW_ATLAS_QUERY_CMD`` env var (space-split argv).
+      2. Legacy ``ATLAS_SHADOW_WORKSPACE_CMD`` env var (space-split argv),
+         expanded as ``<cmd> run atlas-query --``.
+      3. Legacy ``WORKSPACE_PY`` + ``WORKSPACE_VENV_PY`` env vars (Atlas
+         shell-function convention) — if both set, return
          ``[$WORKSPACE_VENV_PY, $WORKSPACE_PY]``.
-      3. Bare ``workspace`` (assumes the user's PATH points at a launcher
-         that includes the post-PR-#169 workspace.py with REMAINDER
-         support).
+      4. The Atlas leaf's Python interpreter with
+         ``-m scripts.workspace_atlas_query``.
+
+    The workspace CLI forwarding contract has drifted more than once. The
+    module invocation is the stable path because ``run_one`` already uses
+    the Atlas leaf as cwd.
     """
+    direct = os.environ.get("ATLAS_SHADOW_ATLAS_QUERY_CMD")
+    if direct:
+        return direct.split()
     cmd = os.environ.get("ATLAS_SHADOW_WORKSPACE_CMD")
     if cmd:
-        return cmd.split()
+        return [*cmd.split(), "run", "atlas-query", "--"]
     py = os.environ.get("WORKSPACE_PY")
     venv_py = os.environ.get("WORKSPACE_VENV_PY")
     if py and venv_py:
-        return [venv_py, py]
-    return ["workspace"]
+        return [venv_py, py, "run", "atlas-query", "--"]
+    return [atlas_python or sys.executable, "-m", "scripts.workspace_atlas_query"]
 
 
 def build_atlas_query_argv(
@@ -146,6 +155,7 @@ def build_atlas_query_argv(
     domain_pack: Optional[str] = None,
     code_revision_id: Optional[str] = None,
     output_format: str = "json",
+    atlas_python: Optional[str] = None,
 ) -> list[str]:
     """Assemble the argv for `workspace run atlas-query -- ...`.
 
@@ -163,10 +173,7 @@ def build_atlas_query_argv(
     - `--output-format` json only in v1
     """
     argv = [
-        *_workspace_launcher(),
-        "run",
-        "atlas-query",
-        "--",
+        *_atlas_query_launcher(atlas_python=atlas_python),
         "--question",
         question,
         "--org-id",
@@ -301,6 +308,7 @@ def run_one(
         principal_id=principal_id,
         domain_pack=domain_pack,
         code_revision_id=code_revision_id,
+        atlas_python=str(atlas_leaf / ".venv" / "bin" / "python"),
     )
     started = time.perf_counter()
     response = _invoke(argv, cwd=atlas_leaf, timeout=timeout)

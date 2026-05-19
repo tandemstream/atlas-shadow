@@ -47,4 +47,5 @@ def daemon_config(tmp_path: Path, db_path: Path, state_file: Path) -> DaemonConf
         scip_build_timeout_seconds=DEFAULTS["scip_build_timeout_seconds"],
         ingest_shell_out_timeout_seconds=DEFAULTS["ingest_shell_out_timeout_seconds"],
         webhook_secret="test-secret-do-not-use-in-prod",
+        default_principal_id="00000000-0000-4000-8000-000000000222",
     )
