@@ -1434,3 +1434,86 @@ def test_write_per_run_summary_md_breaks_out_pr17_components(tmp_path: Path):
     assert "1 doc-corpus-excluded" in text
     # Categories with zero count don't appear in the breakdown line.
     assert "absence-search" not in text or "0 absence-search" not in text
+
+
+# ─── PR #20: command-snapshot lane aggregation ────────────────────────
+
+
+def _mk_summary_dict_pr20(
+    packet_id: str,
+    *,
+    pass_count: int,
+    total: int,
+    command_snapshot: int = 0,
+) -> dict:
+    """Variant carrying the PR #20 command-snapshot count."""
+    excluded = command_snapshot
+    clean_total = total - excluded
+    clean_pct = (
+        int(round(pass_count * 100 / clean_total)) if clean_total > 0 else None
+    )
+    return {
+        "packet_id": packet_id,
+        "passed": False,
+        "pass_pct": int(round(pass_count * 100 / total)) if total else 0,
+        "pass_count": pass_count,
+        "total": total,
+        "clean_pass_pct": clean_pct,
+        "clean_total": clean_total,
+        "excluded_count": excluded,
+        "skipped_command_snapshot_count": command_snapshot,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_command_snapshot_lane():
+    """Command-snapshot skips roll up into total_skipped_command_snapshot
+    independently of other skip categories."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_pr20(
+            "p1", pass_count=2, total=10, command_snapshot=3,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_skipped_command_snapshot"] == 3
+    pp = totals["per_packet_pct"]["p1"]
+    assert pp["skipped_command_snapshot"] == 3
+
+
+def test_aggregate_run_totals_legacy_summary_command_snapshot_zero():
+    """Pre-PR-20 summaries (no skipped_command_snapshot_count) get
+    zero — same back-compat shape as the PR #17 totals."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict("p1", [("full_match", "q1")])],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_skipped_command_snapshot"] == 0
+
+
+def test_write_per_run_summary_md_includes_command_snapshot_breakout(tmp_path: Path):
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_pr20(
+            "p1", pass_count=2, total=10, command_snapshot=3,
+        )],
+    }]
+    path = gb.write_per_run_summary_md(
+        "baseline-pr20",
+        tmp_path,
+        commit_sha="d9a5d53c97ad" + "0" * 28,
+        packet_outcomes=outcomes,
+        overall_pct=20.0,
+        total_receipts=10,
+        total_correct=2,
+        clean_overall_pct=28.6,
+        clean_total=7,
+        total_excluded=3,
+        total_skipped_command_snapshot=3,
+    )
+    text = path.read_text()
+    assert "3 command-snapshot" in text

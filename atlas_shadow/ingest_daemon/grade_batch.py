@@ -568,6 +568,13 @@ def _summary_skipped_doc_corpus_excluded_count(summary) -> int:
     return getattr(summary, "skipped_doc_corpus_excluded_count", 0) or 0
 
 
+def _summary_skipped_command_snapshot_count(summary) -> int:
+    """PR #20: command-lane skip count, back-compat zero for legacy."""
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_command_snapshot_count", 0) or 0)
+    return getattr(summary, "skipped_command_snapshot_count", 0) or 0
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
@@ -594,6 +601,8 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_skipped_absence_search = 0
     total_skipped_unavailable_source_ref = 0
     total_skipped_doc_corpus_excluded = 0
+    # PR #20: command-snapshot lane total.
+    total_skipped_command_snapshot = 0
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
@@ -606,6 +615,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_absence = 0
         packet_unavailable = 0
         packet_corpus_excluded = 0
+        packet_command_snapshot = 0
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
@@ -616,6 +626,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             packet_absence += _summary_skipped_absence_search_count(summary)
             packet_unavailable += _summary_skipped_unavailable_source_ref_count(summary)
             packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
+            packet_command_snapshot += _summary_skipped_command_snapshot_count(summary)
         total_receipts += packet_receipts
         total_correct += packet_correct
         total_excluded += packet_excluded
@@ -625,6 +636,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         total_skipped_absence_search += packet_absence
         total_skipped_unavailable_source_ref += packet_unavailable
         total_skipped_doc_corpus_excluded += packet_corpus_excluded
+        total_skipped_command_snapshot += packet_command_snapshot
         packet_clean_total = packet_receipts - packet_excluded
         packet_clean_pct = (
             round(packet_correct * 100 / packet_clean_total, 1)
@@ -646,6 +658,8 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "skipped_absence_search": packet_absence,
             "skipped_unavailable_source_ref": packet_unavailable,
             "skipped_doc_corpus_excluded": packet_corpus_excluded,
+            # PR #20: command_snapshot lane per-packet count.
+            "skipped_command_snapshot": packet_command_snapshot,
             "status": outcome.get("status"),
         }
     overall_pct = (
@@ -680,6 +694,8 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_skipped_absence_search": total_skipped_absence_search,
         "total_skipped_unavailable_source_ref": total_skipped_unavailable_source_ref,
         "total_skipped_doc_corpus_excluded": total_skipped_doc_corpus_excluded,
+        # PR #20: command-snapshot lane total.
+        "total_skipped_command_snapshot": total_skipped_command_snapshot,
         "per_packet_pct": per_packet_pct,
     }
 
@@ -752,6 +768,8 @@ def write_per_run_summary_md(
     total_skipped_absence_search: int = 0,
     total_skipped_unavailable_source_ref: int = 0,
     total_skipped_doc_corpus_excluded: int = 0,
+    # PR #20: command-snapshot lane skip total.
+    total_skipped_command_snapshot: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
@@ -778,6 +796,8 @@ def write_per_run_summary_md(
             (total_skipped_doc_corpus_excluded, "doc-corpus-excluded"),
             (total_skipped_non_repo_evidence, "non-repo-evidence"),
             (total_skipped_absence_search, "absence-search"),
+            # PR #20: command-snapshot lane.
+            (total_skipped_command_snapshot, "command-snapshot"),
         ]
         non_zero = [f"{n} {label}" for n, label in components if n > 0]
         breakdown = ", ".join(non_zero) if non_zero else "no breakdown"
@@ -1097,6 +1117,10 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         ),
         total_skipped_doc_corpus_excluded=totals.get(
             "total_skipped_doc_corpus_excluded", 0
+        ),
+        # PR #20: command-snapshot lane.
+        total_skipped_command_snapshot=totals.get(
+            "total_skipped_command_snapshot", 0
         ),
     )
 

@@ -302,6 +302,10 @@ def _format_json(
                 "total_skipped_doc_corpus_excluded": r.get(
                     "total_skipped_doc_corpus_excluded", 0
                 ),
+                # PR #20: command-snapshot lane total.
+                "total_skipped_command_snapshot": r.get(
+                    "total_skipped_command_snapshot", 0
+                ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }

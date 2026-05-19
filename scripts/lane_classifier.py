@@ -160,6 +160,8 @@ def _classify_one(
         "skipped_absence_search",
         "skipped_unavailable_source_ref",
         "skipped_doc_corpus_excluded",
+        # PR #20: command-snapshot lane skips.
+        "skipped_command_snapshot",
     ):
         bucket = row_score_status  # use the full status name as bucket
     elif grade in ("error", "grader_error") or any("exception:" in w for w in (row.get("warnings") or [])):

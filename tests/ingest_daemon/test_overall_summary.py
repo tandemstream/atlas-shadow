@@ -455,3 +455,23 @@ def test_regenerate_legacy_pr17_totals_default_zero(tmp_path: Path):
     assert run["total_skipped_absence_search"] == 0
     assert run["total_skipped_unavailable_source_ref"] == 0
     assert run["total_skipped_doc_corpus_excluded"] == 0
+
+
+# ─── PR #20: command-snapshot lane in dashboard ───────────────────────
+
+
+def test_regenerate_command_snapshot_total_lands_in_json(tmp_path: Path):
+    _write_run(
+        tmp_path, "baseline-pr20",
+        total_skipped_command_snapshot=5,
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_skipped_command_snapshot"] == 5
+
+
+def test_regenerate_legacy_command_snapshot_defaults_zero(tmp_path: Path):
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_skipped_command_snapshot"] == 0
