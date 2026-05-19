@@ -17,14 +17,16 @@ from atlas_shadow import runner as runner_mod
 
 
 def test_build_atlas_query_argv_required_fields(monkeypatch):
+    monkeypatch.delenv("ATLAS_SHADOW_ATLAS_QUERY_CMD", raising=False)
     monkeypatch.delenv("ATLAS_SHADOW_WORKSPACE_CMD", raising=False)
     monkeypatch.delenv("WORKSPACE_PY", raising=False)
     monkeypatch.delenv("WORKSPACE_VENV_PY", raising=False)
     argv = runner_mod.build_atlas_query_argv(
         question="what is foo?",
         org_id="af6ef504-7492-4dbb-99cb-9437141bd029",
+        atlas_python="/atlas/.venv/bin/python",
     )
-    assert argv[:4] == ["workspace", "run", "atlas-query", "--"]
+    assert argv[:3] == ["/atlas/.venv/bin/python", "-m", "scripts.workspace_atlas_query"]
     assert "--question" in argv
     assert "--org-id" in argv
     assert "--tool" in argv  # default auto
@@ -34,27 +36,42 @@ def test_build_atlas_query_argv_required_fields(monkeypatch):
     assert argv[argv.index("--output-format") + 1] == "json"
 
 
-def test_build_atlas_query_argv_env_override_for_workspace_launcher(monkeypatch):
-    """ATLAS_SHADOW_WORKSPACE_CMD overrides the bare `workspace` launcher.
-    Useful when the user's PATH points at an older workspace.py without
-    PR-#169's REMAINDER support — the smoketest needs the post-#169 binary.
-    """
-    monkeypatch.setenv("ATLAS_SHADOW_WORKSPACE_CMD", "/path/to/python /path/to/workspace.py")
+def test_build_atlas_query_argv_env_override_for_direct_launcher(monkeypatch):
+    """ATLAS_SHADOW_ATLAS_QUERY_CMD overrides the module launcher."""
+    monkeypatch.setenv(
+        "ATLAS_SHADOW_ATLAS_QUERY_CMD",
+        "/path/to/python -m scripts.workspace_atlas_query",
+    )
     argv = runner_mod.build_atlas_query_argv(question="q", org_id="o")
     assert argv[0] == "/path/to/python"
-    assert argv[1] == "/path/to/workspace.py"
-    assert argv[2] == "run"
+    assert argv[1] == "-m"
+    assert argv[2] == "scripts.workspace_atlas_query"
+
+
+def test_build_atlas_query_argv_legacy_workspace_override(monkeypatch):
+    monkeypatch.delenv("ATLAS_SHADOW_ATLAS_QUERY_CMD", raising=False)
+    monkeypatch.setenv("ATLAS_SHADOW_WORKSPACE_CMD", "/path/to/python /path/to/workspace.py")
+    argv = runner_mod.build_atlas_query_argv(question="q", org_id="o")
+    assert argv[:5] == [
+        "/path/to/python",
+        "/path/to/workspace.py",
+        "run",
+        "atlas-query",
+        "--",
+    ]
 
 
 def test_build_atlas_query_argv_env_override_via_workspace_py_pair(monkeypatch):
     """WORKSPACE_PY + WORKSPACE_VENV_PY (Atlas shell-function convention)
     are also honored so users don't need to compose ATLAS_SHADOW_WORKSPACE_CMD."""
+    monkeypatch.delenv("ATLAS_SHADOW_ATLAS_QUERY_CMD", raising=False)
     monkeypatch.delenv("ATLAS_SHADOW_WORKSPACE_CMD", raising=False)
     monkeypatch.setenv("WORKSPACE_PY", "/p/ws.py")
     monkeypatch.setenv("WORKSPACE_VENV_PY", "/p/venv/bin/python")
     argv = runner_mod.build_atlas_query_argv(question="q", org_id="o")
     assert argv[0] == "/p/venv/bin/python"
     assert argv[1] == "/p/ws.py"
+    assert argv[2:5] == ["run", "atlas-query", "--"]
 
 
 def test_build_atlas_query_argv_passes_all_optional_kwargs():

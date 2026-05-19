@@ -712,6 +712,38 @@ def _fake_runner_run_one():
     return run_one
 
 
+def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
+    def broken_grader(**_kwargs):
+        raise RuntimeError("grader unavailable")
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="Which code path writes chunks?",
+        source_path="products/tandem/packages/python/atlas/core/ingest/pipeline.py",
+        source_lines="1-5",
+        source_commit=BASE_SHA,
+        oracle_excerpt="excerpt",
+        oracle_claim="claim",
+        command_text="rg chunks",
+    )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=_fake_runner_run_one(),
+        _grader_grade=broken_grader,
+    )
+
+    assert row.grade == "no_match"
+    assert row.tool == "scan_search"
+    assert "grading_error" in row.rationale
+    assert row.atlas_answer_len == len("stub atlas response")
+    assert row.atlas_returncode == 0
+    assert "exception:RuntimeError" in row.warnings
+
+
 def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monkeypatch):
     """End-to-end orchestrator run with all I/O stubbed.
 

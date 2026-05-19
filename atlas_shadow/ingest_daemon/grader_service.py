@@ -604,6 +604,9 @@ def _grade_one_receipt(
     heading_path: Optional[list[str]] = None
     warnings: list[str] = []
     atlas_answer_text = ""
+    atlas_returncode: Optional[int] = None
+    atlas_exception: Optional[str] = None
+    atlas_stderr_head: Optional[str] = None
     tool_label = ""
 
     if isinstance(translation, DocQuery):
@@ -654,19 +657,42 @@ def _grade_one_receipt(
             domain_pack="code",
             code_revision_id=code_revision_id,
         )
-        atlas_answer_text = shadow_response.atlas_response.answer_text or ""
+        atlas_response = shadow_response.atlas_response
+        atlas_answer_text = atlas_response.answer_text or ""
+        atlas_returncode = atlas_response.returncode
+        atlas_exception = atlas_response.exception
+        atlas_stderr_head = (atlas_response.stderr or "")[:1000] or None
         tool_label = translation.tool
 
     # Grade
     from atlas_shadow import grader as grader_mod  # lazy import
     grade_fn = _grader_grade or grader_mod.grade
-    grading = grade_fn(
-        question=receipt.question,
-        oracle_excerpt=receipt.oracle_excerpt,
-        oracle_claim=receipt.oracle_claim,
-        atlas_answer_text=atlas_answer_text,
-        model=cfg.grader_model,
-    )
+    try:
+        grading = grade_fn(
+            question=receipt.question,
+            oracle_excerpt=receipt.oracle_excerpt,
+            oracle_claim=receipt.oracle_claim,
+            atlas_answer_text=atlas_answer_text,
+            model=cfg.grader_model,
+        )
+    except Exception as exc:  # noqa: BLE001 — preserve Atlas diagnostics
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            grade="no_match",
+            confidence=0.0,
+            rationale=f"grading_error: {type(exc).__name__}: {exc}",
+            tool=tool_label or "error",
+            revision_binding=revision_binding,
+            artifact_id=artifact_id,
+            chunk_id=chunk_id,
+            heading_path=heading_path,
+            warnings=[*warnings, f"exception:{type(exc).__name__}"],
+            atlas_answer_len=len(atlas_answer_text or ""),
+            atlas_returncode=atlas_returncode,
+            atlas_exception=atlas_exception,
+            atlas_stderr_head=atlas_stderr_head,
+        )
 
     return pr_comment_mod.ReceiptGradingRow(
         question_id=receipt.question_id,
@@ -680,6 +706,10 @@ def _grade_one_receipt(
         chunk_id=chunk_id,
         heading_path=heading_path,
         warnings=warnings,
+        atlas_answer_len=len(atlas_answer_text or ""),
+        atlas_returncode=atlas_returncode,
+        atlas_exception=atlas_exception,
+        atlas_stderr_head=atlas_stderr_head,
     )
 
 
@@ -1102,4 +1132,8 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "chunk_id": row.chunk_id,
         "heading_path": list(row.heading_path) if row.heading_path else None,
         "warnings": list(row.warnings or []),
+        "atlas_answer_len": int(row.atlas_answer_len or 0),
+        "atlas_returncode": row.atlas_returncode,
+        "atlas_exception": row.atlas_exception,
+        "atlas_stderr_head": row.atlas_stderr_head,
     }
