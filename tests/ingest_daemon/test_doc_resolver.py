@@ -137,6 +137,8 @@ def test_doc_resolver_db_commit_scoped_happy_path(monkeypatch):
     assert result.revision_binding == doc_resolver_mod.BINDING_DB_COMMIT_SCOPED
     assert result.artifact_id == "00000000-0000-0000-0000-000000000001"
     assert result.chunk_id == "10000000-0000-0000-0000-000000000001"
+    assert f"Source path: {TEST_PATH}" in result.raw_text
+    assert "Heading path: Architecture overview" in result.raw_text
     assert "Architecture overview" in result.raw_text
     # AG8 (d): heading metadata extraction
     assert result.heading_path == ["Architecture overview"]
@@ -237,8 +239,40 @@ def test_doc_resolver_git_receipt_snapshot_fallback(tmp_git_repo, monkeypatch):
     )
     assert result.status == doc_resolver_mod.STATUS_GIT_RECEIPT_SNAPSHOT
     assert result.revision_binding == doc_resolver_mod.BINDING_GIT_RECEIPT_SNAPSHOT
-    assert result.raw_text == sliced
+    assert result.raw_text == (
+        "Source path: docs/architecture.md\n"
+        "Source lines: 2-3\n\n"
+        f"{sliced}"
+    )
     assert result.artifact_id is None  # snapshot path doesn't know the artifact
+
+
+def test_doc_resolver_git_receipt_snapshot_includes_path_without_line_range(
+    tmp_git_repo, monkeypatch
+):
+    """Whole-file snapshot fallback still surfaces the resolved source path.
+
+    This is important for location-style receipts: the grader needs the
+    path, not just the file body.
+    """
+    monkeypatch.setenv("ATLAS_DB_URL", "postgresql://test/fake")
+    repo_path, commit, doc_content = tmp_git_repo
+    receipt = _mk_doc_receipt(
+        source_path="docs/architecture.md",
+        source_commit=commit,
+        source_lines=None,
+        excerpt_sha256=None,
+    )
+    result = doc_resolver_mod.resolve_doc_receipt(
+        receipt,
+        org_id=TEST_ORG_ID,
+        repo=TEST_REPO,
+        repo_path=repo_path,
+        _connect=_fake_conn(None, []),
+    )
+    assert result.status == doc_resolver_mod.STATUS_GIT_RECEIPT_SNAPSHOT
+    assert result.raw_text.startswith("Source path: docs/architecture.md\n\n")
+    assert doc_content in result.raw_text
 
 
 # ===========================================================================

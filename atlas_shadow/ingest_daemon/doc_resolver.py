@@ -178,6 +178,29 @@ def _sha256_of(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _format_resolved_text(
+    *,
+    path: str,
+    body: str,
+    line_range: Optional[tuple[int, int]] = None,
+    heading_path: Optional[list[str]] = None,
+) -> str:
+    """Add resolver metadata to the text handed to the grader.
+
+    The resolver is not only providing bytes; it is providing the
+    document evidence location. Some receipts explicitly ask for a
+    document's location, and passing only the body makes that evidence
+    invisible to the grader. Hash verification still happens against
+    the raw body slice before this wrapper is applied.
+    """
+    header = [f"Source path: {path}"]
+    if line_range is not None:
+        header.append(f"Source lines: {line_range[0]}-{line_range[1]}")
+    if heading_path:
+        header.append("Heading path: " + " / ".join(heading_path))
+    return "\n".join(header) + "\n\n" + body
+
+
 # ---------------------------------------------------------------------------
 # Source-lines range parsing
 # ---------------------------------------------------------------------------
@@ -456,15 +479,21 @@ def resolve_doc_receipt(
                 )
             heading_path = heading_meta.get("heading_path") if isinstance(heading_meta, dict) else None
             heading_level = heading_meta.get("heading_level") if isinstance(heading_meta, dict) else None
+            body_text = chunk["raw_text"] if chunk else ""
+            heading_list = list(heading_path) if heading_path else None
             return DocResolverResult(
                 status=STATUS_DB_COMMIT_SCOPED,
                 revision_binding=BINDING_DB_COMMIT_SCOPED,
                 artifact_id=lookup["artifact_id"],
                 chunk_id=chunk["chunk_id"] if chunk else None,
                 path=src_path,
-                heading_path=list(heading_path) if heading_path else None,
+                heading_path=heading_list,
                 heading_level=int(heading_level) if isinstance(heading_level, int) else None,
-                raw_text=chunk["raw_text"] if chunk else "",
+                raw_text=_format_resolved_text(
+                    path=src_path,
+                    body=body_text,
+                    heading_path=heading_list,
+                ),
                 start_offset=chunk["start_offset"] if chunk else None,
                 end_offset=chunk["end_offset"] if chunk else None,
                 warnings=warnings,
@@ -514,6 +543,10 @@ def resolve_doc_receipt(
         status=STATUS_GIT_RECEIPT_SNAPSHOT,
         revision_binding=BINDING_GIT_RECEIPT_SNAPSHOT,
         path=src_path,
-        raw_text=sliced,
+        raw_text=_format_resolved_text(
+            path=src_path,
+            body=sliced,
+            line_range=line_range,
+        ),
         warnings=warnings,
     )
