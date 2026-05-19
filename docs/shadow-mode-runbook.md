@@ -230,25 +230,40 @@ no_match rows get `score_status: "skipped_receipt_stale"` +
 drops them from BOTH numerator and denominator so the score reflects
 retrieval performance, not receipt drift.
 
-**`source_snapshot_status` semantics — read carefully:**
+**Two snapshot fields tell the receipt-vs-grading-commit story:**
 
-- `source_snapshot_status=git_source_hash_match` means **the receipt's
-  pinned `source_commit` renders the expected excerpt.**
-- **It does not prove the same path/lines still render the expected
-  excerpt at the grading `run_commit`.**
-- A `no_match + git_source_hash_match` row stays `score_status=counted`
-  for now. The diagnostic bucket for this shape is
-  `needs_run_commit_snapshot` (or `possible_run_commit_line_drift`) —
-  **not** `exact_source_fast_path_didnt_fire`. Attributing the miss to
-  atlas before the run-commit snapshot exists would conflate two
-  failure modes that need distinct fixes.
-- **Follow-up:** PR #15 will add a second snapshot field — provisionally
-  `run_snapshot_status` — that checks the same path/lines against the
-  actual `run_commit_sha`. Once that lands, `_derive_score_status` can
-  emit `score_status=skipped_run_commit_line_drift` when the receipt
-  snapshot matches but the run snapshot doesn't, and the clean
-  denominator drops that case the same way it drops
-  `skipped_receipt_stale` today.
+- `source_snapshot_status=git_source_hash_match` (PR #13) means **the
+  receipt's pinned `source_commit` renders the expected excerpt** —
+  the receipt is internally consistent at authoring time.
+- `run_snapshot_status=run_commit_hash_match` (PR #15) means **the
+  same path/lines still render the expected excerpt at the grading
+  `run_commit_sha`** — the file hasn't moved between authoring and
+  grading.
+- `run_snapshot_status=run_commit_hash_mismatch` (PR #15) means **the
+  file was edited between receipt commit and run commit** so the
+  cited line numbers now point at different code. When this happens
+  on a `no_match` row, the daemon emits
+  `score_status=skipped_run_commit_line_drift` +
+  `clean_excluded_reason=run_commit_line_drift`, and the clean
+  denominator drops the row from BOTH numerator and denominator the
+  same way it drops `skipped_receipt_stale`.
+
+| Receipt snap | Run snap | Grade | Score status | Clean denominator |
+|---|---|---|---|---|
+| `git_source_hash_match` | `run_commit_hash_match` | `full/partial_match` | `counted` | included as PASS |
+| `git_source_hash_match` | `run_commit_hash_match` | `no_match` | `counted` | included as FAIL — real Atlas miss |
+| `git_source_hash_match` | `run_commit_hash_mismatch` | `no_match` | `skipped_run_commit_line_drift` | **excluded** |
+| `git_source_missing` | (any) | `no_match` | `skipped_receipt_stale` | **excluded** |
+| `git_source_hash_match` | `run_commit_hash_mismatch` | `full/partial_match` | `counted` | included as PASS |
+
+The per-receipt fields land in `packets/<slug>.json` so the diagnostic
+classifier under `scripts/lane_classifier.py` can split a `no_match`
+into `run_commit_line_drift` vs. `exact_source_fast_path_didnt_fire`
+based on the two snapshot statuses.
+
+Both totals also surface in `manifest.json`
+(`total_skipped_receipt_stale` + `total_skipped_run_commit_line_drift`)
+and in `summary.md`'s exclusion breakout line.
 
 The `grade` enum stays narrow (`full_match` / `partial_match` /
 `no_match` / `atlas_not_found`) — the skip is bookkeeping on a

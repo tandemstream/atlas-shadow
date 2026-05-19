@@ -1183,6 +1183,110 @@ def test_aggregate_run_totals_clean_pct_is_none_when_all_excluded():
     assert totals["per_packet_pct"]["p1"]["clean_pct"] is None
 
 
+def _mk_summary_dict_with_drift(
+    packet_id: str,
+    *,
+    pass_count: int,
+    total: int,
+    excluded_count: int,
+    skipped_receipt_stale_count: int,
+    skipped_run_commit_line_drift_count: int,
+) -> dict:
+    """PR #15: variant that carries both excluded counts."""
+    clean_total = total - excluded_count
+    clean_pct = (
+        int(round(pass_count * 100 / clean_total)) if clean_total > 0 else None
+    )
+    return {
+        "packet_id": packet_id,
+        "passed": (pass_count * 100 // total >= 60) if total else False,
+        "pass_pct": int(round(pass_count * 100 / total)) if total else 0,
+        "pass_count": pass_count,
+        "total": total,
+        "clean_pass_pct": clean_pct,
+        "clean_total": clean_total,
+        "excluded_count": excluded_count,
+        "skipped_receipt_stale_count": skipped_receipt_stale_count,
+        "skipped_run_commit_line_drift_count": skipped_run_commit_line_drift_count,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_separates_stale_from_drift():
+    """PR #15: total_excluded should equal stale + drift, and the two
+    components are reported as distinct totals so operators can chart
+    them independently."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_drift(
+            "p1", pass_count=8, total=12,
+            excluded_count=3,
+            skipped_receipt_stale_count=2,
+            skipped_run_commit_line_drift_count=1,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_excluded"] == 3
+    assert totals["total_skipped_receipt_stale"] == 2
+    assert totals["total_skipped_run_commit_line_drift"] == 1
+    assert totals["clean_total"] == 9  # 12 - 3
+    # Per-packet too.
+    pp = totals["per_packet_pct"]["p1"]
+    assert pp["skipped_receipt_stale"] == 2
+    assert pp["skipped_run_commit_line_drift"] == 1
+
+
+def test_aggregate_run_totals_legacy_summary_drift_zero():
+    """Pre-PR-15 summaries (no skipped_run_commit_line_drift_count
+    field) default to zero — same back-compat shape as PR #14's
+    excluded_count default."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        # Legacy helper with no drift field.
+        "summaries": [_mk_summary_dict_with_skips(
+            "p1", pass_count=10, total=12,
+            excluded_count=2, skipped_receipt_stale_count=2,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_skipped_receipt_stale"] == 2
+    assert totals["total_skipped_run_commit_line_drift"] == 0
+
+
+def test_write_per_run_summary_md_breaks_out_drift(tmp_path: Path):
+    """summary.md exclusion line shows both receipt-stale AND drift
+    breakouts."""
+    outcomes = [{
+        "packet_slug": "pkt1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_drift(
+            "pkt1", pass_count=9, total=12,
+            excluded_count=3,
+            skipped_receipt_stale_count=2,
+            skipped_run_commit_line_drift_count=1,
+        )],
+    }]
+    path = gb.write_per_run_summary_md(
+        "baseline-pr15",
+        tmp_path,
+        commit_sha="d9a5d53c97ad" + "0" * 28,
+        packet_outcomes=outcomes,
+        overall_pct=75.0,
+        total_receipts=12,
+        total_correct=9,
+        clean_overall_pct=100.0,
+        clean_total=9,
+        total_excluded=3,
+        total_skipped_receipt_stale=2,
+        total_skipped_run_commit_line_drift=1,
+    )
+    text = path.read_text()
+    assert "2 receipt-stale" in text
+    assert "1 run-commit-line-drift" in text
+
+
 def test_write_per_run_summary_md_renders_both_scores(tmp_path: Path):
     """summary.md must show Raw % AND Clean % columns + the totals
     line that calls out exclusion counts."""

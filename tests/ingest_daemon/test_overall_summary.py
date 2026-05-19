@@ -391,3 +391,34 @@ def test_regenerate_clean_pct_omitted_keeps_run_renderable(tmp_path: Path):
     run = payload["runs"][0]
     assert run["clean_overall_pct"] is None
     assert run["total_excluded"] == 0
+
+
+# ─── PR #15: run-commit drift in dashboard ────────────────────────────
+
+
+def test_regenerate_run_commit_drift_lands_in_json(tmp_path: Path):
+    """A PR-#15 manifest carries total_skipped_run_commit_line_drift;
+    the dashboard JSON exposes it for downstream charting."""
+    _write_run(
+        tmp_path, "baseline-pr15",
+        clean_overall_pct=91.7,
+        clean_total=11,
+        total_excluded=1,
+        total_skipped_receipt_stale=0,
+        total_skipped_run_commit_line_drift=1,
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    payload = json.loads(json_path.read_text())
+    run = payload["runs"][0]
+    assert run["total_skipped_run_commit_line_drift"] == 1
+    assert run["total_skipped_receipt_stale"] == 0
+
+
+def test_regenerate_legacy_run_drift_defaults_zero(tmp_path: Path):
+    """Pre-PR-15 manifests (no drift field) get zero, not None — the
+    field has a defined semantic for legacy runs ('we didn't track
+    drift then, so we report none')."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_skipped_run_commit_line_drift"] == 0

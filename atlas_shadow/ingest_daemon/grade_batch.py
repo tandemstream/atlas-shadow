@@ -532,6 +532,15 @@ def _summary_skipped_receipt_stale_count(summary) -> int:
     return getattr(summary, "skipped_receipt_stale_count", 0) or 0
 
 
+def _summary_skipped_run_commit_line_drift_count(summary) -> int:
+    """Read ``skipped_run_commit_line_drift_count`` (PR #15) with
+    backward-compat zero. Pre-PR-15 summaries lack this field and
+    legitimately contribute zero drift-skips."""
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_run_commit_line_drift_count", 0) or 0)
+    return getattr(summary, "skipped_run_commit_line_drift_count", 0) or 0
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
@@ -552,6 +561,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_correct = 0
     total_excluded = 0
     total_skipped_receipt_stale = 0
+    total_skipped_run_commit_line_drift = 0
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
@@ -559,15 +569,18 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_correct = 0
         packet_excluded = 0
         packet_stale = 0
+        packet_run_drift = 0
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
             packet_excluded += _summary_excluded_count(summary)
             packet_stale += _summary_skipped_receipt_stale_count(summary)
+            packet_run_drift += _summary_skipped_run_commit_line_drift_count(summary)
         total_receipts += packet_receipts
         total_correct += packet_correct
         total_excluded += packet_excluded
         total_skipped_receipt_stale += packet_stale
+        total_skipped_run_commit_line_drift += packet_run_drift
         packet_clean_total = packet_receipts - packet_excluded
         packet_clean_pct = (
             round(packet_correct * 100 / packet_clean_total, 1)
@@ -582,6 +595,8 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "clean_total": packet_clean_total,
             "excluded": packet_excluded,
             "skipped_receipt_stale": packet_stale,
+            # PR #15: per-packet run-commit drift count.
+            "skipped_run_commit_line_drift": packet_run_drift,
             "status": outcome.get("status"),
         }
     overall_pct = (
@@ -597,11 +612,15 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_correct": total_correct,
         # Raw score — kept for legacy comparison with pre-PR-14 runs.
         "overall_pct": overall_pct,
-        # PR #14: clean-denominator score (excludes receipt-stale rows).
+        # PR #14/#15: clean-denominator score now excludes both
+        # receipt-stale skips and run-commit-line-drift skips.
         "clean_overall_pct": clean_pass_pct,
         "clean_total": clean_total,
         "total_excluded": total_excluded,
         "total_skipped_receipt_stale": total_skipped_receipt_stale,
+        # PR #15: distinct totals for run-commit drift so operators can
+        # chart it independently of receipt-staleness.
+        "total_skipped_run_commit_line_drift": total_skipped_run_commit_line_drift,
         "per_packet_pct": per_packet_pct,
     }
 
@@ -668,6 +687,7 @@ def write_per_run_summary_md(
     clean_total: Optional[int] = None,
     total_excluded: int = 0,
     total_skipped_receipt_stale: int = 0,
+    total_skipped_run_commit_line_drift: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
@@ -677,14 +697,21 @@ def write_per_run_summary_md(
     receipt-stale skips and other non-counted bookkeeping). Per-packet
     rows show both columns so operators can see where staleness is
     moving the score.
+
+    PR #15: ``total_skipped_run_commit_line_drift`` (new) breaks out
+    the run-commit drift component of the exclusion total alongside
+    the receipt-stale component.
     """
     clean_line = ""
     if clean_overall_pct is not None and clean_total is not None:
+        breakdown = (
+            f"{total_skipped_receipt_stale} receipt-stale, "
+            f"{total_skipped_run_commit_line_drift} run-commit-line-drift"
+        )
         clean_line = (
             f"- **Clean correct:** {total_correct} of {clean_total} "
             f"({clean_overall_pct:.1f}%) "
-            f"_(excludes {total_excluded} row(s): "
-            f"{total_skipped_receipt_stale} receipt-stale)_"
+            f"_(excludes {total_excluded} row(s): {breakdown})_"
         )
     else:
         clean_line = "- **Clean score:** _n/a (no rows counted)_"
@@ -981,6 +1008,10 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         clean_total=totals.get("clean_total"),
         total_excluded=totals.get("total_excluded", 0),
         total_skipped_receipt_stale=totals.get("total_skipped_receipt_stale", 0),
+        # PR #15: run-commit drift breakout for the per-run summary line.
+        total_skipped_run_commit_line_drift=totals.get(
+            "total_skipped_run_commit_line_drift", 0
+        ),
     )
 
     # Regenerate cross-run dashboard from on-disk manifests.

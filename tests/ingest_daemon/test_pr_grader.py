@@ -1938,6 +1938,275 @@ def test_derive_score_status_no_snapshot_treated_as_counted():
     ) == ("counted", None)
 
 
+# ─── PR #15: run-commit line drift ────────────────────────────────────
+
+
+def test_derive_score_status_run_commit_drift():
+    """The PR #15 case: receipt-commit snapshot matched (receipt valid
+    at authoring), but the run-commit snapshot didn't (file moved
+    between receipt and grading commits) AND grader said no_match.
+    Drops out of the clean denominator."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
+def test_derive_score_status_run_commit_source_missing_is_drift():
+    """Codex PR #15 review note: a receipt valid at source_commit
+    whose path/file was DELETED or RENAMED by run_commit is the same
+    class of non-measurement as line drift — atlas isn't being graded
+    against the receipt as authored. ``_derive_score_status`` must
+    classify this consistently with the diagnostic classifier (which
+    already buckets ``run_commit_source_missing`` as
+    ``run_commit_line_drift``)."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_source_missing",
+    ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
+def test_derive_score_status_both_snapshots_match_stays_counted():
+    """Receipt-commit AND run-commit both match the excerpt, but
+    grader still said no_match. This is the genuine fast-path-bug or
+    atlas-precision case — counted as a real miss, not excluded.
+    (Acceptance #2 from Codex's PR #15 spec.)"""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_match",
+    ) == ("counted", None)
+
+
+def test_derive_score_status_receipt_stale_wins_over_run_drift():
+    """If the receipt-commit snapshot is missing (receipt stale at
+    authoring), that's the narrower signal — pick receipt_stale over
+    run_commit_line_drift. Order of checks matters in
+    ``_derive_score_status``."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_missing",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("skipped_receipt_stale", "receipt_stale")
+
+
+def test_derive_score_status_run_drift_requires_no_match():
+    """Don't ever flip a pass-grade to skipped — pass-grades stay
+    counted regardless of snapshot drift signals."""
+    assert grader_service_mod._derive_score_status(
+        grade="full_match",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("counted", None)
+
+
+def test_derive_score_status_run_drift_requires_receipt_match():
+    """Don't flip to run_drift unless we have an explicit receipt-side
+    match — otherwise the receipt itself could be the issue and we
+    shouldn't attribute the miss to file movement."""
+    # Receipt-side is mismatched (not just unmatched) — atlas's
+    # interpretation of the rendering is suspect. Stays counted (the
+    # row isn't covered by either skip path).
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_mismatch",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("counted", None)
+
+
+def test_grade_one_populates_run_snapshot_drift_skip(daemon_config, tmp_path):
+    """End-to-end: a receipt whose path/lines render correctly at the
+    receipt commit but differ at the run commit should land
+    score_status=skipped_run_commit_line_drift +
+    clean_excluded_reason=run_commit_line_drift. (Acceptance #1 from
+    Codex's PR #15 spec.)
+    """
+    import hashlib
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+
+    # Build a tiny git repo with two commits — second edits lines 2-3.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "src" / "example.py"
+    src.parent.mkdir(parents=True)
+    receipt_body = "line one\nline two\nline three\nline four\n"
+    src.write_text(receipt_body, encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
+    receipt_commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+    # Edit + commit.
+    src.write_text("line one\nedited two\nedited three\nline four\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "edit"], cwd=repo, check=True, timeout=10)
+    run_commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    sliced = "\n".join(receipt_body.splitlines()[1:3])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    expected_sha = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q12",
+        question="what does line 2-3 of example.py do?",
+        source_path="src/example.py",
+        source_lines="2-3",
+        source_commit=receipt_commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt=sliced,
+        oracle_claim="claim",
+        command_text="scripts/qa_lookup.sh sed-range src/example.py 2 3",
+    )
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        run_commit=run_commit,
+        _runner_run_one=_fake_runner_run_one(),
+        # Atlas returns lines 2-3 of the run-commit content (the
+        # "edited" version). The grader compares against the receipt's
+        # original "line two/line three" claim, so it says no_match.
+        _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
+    )
+
+    assert row.grade == "no_match"
+    assert row.source_snapshot_status == "git_source_hash_match"
+    assert row.run_snapshot_status == "run_commit_hash_mismatch"
+    assert row.score_status == "skipped_run_commit_line_drift"
+    assert row.clean_excluded_reason == "run_commit_line_drift"
+
+
+def test_grade_one_both_snapshots_match_stays_counted(daemon_config, tmp_path):
+    """If both snapshots match and grader still says no_match, the row
+    stays counted — atlas is genuinely being measured on a stable
+    receipt and missed."""
+    import hashlib
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "src" / "example.py"
+    src.parent.mkdir(parents=True)
+    body = "line one\nline two\nline three\nline four\n"
+    src.write_text(body, encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "stable"], cwd=repo, check=True, timeout=10)
+    commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    sliced = "\n".join(body.splitlines()[1:3])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    expected_sha = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="what does line 2-3 do?",
+        source_path="src/example.py",
+        source_lines="2-3",
+        source_commit=commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt=sliced,
+        oracle_claim="claim",
+        command_text="scripts/qa_lookup.sh sed-range src/example.py 2 3",
+    )
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        run_commit=commit,  # same as receipt_commit — no drift
+        _runner_run_one=_fake_runner_run_one(),
+        _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
+    )
+
+    assert row.grade == "no_match"
+    assert row.source_snapshot_status == "git_source_hash_match"
+    assert row.run_snapshot_status == "run_commit_hash_match"
+    # The clean denominator should still count this — it's a real Atlas miss.
+    assert row.score_status == "counted"
+    assert row.clean_excluded_reason is None
+
+
+def test_serialize_row_includes_pr15_fields():
+    """Per-packet JSON artifact must carry run_snapshot_* fields."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q1", question="q1", grade="no_match",
+        confidence=0.1, rationale="drift", tool="find_code",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_mismatch",
+        run_snapshot_hash_match=False,
+        run_snapshot_sha256="deadbeef" * 8,
+        score_status="skipped_run_commit_line_drift",
+        clean_excluded_reason="run_commit_line_drift",
+    )
+    out = gs._serialize_row(row)
+    assert out["run_snapshot_status"] == "run_commit_hash_mismatch"
+    assert out["run_snapshot_hash_match"] is False
+    assert out["run_snapshot_sha256"] == "deadbeef" * 8
+    assert out["score_status"] == "skipped_run_commit_line_drift"
+
+
+def test_grading_summary_skipped_run_commit_line_drift_count():
+    """The new GradingSummary property counts only drift skips, not
+    receipt-stale skips."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            score_status="counted",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="no_match",
+            confidence=0.1, rationale="stale", tool="find_code",
+            score_status="skipped_receipt_stale",
+            clean_excluded_reason="receipt_stale",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="no_match",
+            confidence=0.1, rationale="drift", tool="find_code",
+            score_status="skipped_run_commit_line_drift",
+            clean_excluded_reason="run_commit_line_drift",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.skipped_receipt_stale_count == 1
+    assert s.skipped_run_commit_line_drift_count == 1
+    assert s.excluded_count == 2
+    assert s.clean_total == 1  # only the passing row counts
+    assert s.clean_pass_pct == 100
+
+
 def test_grade_one_populates_lane_and_score_status_for_stale_receipt(daemon_config):
     """End-to-end through _grade_one_receipt: a code receipt whose
     cited path doesn't exist at run commit should come out
