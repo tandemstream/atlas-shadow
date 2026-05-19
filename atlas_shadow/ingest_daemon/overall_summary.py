@@ -200,8 +200,14 @@ def _format_md(
 
     lines.append("## Run history")
     lines.append("")
-    lines.append("| Run | Code SHA | Packets | Receipts | Correct | Pct | Δ vs prior |")
-    lines.append("|---|---|---|---|---|---|---|")
+    # PR #14: dashboard now shows raw + clean pct side by side. Legacy
+    # runs (no clean_overall_pct in their manifest) render the clean
+    # column as `n/a`, so the table stays back-compatible.
+    lines.append(
+        "| Run | Code SHA | Packets | Receipts | Correct | Raw % | Clean % | "
+        "Excluded | Δ raw |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     prev_pct: Optional[float] = None
     for run in runs:
         run_name = run.get("run_name") or run.get("_dir") or "unknown"
@@ -211,6 +217,12 @@ def _format_md(
         n_recs = run.get("total_receipts", 0)
         n_correct = run.get("total_correct", 0)
         pct = run.get("overall_pct", 0.0)
+        clean_pct = run.get("clean_overall_pct")
+        excluded = run.get("total_excluded", 0)
+        clean_str = (
+            f"{clean_pct:.1f}%" if isinstance(clean_pct, (int, float))
+            else "n/a"
+        )
         if prev_pct is None:
             delta_str = "—"
         else:
@@ -219,9 +231,18 @@ def _format_md(
             delta_str = f"{d:+.1f}pp {arrow}"
         lines.append(
             f"| {run_name} | `{short_sha}` | {n_pkts} | {n_recs} | "
-            f"{n_correct} | {pct:.1f}% | {delta_str} |"
+            f"{n_correct} | {pct:.1f}% | {clean_str} | {excluded} | {delta_str} |"
         )
         prev_pct = pct
+    lines.append("")
+    lines.append(
+        "_**Raw %** counts every receipt in the denominator (legacy score). "
+        "**Clean %** excludes rows the daemon flagged as not measuring "
+        "Atlas retrieval — today that's receipt-stale anchors "
+        "(`score_status=skipped_receipt_stale`, "
+        "`clean_excluded_reason=receipt_stale`). Pre-PR-14 baselines render "
+        "Clean % as `n/a` because the bookkeeping wasn't captured at the time._"
+    )
     lines.append("")
     lines.append(
         "_Drill into a specific run via "
@@ -250,6 +271,13 @@ def _format_json(
                 "total_receipts": r.get("total_receipts", 0),
                 "total_correct": r.get("total_correct", 0),
                 "overall_pct": r.get("overall_pct", 0.0),
+                # PR #14: clean-denominator score (None on legacy runs).
+                "clean_overall_pct": r.get("clean_overall_pct"),
+                "clean_total": r.get("clean_total"),
+                "total_excluded": r.get("total_excluded", 0),
+                "total_skipped_receipt_stale": r.get(
+                    "total_skipped_receipt_stale", 0
+                ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }

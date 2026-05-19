@@ -1063,3 +1063,157 @@ def test_write_per_run_summary_md_sorts_packets_worst_first(tmp_path: Path):
     assert "baseline-x" in text
     assert "d9a5d53" in text
     assert "50.0%" in text
+
+
+# ─── PR #14: clean-denominator aggregation ────────────────────────────
+
+
+def _mk_summary_dict_with_skips(
+    packet_id: str,
+    *,
+    pass_count: int,
+    total: int,
+    excluded_count: int,
+    skipped_receipt_stale_count: int,
+) -> dict:
+    """Variant of _mk_summary_dict that carries the PR #14 clean-
+    denominator bookkeeping. Used to test the aggregation math in
+    isolation from the row-level lane/score_status derivation."""
+    clean_total = total - excluded_count
+    clean_pct = (
+        int(round(pass_count * 100 / clean_total)) if clean_total > 0 else None
+    )
+    return {
+        "packet_id": packet_id,
+        "passed": (pass_count * 100 // total >= 60) if total else False,
+        "pass_pct": int(round(pass_count * 100 / total)) if total else 0,
+        "pass_count": pass_count,
+        "total": total,
+        "clean_pass_pct": clean_pct,
+        "clean_total": clean_total,
+        "excluded_count": excluded_count,
+        "skipped_receipt_stale_count": skipped_receipt_stale_count,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_clean_score_drops_excluded_rows():
+    """Three packets, mix of passes / fails / receipt-stale skips.
+    Clean score should drop skipped rows from BOTH numerator and
+    denominator; raw score keeps them in the denominator."""
+    outcomes = [
+        {
+            "packet_slug": "p1",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_skips(
+                "p1", pass_count=10, total=12,
+                excluded_count=2, skipped_receipt_stale_count=2,
+            )],
+        },
+        {
+            "packet_slug": "p2",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_skips(
+                "p2", pass_count=4, total=13,
+                excluded_count=0, skipped_receipt_stale_count=0,
+            )],
+        },
+        {
+            "packet_slug": "p3",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_skips(
+                "p3", pass_count=8, total=23,
+                excluded_count=5, skipped_receipt_stale_count=5,
+            )],
+        },
+    ]
+    totals = gb._aggregate_run_totals(outcomes)
+    # Raw: 10+4+8 = 22 correct out of 12+13+23 = 48 → 45.8%
+    assert totals["total_receipts"] == 48
+    assert totals["total_correct"] == 22
+    assert totals["overall_pct"] == round(22 * 100 / 48, 1)
+    # Clean: 22 correct out of (48 - 7) = 41 → 53.7%
+    assert totals["total_excluded"] == 7
+    assert totals["total_skipped_receipt_stale"] == 7
+    assert totals["clean_total"] == 41
+    assert totals["clean_overall_pct"] == round(22 * 100 / 41, 1)
+    # Per-packet rows carry both metrics.
+    assert totals["per_packet_pct"]["p1"]["excluded"] == 2
+    assert totals["per_packet_pct"]["p1"]["clean_total"] == 10
+    assert totals["per_packet_pct"]["p1"]["clean_pct"] == 100.0
+    assert totals["per_packet_pct"]["p2"]["clean_pct"] == round(4 * 100 / 13, 1)
+    assert totals["per_packet_pct"]["p3"]["clean_pct"] == round(8 * 100 / 18, 1)
+
+
+def test_aggregate_run_totals_legacy_summaries_still_work():
+    """Pre-PR-14 summaries (no excluded_count field) should aggregate
+    cleanly — excluded defaults to zero, clean_overall_pct equals
+    overall_pct."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        # Use the legacy helper that lacks new fields entirely.
+        "summaries": [_mk_summary_dict("p1", [
+            ("full_match", "q1"), ("full_match", "q2"), ("no_match", "q3"),
+        ])],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_excluded"] == 0
+    assert totals["total_skipped_receipt_stale"] == 0
+    assert totals["clean_total"] == 3
+    # Same as overall_pct since nothing was excluded.
+    assert totals["clean_overall_pct"] == totals["overall_pct"]
+
+
+def test_aggregate_run_totals_clean_pct_is_none_when_all_excluded():
+    """If every row in a run was excluded (e.g. every receipt was
+    stale), clean_overall_pct returns None rather than 0/0."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_skips(
+            "p1", pass_count=0, total=3,
+            excluded_count=3, skipped_receipt_stale_count=3,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["clean_total"] == 0
+    assert totals["clean_overall_pct"] is None
+    # Per-packet too.
+    assert totals["per_packet_pct"]["p1"]["clean_pct"] is None
+
+
+def test_write_per_run_summary_md_renders_both_scores(tmp_path: Path):
+    """summary.md must show Raw % AND Clean % columns + the totals
+    line that calls out exclusion counts."""
+    outcomes = [{
+        "packet_slug": "pkt1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_skips(
+            "pkt1", pass_count=10, total=12,
+            excluded_count=2, skipped_receipt_stale_count=2,
+        )],
+    }]
+    path = gb.write_per_run_summary_md(
+        "baseline-pr14",
+        tmp_path,
+        commit_sha="d9a5d53c97ad" + "0" * 28,
+        packet_outcomes=outcomes,
+        overall_pct=83.3,
+        total_receipts=12,
+        total_correct=10,
+        clean_overall_pct=100.0,
+        clean_total=10,
+        total_excluded=2,
+        total_skipped_receipt_stale=2,
+    )
+    text = path.read_text()
+    # Both totals rendered.
+    assert "Raw correct" in text
+    assert "Clean correct" in text
+    assert "(83.3%)" in text  # raw
+    assert "(100.0%)" in text  # clean
+    # Receipt-stale exclusion called out.
+    assert "2 receipt-stale" in text
+    # Table header shows both pct columns.
+    assert "Raw %" in text and "Clean %" in text and "Excluded" in text

@@ -321,3 +321,73 @@ def test_regenerate_creates_root_if_absent(tmp_path: Path):
     md_path, json_path = os_mod.regenerate(root)
     assert md_path.exists()
     assert "No runs on disk yet" in md_path.read_text()
+
+
+# ─── PR #14: clean-denominator dashboard columns ─────────────────────
+
+
+def test_regenerate_renders_clean_pct_for_pr14_runs(tmp_path: Path):
+    """A manifest carrying clean_overall_pct + total_excluded should
+    surface those columns in the markdown dashboard."""
+    _write_run(
+        tmp_path, "baseline-2026-05-19",
+        started_at="2026-05-19T00:00:00Z",
+        finished_at="2026-05-19T01:00:00Z",
+        total_receipts=48,
+        total_correct=32,
+        overall_pct=66.7,
+        clean_overall_pct=91.4,
+        clean_total=35,
+        total_excluded=13,
+        total_skipped_receipt_stale=13,
+    )
+    md_path, _ = os_mod.regenerate(tmp_path)
+    text = md_path.read_text()
+    assert "66.7%" in text  # raw
+    assert "91.4%" in text  # clean
+    assert "Clean %" in text
+    assert "Excluded" in text
+    # The trailing note explaining the columns.
+    assert "skipped_receipt_stale" in text
+
+
+def test_regenerate_renders_clean_pct_as_na_for_legacy_runs(tmp_path: Path):
+    """Pre-PR-14 manifests (no clean_overall_pct field) should render
+    'n/a' in the Clean % column rather than crashing or showing 0."""
+    _write_run(tmp_path, "baseline-2026-05-15", started_at="2026-05-15T10:00:00Z")
+    md_path, _ = os_mod.regenerate(tmp_path)
+    text = md_path.read_text()
+    assert "80.0%" in text  # raw still rendered
+    assert "n/a" in text  # clean column is n/a
+
+
+def test_regenerate_clean_pct_lands_in_json(tmp_path: Path):
+    """overall-summary.json must surface clean_overall_pct +
+    total_excluded so the cross-run JSON is consumable by
+    classification scripts (not just humans reading markdown)."""
+    _write_run(
+        tmp_path, "baseline-pr14",
+        clean_overall_pct=91.4,
+        clean_total=35,
+        total_excluded=13,
+        total_skipped_receipt_stale=13,
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    payload = json.loads(json_path.read_text())
+    assert len(payload["runs"]) == 1
+    run = payload["runs"][0]
+    assert run["clean_overall_pct"] == 91.4
+    assert run["clean_total"] == 35
+    assert run["total_excluded"] == 13
+    assert run["total_skipped_receipt_stale"] == 13
+
+
+def test_regenerate_clean_pct_omitted_keeps_run_renderable(tmp_path: Path):
+    """A legacy manifest (no clean_* fields) still produces a JSON
+    entry — clean_overall_pct is None, totals default to 0."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    payload = json.loads(json_path.read_text())
+    run = payload["runs"][0]
+    assert run["clean_overall_pct"] is None
+    assert run["total_excluded"] == 0

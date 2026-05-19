@@ -209,6 +209,58 @@ shadow-runs/
     └── artifacts/                ← raw orchestrator output (mostly redundant)
 ```
 
+#### Two scores: raw vs clean (PR #14)
+
+Every PR #14+ run emits **two** percentages — `overall_pct` (raw, legacy)
+and `clean_overall_pct` (PR #14's clean denominator). Both appear in
+`manifest.json`, `summary.md`, and the cross-run `overall-summary.md`
+dashboard.
+
+| Field | What it counts | Use when |
+|---|---|---|
+| `overall_pct` | passes / (every row, including stale-receipt skips) | comparing against pre-PR-14 baselines for trend continuity |
+| `clean_overall_pct` | passes / (rows where `score_status == "counted"` — excludes receipt-stale anchors and future similar bookkeeping skips) | judging Atlas's actual retrieval performance |
+
+A receipt's `02-qna-log.md` anchor can drift out of sync with the run
+commit (the cited file was refactored, deleted, or its lines moved).
+PR #13 surfaces that via `source_snapshot_status: "git_source_missing"`
+on the row. PR #14 turns the per-row signal into a per-run score: such
+no_match rows get `score_status: "skipped_receipt_stale"` +
+`clean_excluded_reason: "receipt_stale"`, and the clean denominator
+drops them from BOTH numerator and denominator so the score reflects
+retrieval performance, not receipt drift.
+
+**`source_snapshot_status` semantics — read carefully:**
+
+- `source_snapshot_status=git_source_hash_match` means **the receipt's
+  pinned `source_commit` renders the expected excerpt.**
+- **It does not prove the same path/lines still render the expected
+  excerpt at the grading `run_commit`.**
+- A `no_match + git_source_hash_match` row stays `score_status=counted`
+  for now. The diagnostic bucket for this shape is
+  `needs_run_commit_snapshot` (or `possible_run_commit_line_drift`) —
+  **not** `exact_source_fast_path_didnt_fire`. Attributing the miss to
+  atlas before the run-commit snapshot exists would conflate two
+  failure modes that need distinct fixes.
+- **Follow-up:** PR #15 will add a second snapshot field — provisionally
+  `run_snapshot_status` — that checks the same path/lines against the
+  actual `run_commit_sha`. Once that lands, `_derive_score_status` can
+  emit `score_status=skipped_run_commit_line_drift` when the receipt
+  snapshot matches but the run snapshot doesn't, and the clean
+  denominator drops that case the same way it drops
+  `skipped_receipt_stale` today.
+
+The `grade` enum stays narrow (`full_match` / `partial_match` /
+`no_match` / `atlas_not_found`) — the skip is bookkeeping on a
+separate `score_status` field, not a fifth grade value. Downstream
+code that branches on grade values continues to see no_match for
+stale receipts; the clean filter happens at aggregation time via
+`score_status`.
+
+Legacy `baseline-*/manifest.json` files (pre-PR-14) don't carry
+`clean_overall_pct`; the cross-run dashboard renders `n/a` for those
+runs rather than zero so the trendline doesn't get corrupted.
+
 ---
 
 ## Ongoing operation

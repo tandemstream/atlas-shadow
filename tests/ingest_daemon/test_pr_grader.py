@@ -1830,3 +1830,279 @@ def test_build_comment_markdown_single_packet_backward_compat():
     assert pr_comment_mod.COMMENT_MARKER in body
     # The single packet's id appears in the section header.
     assert "pkt-x" in body
+
+
+# ─── PR #14 — clean-denominator grading + lane field + receipt-stale skip ───
+
+
+def test_infer_lane_doc_resolver(daemon_config):
+    """doc_resolver tool always lands in the doc_resolver lane,
+    regardless of receipt anchor shape."""
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+        source_path="docs/x.md", source_lines="1-5",
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="doc_resolver", receipt=r
+    ) == "doc_resolver"
+
+
+def test_infer_lane_scan_search(daemon_config):
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="scan_search", receipt=r
+    ) == "scan_search"
+
+
+def test_infer_lane_explicit_source_fast_path(daemon_config):
+    """find_code w/ both path AND lines maps to fast-path lane."""
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+        source_path="core/ai.py", source_lines="847-863",
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="find_code", receipt=r
+    ) == "explicit_source_fast_path"
+
+
+def test_infer_lane_fuzzy_when_path_only(daemon_config):
+    """find_code w/ just a path (no lines) is NOT fast-path eligible —
+    fuzzy retrieval lane."""
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+        source_path="core/ai.py", source_lines=None,
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="find_code", receipt=r
+    ) == "fuzzy_find_code"
+
+
+def test_infer_lane_fuzzy_when_no_anchor(daemon_config):
+    """find_code w/ no anchors at all is fuzzy."""
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="find_code", receipt=r
+    ) == "fuzzy_find_code"
+
+
+def test_infer_lane_fuzzy_when_empty_string_anchors():
+    """Whitespace-only / empty-string source_path or source_lines
+    shouldn't count as anchored — fall through to fuzzy."""
+    r = grader_service_mod.PacketReceipt(
+        question_id="q", question="q",
+        oracle_claim="", oracle_excerpt="",
+        source_path="   ", source_lines="  ",
+    )
+    assert grader_service_mod._infer_lane(
+        tool_label="find_code", receipt=r
+    ) == "fuzzy_find_code"
+
+
+def test_derive_score_status_default_counted():
+    """Default outcome — pass-grades and non-stale fails both count."""
+    assert grader_service_mod._derive_score_status(
+        grade="full_match", source_snapshot_status="git_source_hash_match"
+    ) == ("counted", None)
+    assert grader_service_mod._derive_score_status(
+        grade="no_match", source_snapshot_status="git_source_hash_match"
+    ) == ("counted", None)
+    assert grader_service_mod._derive_score_status(
+        grade="partial_match", source_snapshot_status="git_source_missing"
+    ) == ("counted", None)
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found", source_snapshot_status="git_source_missing"
+    ) == ("counted", None)
+
+
+def test_derive_score_status_receipt_stale():
+    """The only skip today: no_match + snap == git_source_missing."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match", source_snapshot_status="git_source_missing"
+    ) == ("skipped_receipt_stale", "receipt_stale")
+
+
+def test_derive_score_status_no_snapshot_treated_as_counted():
+    """source_snapshot_status=None (e.g. doc_resolver receipts) means
+    no snapshot was resolved — never a stale skip."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match", source_snapshot_status=None
+    ) == ("counted", None)
+
+
+def test_grade_one_populates_lane_and_score_status_for_stale_receipt(daemon_config):
+    """End-to-end through _grade_one_receipt: a code receipt whose
+    cited path doesn't exist at run commit should come out
+    score_status=skipped_receipt_stale + clean_excluded_reason=receipt_stale
+    when the grader returns no_match. Lane is the fast-path lane
+    because the receipt carries path+lines."""
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="missing.py exists?",
+        source_path="missing-at-head.py",  # doesn't exist → git_source_missing
+        source_lines="10-20",
+        source_commit=BASE_SHA,
+        oracle_excerpt="excerpt",
+        oracle_claim="claim",
+        # `sed-range` routes to find_code (translate_receipt_to_query
+        # heuristic) — required so lane=explicit_source_fast_path can
+        # apply (find_code lane + path+lines anchor).
+        command_text="scripts/qa_lookup.sh sed-range missing-at-head.py 10 20",
+    )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=_fake_runner_run_one(),
+        _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
+    )
+
+    assert row.grade == "no_match"  # grade enum stays narrow
+    assert row.source_snapshot_status == "git_source_missing"
+    assert row.lane == "explicit_source_fast_path"
+    assert row.score_status == "skipped_receipt_stale"
+    assert row.clean_excluded_reason == "receipt_stale"
+
+
+def test_grade_one_populates_lane_and_counted_for_passing_receipt(daemon_config):
+    """A passing find_code receipt should land score_status=counted
+    regardless of snapshot status."""
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="ok?",
+        source_path="missing-at-head.py",
+        source_lines="10-20",
+        source_commit=BASE_SHA,
+        oracle_excerpt="excerpt",
+        oracle_claim="claim",
+        command_text="scripts/qa_lookup.sh sed-range missing-at-head.py 10 20",
+    )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=_fake_runner_run_one(),
+        _grader_grade=_fake_grader(grade="full_match", confidence=0.95, rationale="ok"),
+    )
+
+    assert row.grade == "full_match"
+    assert row.lane == "explicit_source_fast_path"
+    assert row.score_status == "counted"
+    assert row.clean_excluded_reason is None
+
+
+def test_grading_summary_clean_pass_pct_basic():
+    """Two passing + one stale-skip → raw 67%, clean 100% (skip removed
+    from both numerator and denominator)."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            lane="explicit_source_fast_path", score_status="counted",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="partial_match",
+            confidence=0.7, rationale="ok", tool="find_code",
+            lane="explicit_source_fast_path", score_status="counted",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="no_match",
+            confidence=0.1, rationale="stale", tool="find_code",
+            lane="explicit_source_fast_path",
+            score_status="skipped_receipt_stale",
+            clean_excluded_reason="receipt_stale",
+            source_snapshot_status="git_source_missing",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.total == 3
+    assert s.pass_count == 2
+    assert s.pass_pct == 67  # raw
+    assert s.excluded_count == 1
+    assert s.skipped_receipt_stale_count == 1
+    assert s.clean_total == 2
+    assert s.clean_pass_pct == 100  # clean denominator removes the skip
+
+
+def test_grading_summary_clean_pass_pct_none_when_all_excluded():
+    """clean_pass_pct returns None (not 0) when every row is excluded —
+    the score is undefined, not zero."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="no_match",
+            confidence=0.0, rationale="stale", tool="find_code",
+            score_status="skipped_receipt_stale",
+            clean_excluded_reason="receipt_stale",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.total == 1
+    assert s.pass_count == 0
+    assert s.clean_total == 0
+    assert s.clean_pass_pct is None  # explicit "undefined", not 0
+
+
+def test_grading_summary_back_compat_no_new_fields():
+    """Rows that don't set score_status default to ``counted`` — old
+    test fixtures and legacy code paths shouldn't see behavior shifts.
+    """
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+        ),  # no score_status / lane / clean_excluded_reason
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.excluded_count == 0
+    assert s.skipped_receipt_stale_count == 0
+    assert s.clean_total == 1
+    assert s.clean_pass_pct == 100
+
+
+def test_serialize_row_includes_pr14_fields():
+    """The per-packet JSON artifact must carry lane / score_status /
+    clean_excluded_reason so downstream classifiers can apply the
+    clean filter without re-inferring."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q1", question="q1", grade="no_match",
+        confidence=0.1, rationale="stale", tool="find_code",
+        lane="explicit_source_fast_path",
+        score_status="skipped_receipt_stale",
+        clean_excluded_reason="receipt_stale",
+        source_snapshot_status="git_source_missing",
+    )
+    out = gs._serialize_row(row)
+    assert out["lane"] == "explicit_source_fast_path"
+    assert out["score_status"] == "skipped_receipt_stale"
+    assert out["clean_excluded_reason"] == "receipt_stale"
+    assert out["source_snapshot_status"] == "git_source_missing"
