@@ -992,8 +992,17 @@ def _derive_score_status(
     Per Codex's PR #14 design note: ``grade`` stays narrow
     (full_match | partial_match | no_match | atlas_not_found). The
     skip is bookkeeping on a separate field, not a fifth grade value.
+
+    Codex PR #16 review note: both ``no_match`` AND ``atlas_not_found``
+    are failure grades that the skip paths should cover. In the real
+    PR #15 probe, q12 came back as ``atlas_not_found`` (atlas's exact-
+    source fast path returned an empty answer rather than a wrong-
+    content answer), so a `grade != "no_match"` predicate left the
+    drift skip dormant for exactly the case PR #15 was designed to
+    catch. The fix treats both failure grades the same — pass-grades
+    are still never flipped.
     """
-    if grade != "no_match":
+    if grade not in {"no_match", "atlas_not_found"}:
         return ("counted", None)
     # Receipt-side stale takes precedence — atlas was never measured on
     # a renderable receipt commit.

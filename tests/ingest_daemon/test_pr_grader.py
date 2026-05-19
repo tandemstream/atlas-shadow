@@ -1908,7 +1908,16 @@ def test_infer_lane_fuzzy_when_empty_string_anchors():
 
 
 def test_derive_score_status_default_counted():
-    """Default outcome — pass-grades and non-stale fails both count."""
+    """Default outcome — pass-grades and non-stale fails both count.
+
+    PR #16 review: ``atlas_not_found + git_source_missing`` now flips
+    to ``skipped_receipt_stale`` (same as no_match) because atlas
+    can't be measured against a receipt whose anchor doesn't exist
+    at the receipt commit. See
+    ``test_derive_score_status_atlas_not_found_skip_paths`` below
+    for that behavior; this test stays focused on the legit-counted
+    cases (pass-grades + matching snapshots).
+    """
     assert grader_service_mod._derive_score_status(
         grade="full_match", source_snapshot_status="git_source_hash_match"
     ) == ("counted", None)
@@ -1917,9 +1926,6 @@ def test_derive_score_status_default_counted():
     ) == ("counted", None)
     assert grader_service_mod._derive_score_status(
         grade="partial_match", source_snapshot_status="git_source_missing"
-    ) == ("counted", None)
-    assert grader_service_mod._derive_score_status(
-        grade="atlas_not_found", source_snapshot_status="git_source_missing"
     ) == ("counted", None)
 
 
@@ -1951,6 +1957,52 @@ def test_derive_score_status_run_commit_drift():
         source_snapshot_status="git_source_hash_match",
         run_snapshot_status="run_commit_hash_mismatch",
     ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
+def test_derive_score_status_atlas_not_found_receipt_stale():
+    """Codex PR #16 review: ``atlas_not_found`` is a failure grade
+    just like ``no_match``. When paired with a receipt-side stale
+    signal, it should be skipped on the same path."""
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_missing",
+    ) == ("skipped_receipt_stale", "receipt_stale")
+
+
+def test_derive_score_status_atlas_not_found_run_commit_drift():
+    """Codex PR #16 review: ``atlas_not_found`` + receipt-snap-match
+    + run-snap-mismatch is the q12-shaped case from the real PR #15
+    probe — atlas's fast path returned an empty answer because the
+    cited line range now contains code that doesn't match the
+    receipt's expected excerpt. Skipped on the run-drift path so the
+    clean denominator excludes it."""
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
+def test_derive_score_status_atlas_not_found_run_commit_source_missing():
+    """atlas_not_found + path deleted at run commit — same skip
+    semantics as no_match + path deleted (both grades reflect
+    non-measurement)."""
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_source_missing",
+    ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
+def test_derive_score_status_atlas_not_found_stays_counted_when_no_drift():
+    """atlas_not_found with both snapshots clean = real Atlas miss,
+    not drift. Stays counted so the score reflects retrieval
+    failure."""
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_hash_match",
+    ) == ("counted", None)
 
 
 def test_derive_score_status_run_commit_source_missing_is_drift():
