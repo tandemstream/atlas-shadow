@@ -899,13 +899,21 @@ def _derive_score_status(
     # a renderable receipt commit.
     if source_snapshot_status == "git_source_missing":
         return ("skipped_receipt_stale", "receipt_stale")
-    # Run-commit line drift: receipt matched at authoring, but the file
-    # moved by the time we graded. We require an explicit receipt-snap
-    # match before drifting — without that anchor, the receipt itself
-    # could be the issue.
+    # Run-commit drift: receipt matched at authoring, but at the
+    # grading commit the same path/lines either render different bytes
+    # (``run_commit_hash_mismatch``) or the file/path is gone entirely
+    # (``run_commit_source_missing`` — deleted, renamed, etc.). Both
+    # are the same class of non-measurement: atlas isn't being graded
+    # against the receipt as authored. Codex's PR #15 review note —
+    # the classifier already buckets both as ``run_commit_line_drift``;
+    # the scorer needs to match. We require an explicit receipt-snap
+    # match before excluding so the receipt itself isn't the issue.
     if (
         source_snapshot_status == "git_source_hash_match"
-        and run_snapshot_status == "run_commit_hash_mismatch"
+        and run_snapshot_status in (
+            "run_commit_hash_mismatch",
+            "run_commit_source_missing",
+        )
     ):
         return ("skipped_run_commit_line_drift", "run_commit_line_drift")
     return ("counted", None)

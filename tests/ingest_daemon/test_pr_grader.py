@@ -1953,6 +1953,21 @@ def test_derive_score_status_run_commit_drift():
     ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
 
 
+def test_derive_score_status_run_commit_source_missing_is_drift():
+    """Codex PR #15 review note: a receipt valid at source_commit
+    whose path/file was DELETED or RENAMED by run_commit is the same
+    class of non-measurement as line drift — atlas isn't being graded
+    against the receipt as authored. ``_derive_score_status`` must
+    classify this consistently with the diagnostic classifier (which
+    already buckets ``run_commit_source_missing`` as
+    ``run_commit_line_drift``)."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_match",
+        run_snapshot_status="run_commit_source_missing",
+    ) == ("skipped_run_commit_line_drift", "run_commit_line_drift")
+
+
 def test_derive_score_status_both_snapshots_match_stays_counted():
     """Receipt-commit AND run-commit both match the excerpt, but
     grader still said no_match. This is the genuine fast-path-bug or
