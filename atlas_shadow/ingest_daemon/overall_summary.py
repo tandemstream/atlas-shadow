@@ -100,6 +100,22 @@ def load_run_manifests(shadow_runs_root: Path) -> list[dict[str, Any]]:
     (oldest first). Manifests that can't be parsed (corrupted JSON,
     missing keys) are skipped with a quiet stderr warning rather than
     aborting the regen — partial data is better than no dashboard.
+
+    **De-duplication:** when two directories carry the same ``run_name``
+    field (a common shape after archive/backup — e.g. someone copies
+    ``baseline-2026-05-15/`` to ``baseline-2026-05-15-broken-no-workspace-py/``
+    without updating the JSON), the canonical row wins and the others
+    are dropped with a warning. The selection rule prefers (in order):
+
+      1. The directory whose name matches ``run_name`` exactly. This
+         is the convention :func:`grade_batch.write_manifest` writes
+         under, so the canonical run picks itself out.
+      2. Otherwise, the latest ``started_at``. Without a directory-
+         name match there's no way to tell which copy is canonical;
+         "later finished" is the least-bad heuristic.
+
+    The dropped entries get a stderr warning naming the directory so
+    the operator can rename or move it.
     """
     if not shadow_runs_root.is_dir():
         return []
@@ -133,8 +149,64 @@ def load_run_manifests(shadow_runs_root: Path) -> list[dict[str, Any]]:
             continue
         manifest["_dir"] = run_dir.name  # for cross-reference
         runs.append(manifest)
+    runs = _dedupe_by_run_name(runs)
     runs.sort(key=lambda r: r.get("started_at", ""))
     return runs
+
+
+def _dedupe_by_run_name(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse runs sharing the same ``run_name`` to one canonical row.
+
+    Selection rule (matches the docstring on
+    :func:`load_run_manifests`):
+
+      1. Directory name matches ``run_name`` exactly → canonical.
+      2. Otherwise, the latest ``started_at`` wins.
+
+    Runs lacking a ``run_name`` (very old / malformed manifests) are
+    grouped by their directory name instead — they can't collide with
+    each other since directory names are unique.
+    """
+    import sys
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in runs:
+        # Fall back to dir name when run_name is missing — that means
+        # the run is unique by directory anyway.
+        key = r.get("run_name") or r.get("_dir") or ""
+        grouped.setdefault(key, []).append(r)
+
+    kept: list[dict[str, Any]] = []
+    for key, candidates in grouped.items():
+        if len(candidates) == 1:
+            kept.append(candidates[0])
+            continue
+        # Prefer the candidate whose directory name matches run_name.
+        canonical = next(
+            (
+                c for c in candidates
+                if c.get("_dir") and c.get("_dir") == c.get("run_name")
+            ),
+            None,
+        )
+        if canonical is None:
+            # No directory-name match — pick the latest started_at.
+            canonical = max(
+                candidates,
+                key=lambda c: c.get("started_at", ""),
+            )
+        kept.append(canonical)
+        dropped = [
+            c.get("_dir") or "<no _dir>" for c in candidates if c is not canonical
+        ]
+        if dropped:
+            print(
+                f"[overall_summary] WARN: run_name={key!r} appears in multiple "
+                f"directories; keeping {canonical.get('_dir')!r}, "
+                f"dropping {dropped!r} (rename or move them out of "
+                f"baseline-*/)",
+                file=sys.stderr,
+            )
+    return kept
 
 
 def _compute_callouts(

@@ -109,6 +109,108 @@ def test_load_run_manifests_ignores_non_baseline_dirs(tmp_path: Path):
     assert [r["run_name"] for r in runs] == ["baseline-2026-05-15"]
 
 
+# ───────── de-duplication when two dirs share run_name ──────────────
+
+
+def _write_run_with_manifest(
+    root: Path,
+    dir_name: str,
+    *,
+    manifest_run_name: str,
+    started_at: str = "2026-05-15T00:00:00Z",
+) -> None:
+    """Materialize a baseline dir where the directory name and the
+    ``run_name`` field deliberately differ. Used to exercise the
+    de-dup logic — _write_run() ties the two together."""
+    run_dir = root / dir_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "run_name": manifest_run_name,
+        "commit_sha": "d9a5d53c97ad6abd768103bc9386cde25ee61be2",
+        "code_revision_id": "rev-default",
+        "started_at": started_at,
+        "finished_at": "2026-05-15T01:00:00Z",
+        "total_packets": 1,
+        "total_receipts": 10,
+        "total_correct": 8,
+        "overall_pct": 80.0,
+        "grader_backend": "claude_cli",
+        "grader_model": "sonnet",
+        "per_packet_pct": {"p1": {"receipts": 10, "correct": 8, "pct": 80.0}},
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_load_run_manifests_dedupes_by_run_name_prefers_matching_dir(
+    tmp_path: Path, capsys,
+):
+    """The most common shape: an archived/broken copy of a baseline
+    sitting next to the real one, both with ``run_name=baseline-X``.
+    The directory whose name matches ``run_name`` is canonical; the
+    archived copy is dropped with a stderr warning.
+
+    Reproduces the real-world case where
+    ``shadow-runs/baseline-2026-05-15-broken-no-workspace-py/`` shared
+    ``run_name=baseline-2026-05-15`` with the real run and the
+    dashboard double-counted both.
+    """
+    # Canonical: directory name matches run_name.
+    _write_run(tmp_path, "baseline-2026-05-15",
+               started_at="2026-05-15T21:38:39Z")
+    # Archive copy: same run_name field, different directory name.
+    _write_run_with_manifest(
+        tmp_path,
+        "baseline-2026-05-15-broken-no-workspace-py",
+        manifest_run_name="baseline-2026-05-15",
+        started_at="2026-05-15T21:31:17Z",
+    )
+
+    runs = os_mod.load_run_manifests(tmp_path)
+    assert len(runs) == 1
+    assert runs[0]["_dir"] == "baseline-2026-05-15"
+    err = capsys.readouterr().err
+    assert "baseline-2026-05-15-broken-no-workspace-py" in err
+    assert "rename or move them out of baseline-*/" in err
+
+
+def test_load_run_manifests_dedupes_falls_back_to_latest_started_at(
+    tmp_path: Path,
+):
+    """When neither directory matches ``run_name`` exactly (both are
+    archived copies, both renamed away from canonical), prefer the
+    latest ``started_at``. Without a directory-name match there's no
+    way to tell which copy is canonical; latest-finished is the
+    least-bad heuristic.
+    """
+    _write_run_with_manifest(
+        tmp_path, "baseline-2026-archive-a",
+        manifest_run_name="baseline-original",
+        started_at="2026-05-15T01:00:00Z",
+    )
+    _write_run_with_manifest(
+        tmp_path, "baseline-2026-archive-b",
+        manifest_run_name="baseline-original",
+        started_at="2026-05-15T02:00:00Z",
+    )
+    runs = os_mod.load_run_manifests(tmp_path)
+    assert len(runs) == 1
+    # Later started_at wins.
+    assert runs[0]["_dir"] == "baseline-2026-archive-b"
+
+
+def test_load_run_manifests_distinct_run_names_kept_intact(tmp_path: Path):
+    """De-dup only collapses entries that SHARE a run_name. Two
+    runs with different run_names must both survive — the canonical
+    multi-day-baselines case."""
+    _write_run(tmp_path, "baseline-2026-05-15")
+    _write_run(tmp_path, "baseline-2026-05-19",
+               started_at="2026-05-19T10:00:00Z")
+    runs = os_mod.load_run_manifests(tmp_path)
+    assert [r["run_name"] for r in runs] == [
+        "baseline-2026-05-15", "baseline-2026-05-19",
+    ]
+
+
 # ───────── _compute_callouts ─────────────────────────────────────────
 
 
