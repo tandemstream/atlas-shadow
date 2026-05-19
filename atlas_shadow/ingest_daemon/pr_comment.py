@@ -275,6 +275,87 @@ class GradingSummary:
         )
 
     @property
+    def by_lane(self) -> dict[str, dict[str, Any]]:
+        """Breakdown of receipts by retrieval ``lane``.
+
+        Sibling of :attr:`by_evidence_type`. Where evidence_type
+        answers "what kind of receipt is this?", lane answers
+        "which retrieval surface did Atlas (or the pre-Atlas skip
+        path) actually go through?" Surfaced so the dashboard can
+        attribute clean-denominator movement to a specific lane —
+        e.g. when a doc_resolver fix lands, the ``doc_resolver``
+        bucket's ``clean_pct`` should move while other lanes stay
+        flat.
+
+        Buckets are the actual ``lane`` values
+        :mod:`grader_service` writes onto rows today:
+        ``explicit_source_fast_path`` (find_code with
+        ``source_path + source_lines`` anchor — PR #426 fast-path
+        eligible), ``fuzzy_find_code`` (find_code without anchor),
+        ``scan_search``, ``doc_resolver``, ``non_retrieval`` (the
+        pre-Atlas skip path used by command_snapshot /
+        non-repo-evidence / unavailable-source-ref / etc.). Any
+        unexpected future value lands in ``other`` so adding a new
+        lane upstream doesn't silently corrupt one of the canonical
+        buckets — same defensive shape as
+        :attr:`by_evidence_type`'s ``other`` bucket.
+
+        This property is intentionally a roll-up of the row's
+        existing ``lane`` field. We do not re-classify or invent
+        lane meaning here — ``_infer_lane`` in
+        :mod:`grader_service` is the only place lane semantics
+        live, and changes to it are out of scope for the breakdown.
+
+        Each bucket carries ``receipts / correct / excluded /
+        clean_total / clean_pct``. ``clean_pct`` is ``None`` when
+        ``clean_total == 0`` (mirrors :attr:`clean_pass_pct`).
+        """
+        # Match every lane value :mod:`grader_service` emits today.
+        # Order is deterministic so JSON rendering is stable across
+        # runs.
+        buckets = [
+            "explicit_source_fast_path",
+            "fuzzy_find_code",
+            "scan_search",
+            "doc_resolver",
+            "non_retrieval",
+        ]
+        out: dict[str, dict[str, Any]] = {
+            b: {"receipts": 0, "correct": 0, "excluded": 0} for b in buckets
+        }
+        out["other"] = {"receipts": 0, "correct": 0, "excluded": 0}
+        for row in self.rows:
+            lane = (row.lane or "").strip()
+            if not lane:
+                # Legacy rows / receipts the grader couldn't classify
+                # land in ``other``. We deliberately don't collapse
+                # them into one of the canonical buckets — that
+                # would invent a classification the row never had.
+                key = "other"
+            elif lane in out:
+                key = lane
+            else:
+                # Future / unexpected lane value — keep the breakdown
+                # well-defined without inventing meaning. The raw row
+                # still preserves the original lane in the artifact
+                # JSON, so an operator drilling down can see what it
+                # actually was.
+                key = "other"
+            out[key]["receipts"] += 1
+            if row.grade in ("full_match", "partial_match"):
+                out[key]["correct"] += 1
+            if row.score_status != "counted":
+                out[key]["excluded"] += 1
+        for vals in out.values():
+            clean_total = vals["receipts"] - vals["excluded"]
+            vals["clean_total"] = clean_total
+            vals["clean_pct"] = (
+                round(vals["correct"] * 100 / clean_total, 1)
+                if clean_total > 0 else None
+            )
+        return out
+
+    @property
     def by_evidence_type(self) -> dict[str, dict[str, Any]]:
         """Breakdown of receipts by ``evidence_type``.
 

@@ -585,3 +585,118 @@ def test_format_md_skips_evidence_type_section_when_all_zero(tmp_path: Path):
     runs = os_mod.load_run_manifests(tmp_path)
     out = os_mod._format_md(runs, [], [])
     assert "Latest run — by evidence type" not in out
+
+
+# ─── Per-lane breakdown in dashboard (sibling of by-evidence-type) ────
+
+
+def _sample_lane_breakdown(
+    *,
+    explicit_source_fast_path: tuple[int, int, int] = (0, 0, 0),
+    fuzzy_find_code: tuple[int, int, int] = (0, 0, 0),
+    scan_search: tuple[int, int, int] = (0, 0, 0),
+    doc_resolver: tuple[int, int, int] = (0, 0, 0),
+    non_retrieval: tuple[int, int, int] = (0, 0, 0),
+    other: tuple[int, int, int] = (0, 0, 0),
+) -> dict:
+    """Build a lane breakdown dict matching the shape
+    ``_aggregate_run_totals`` emits. Each tuple is
+    (receipts, correct, excluded). Mirror of ``_sample_breakdown``."""
+    def bucket(t):
+        r, c, e = t
+        clean_total = r - e
+        return {
+            "receipts": r, "correct": c, "excluded": e,
+            "clean_total": clean_total,
+            "clean_pct": (
+                round(c * 100 / clean_total, 1)
+                if clean_total > 0 else None
+            ),
+        }
+    return {
+        "explicit_source_fast_path": bucket(explicit_source_fast_path),
+        "fuzzy_find_code": bucket(fuzzy_find_code),
+        "scan_search": bucket(scan_search),
+        "doc_resolver": bucket(doc_resolver),
+        "non_retrieval": bucket(non_retrieval),
+        "other": bucket(other),
+    }
+
+
+def test_regenerate_by_lane_lands_in_json(tmp_path: Path):
+    """overall-summary.json must expose total_by_lane per run so
+    downstream tooling (compare_runs, dashboards) can consume the
+    rollup directly. Mirror of the by_evidence_type JSON test."""
+    bd = _sample_lane_breakdown(
+        explicit_source_fast_path=(30, 12, 0),
+        doc_resolver=(15, 3, 0),
+        non_retrieval=(8, 0, 8),
+    )
+    _write_run(tmp_path, "baseline-by-lane", total_by_lane=bd)
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_by_lane"] is not None
+    assert run["total_by_lane"]["explicit_source_fast_path"][
+        "receipts"
+    ] == 30
+    assert run["total_by_lane"]["explicit_source_fast_path"][
+        "clean_pct"
+    ] == 40.0
+    assert run["total_by_lane"]["doc_resolver"]["clean_pct"] == 20.0
+    # non_retrieval all excluded → clean_pct None
+    assert run["total_by_lane"]["non_retrieval"]["clean_pct"] is None
+
+
+def test_regenerate_legacy_run_total_by_lane_is_none(tmp_path: Path):
+    """Pre-by-lane manifests get None (not a zero-filled stub) so
+    consumers can distinguish 'no breakdown available' from 'all
+    buckets at zero.' Mirror of the by_evidence_type back-compat test."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_by_lane"] is None
+
+
+def test_format_md_includes_lane_section_when_breakdown_present(
+    tmp_path: Path,
+):
+    """When the latest run carries a non-zero by-lane breakdown, the
+    markdown gains a 'Latest run — by retrieval lane' section listing
+    each non-empty bucket."""
+    bd = _sample_lane_breakdown(
+        explicit_source_fast_path=(20, 8, 2),
+        doc_resolver=(10, 1, 0),
+    )
+    _write_run(tmp_path, "baseline-by-lane", total_by_lane=bd)
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "## Latest run — by retrieval lane" in out
+    # Pipe-prefix match avoids matching the same names in the
+    # explanatory blurb below the table.
+    assert "| `explicit_source_fast_path` |" in out
+    assert "| `doc_resolver` |" in out
+    # Zero-receipt buckets suppressed from the table.
+    assert "| `fuzzy_find_code` |" not in out
+    assert "| `scan_search` |" not in out
+    assert "| `non_retrieval` |" not in out
+    assert "| `other` |" not in out
+
+
+def test_format_md_skips_lane_section_for_legacy_runs(tmp_path: Path):
+    """If the latest run lacks the breakdown field entirely, the
+    section is omitted (rather than rendering an empty table). Mirror
+    of the by_evidence_type back-compat MD test."""
+    _write_run(tmp_path, "baseline-legacy")
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "Latest run — by retrieval lane" not in out
+
+
+def test_format_md_skips_lane_section_when_all_zero(tmp_path: Path):
+    """A breakdown with every bucket at zero doesn't render an empty
+    section. Mirror of the all-zero by_evidence_type MD test."""
+    bd = _sample_lane_breakdown()  # all defaults at zero
+    _write_run(tmp_path, "baseline-zero", total_by_lane=bd)
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "Latest run — by retrieval lane" not in out

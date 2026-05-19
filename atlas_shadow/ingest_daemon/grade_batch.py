@@ -680,6 +680,109 @@ def _finalize_evidence_breakdown(
     return breakdown
 
 
+# ─── Per-lane rollup (sibling of evidence-type rollup) ────────────────
+
+
+# Canonical bucket order — matches GradingSummary.by_lane and the
+# values :mod:`grader_service._infer_lane` emits today. Defined once
+# here so the aggregator, manifest writer, and dashboard renderer
+# agree on column ordering across runs. ``other`` is always last —
+# unknown lane values land there without inventing a classification.
+LANE_BUCKETS: tuple[str, ...] = (
+    "explicit_source_fast_path",
+    "fuzzy_find_code",
+    "scan_search",
+    "doc_resolver",
+    "non_retrieval",
+    "other",
+)
+
+
+def _empty_lane_bucket() -> dict[str, Any]:
+    """Zero-filled bucket. Always returns all 5 fields so consumers can
+    rely on the shape regardless of whether any rows landed here."""
+    return {
+        "receipts": 0,
+        "correct": 0,
+        "excluded": 0,
+        "clean_total": 0,
+        "clean_pct": None,
+    }
+
+
+def _empty_lane_breakdown() -> dict[str, dict[str, Any]]:
+    """Zero-filled breakdown across all 6 canonical lane buckets."""
+    return {b: _empty_lane_bucket() for b in LANE_BUCKETS}
+
+
+def _summary_by_lane(summary) -> dict[str, dict[str, Any]]:
+    """Read ``by_lane`` with back-compat zeros.
+
+    Pre-by-lane summaries (and test fixtures using bare dataclasses
+    without rows that have lane set) won't carry this field — return
+    a zero-filled breakdown so the aggregator's sum-of-zeros stays
+    well-defined. Mirror of :func:`_summary_by_evidence_type`.
+    """
+    if isinstance(summary, dict):
+        raw = summary.get("by_lane") or {}
+    else:
+        raw = getattr(summary, "by_lane", None) or {}
+    if not isinstance(raw, dict):
+        return _empty_lane_breakdown()
+    out = _empty_lane_breakdown()
+    for bucket, vals in raw.items():
+        if not isinstance(vals, dict):
+            continue
+        key = bucket if bucket in LANE_BUCKETS else "other"
+        out[key]["receipts"] += int(vals.get("receipts", 0) or 0)
+        out[key]["correct"] += int(vals.get("correct", 0) or 0)
+        out[key]["excluded"] += int(vals.get("excluded", 0) or 0)
+    for vals in out.values():
+        clean_total = vals["receipts"] - vals["excluded"]
+        vals["clean_total"] = clean_total
+        vals["clean_pct"] = (
+            round(vals["correct"] * 100 / clean_total, 1)
+            if clean_total > 0 else None
+        )
+    return out
+
+
+def _accumulate_lane_breakdown(
+    target: dict[str, dict[str, Any]],
+    incoming: dict[str, dict[str, Any]],
+) -> None:
+    """Add ``incoming``'s receipts/correct/excluded into ``target`` in
+    place. Mirror of :func:`_accumulate_evidence_breakdown`.
+
+    Does NOT recompute clean_total / clean_pct — those are derived
+    by :func:`_finalize_lane_breakdown` after all packets have been
+    accumulated, so percentages reflect the run-level (not
+    sum-of-per-packet) denominator.
+    """
+    for bucket in LANE_BUCKETS:
+        src = incoming.get(bucket, {})
+        tgt = target[bucket]
+        tgt["receipts"] += int(src.get("receipts", 0) or 0)
+        tgt["correct"] += int(src.get("correct", 0) or 0)
+        tgt["excluded"] += int(src.get("excluded", 0) or 0)
+
+
+def _finalize_lane_breakdown(
+    breakdown: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Compute clean_total + clean_pct for each lane bucket from
+    receipts/excluded. Mirror of :func:`_finalize_evidence_breakdown`.
+    """
+    for vals in breakdown.values():
+        clean_total = vals["receipts"] - vals["excluded"]
+        vals["clean_total"] = clean_total
+        vals["clean_pct"] = (
+            round(vals["correct"] * 100 / clean_total, 1)
+            if clean_total > 0 else None
+        )
+    return breakdown
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
@@ -711,6 +814,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     # Per-evidence-type rollup (run level). Per-packet breakdowns are
     # stored under per_packet_pct[slug]["by_evidence_type"] below.
     total_by_evidence_type = _empty_evidence_breakdown()
+    # Per-lane rollup — symmetric with by_evidence_type. Per-packet
+    # breakdowns are stored under per_packet_pct[slug]["by_lane"].
+    total_by_lane = _empty_lane_breakdown()
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
@@ -725,6 +831,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_corpus_excluded = 0
         packet_command_snapshot = 0
         packet_by_evidence_type = _empty_evidence_breakdown()
+        packet_by_lane = _empty_lane_breakdown()
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
@@ -739,6 +846,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             summary_breakdown = _summary_by_evidence_type(summary)
             _accumulate_evidence_breakdown(packet_by_evidence_type, summary_breakdown)
             _accumulate_evidence_breakdown(total_by_evidence_type, summary_breakdown)
+            summary_lane_breakdown = _summary_by_lane(summary)
+            _accumulate_lane_breakdown(packet_by_lane, summary_lane_breakdown)
+            _accumulate_lane_breakdown(total_by_lane, summary_lane_breakdown)
         total_receipts += packet_receipts
         total_correct += packet_correct
         total_excluded += packet_excluded
@@ -778,6 +888,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "by_evidence_type": _finalize_evidence_breakdown(
                 packet_by_evidence_type
             ),
+            # Per-lane breakdown for this packet — symmetric with
+            # by_evidence_type, scoped to this packet's rows only.
+            "by_lane": _finalize_lane_breakdown(packet_by_lane),
             "status": outcome.get("status"),
         }
     overall_pct = (
@@ -823,6 +936,12 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_by_evidence_type": _finalize_evidence_breakdown(
             total_by_evidence_type
         ),
+        # Per-lane breakdown across the whole run. Symmetric with
+        # total_by_evidence_type. Surfaces which retrieval surface
+        # (doc_resolver / explicit_source_fast_path / etc.) the
+        # clean denominator is dominated by — so a doc-resolver fix
+        # can be attributed directly when its lane's clean_pct moves.
+        "total_by_lane": _finalize_lane_breakdown(total_by_lane),
         "per_packet_pct": per_packet_pct,
     }
 

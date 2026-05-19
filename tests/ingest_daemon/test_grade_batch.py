@@ -968,6 +968,204 @@ def test_aggregate_run_totals_by_evidence_type_unknown_bucket_routed_to_other():
     assert run["other"]["clean_pct"] == 50.0
 
 
+# ───────── by_lane rollup (sibling of by_evidence_type rollup) ─────────
+
+
+def _mk_summary_dict_with_lane(
+    packet_id: str,
+    by_lane: dict,
+    *,
+    total: int = 0,
+    pass_count: int = 0,
+    excluded_count: int = 0,
+) -> dict:
+    """Same dict shape ``run_pr_grading`` emits, with ``by_lane``
+    plumbed through. Mirror of ``_mk_summary_dict_with_evidence``."""
+    return {
+        "packet_id": packet_id,
+        "passed": False,
+        "pass_pct": 0,
+        "pass_count": pass_count,
+        "total": total,
+        "excluded_count": excluded_count,
+        "by_lane": by_lane,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_sums_by_lane_across_packets():
+    """Run-level total_by_lane sums receipts/correct/excluded across
+    every packet, then derives clean_total + clean_pct from the SUMMED
+    counts (not by averaging per-packet percentages). Mirror of
+    test_aggregate_run_totals_sums_by_evidence_type_across_packets."""
+    outcomes = [
+        {
+            "packet_slug": "p1",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_lane(
+                "p1",
+                {
+                    "explicit_source_fast_path": {
+                        "receipts": 8, "correct": 3, "excluded": 0,
+                        "clean_total": 8, "clean_pct": 37.5,
+                    },
+                    "doc_resolver": {
+                        "receipts": 4, "correct": 1, "excluded": 1,
+                        "clean_total": 3, "clean_pct": 33.3,
+                    },
+                    "non_retrieval": {
+                        "receipts": 2, "correct": 0, "excluded": 2,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "fuzzy_find_code": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "scan_search": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "other": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                },
+                total=14, pass_count=4, excluded_count=3,
+            )],
+        },
+        {
+            "packet_slug": "p2",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_lane(
+                "p2",
+                {
+                    "explicit_source_fast_path": {
+                        "receipts": 4, "correct": 4, "excluded": 0,
+                        "clean_total": 4, "clean_pct": 100.0,
+                    },
+                    "doc_resolver": {
+                        "receipts": 2, "correct": 1, "excluded": 0,
+                        "clean_total": 2, "clean_pct": 50.0,
+                    },
+                    "non_retrieval": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "fuzzy_find_code": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "scan_search": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "other": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                },
+                total=6, pass_count=5, excluded_count=0,
+            )],
+        },
+    ]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_lane"]
+
+    # explicit_source_fast_path: 8+4=12 receipts, 3+4=7 correct, 0 excluded
+    # clean_total=12, clean_pct=7/12=58.3
+    assert run["explicit_source_fast_path"]["receipts"] == 12
+    assert run["explicit_source_fast_path"]["correct"] == 7
+    assert run["explicit_source_fast_path"]["excluded"] == 0
+    assert run["explicit_source_fast_path"]["clean_total"] == 12
+    assert run["explicit_source_fast_path"]["clean_pct"] == 58.3
+
+    # doc_resolver: 4+2=6 receipts, 1+1=2 correct, 1+0=1 excluded
+    # clean_total=5, clean_pct=2/5=40.0
+    assert run["doc_resolver"]["receipts"] == 6
+    assert run["doc_resolver"]["correct"] == 2
+    assert run["doc_resolver"]["clean_total"] == 5
+    assert run["doc_resolver"]["clean_pct"] == 40.0
+
+    # non_retrieval: all excluded
+    assert run["non_retrieval"]["receipts"] == 2
+    assert run["non_retrieval"]["clean_total"] == 0
+    assert run["non_retrieval"]["clean_pct"] is None
+
+    # Per-packet breakdown also present.
+    assert totals["per_packet_pct"]["p1"]["by_lane"][
+        "explicit_source_fast_path"
+    ]["receipts"] == 8
+    assert totals["per_packet_pct"]["p2"]["by_lane"][
+        "doc_resolver"
+    ]["receipts"] == 2
+
+
+def test_aggregate_run_totals_by_lane_back_compat_missing_field():
+    """Legacy summaries (pre-by-lane) lack ``by_lane``. Aggregator
+    must still emit zero-filled run-level breakdown rather than
+    raising or returning a partial dict. Mirror of the by_evidence_type
+    back-compat test."""
+    outcomes = [{
+        "packet_slug": "legacy",
+        "status": "ok",
+        "summaries": [{
+            "packet_id": "legacy", "passed": False, "pass_pct": 0,
+            "pass_count": 0, "total": 5,
+            # No by_lane field at all.
+            "artifact_path": None,
+        }],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_lane"]
+    # Every canonical bucket present with zero counts.
+    for bucket in (
+        "explicit_source_fast_path", "fuzzy_find_code",
+        "scan_search", "doc_resolver", "non_retrieval", "other",
+    ):
+        assert bucket in run
+        assert run[bucket]["receipts"] == 0
+        assert run[bucket]["clean_total"] == 0
+        assert run[bucket]["clean_pct"] is None
+    # Per-packet breakdown also zero-filled.
+    assert totals["per_packet_pct"]["legacy"]["by_lane"][
+        "explicit_source_fast_path"
+    ]["receipts"] == 0
+
+
+def test_aggregate_run_totals_by_lane_unknown_bucket_routed_to_other():
+    """If a packet's summary carries an unexpected lane bucket key
+    (e.g. a future lane added to _infer_lane before the aggregator
+    was updated), its counts route into 'other' rather than corrupting
+    a canonical bucket or raising KeyError. Implements the
+    tolerance-to-future-values requirement per Codex's guidance."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_lane(
+            "p1",
+            {
+                "doc_resolver": {
+                    "receipts": 5, "correct": 2, "excluded": 0,
+                    "clean_total": 5, "clean_pct": 40.0,
+                },
+                # Unexpected lane from a future grader version.
+                "newly_added_lane": {
+                    "receipts": 3, "correct": 1, "excluded": 0,
+                    "clean_total": 3, "clean_pct": 33.3,
+                },
+            },
+            total=8, pass_count=3, excluded_count=0,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_lane"]
+    assert run["doc_resolver"]["receipts"] == 5
+    # The unknown bucket landed in 'other'.
+    assert run["other"]["receipts"] == 3
+    assert run["other"]["correct"] == 1
+    assert run["other"]["clean_pct"] == 33.3
+
+
 # ───────── write_packet_artifact + manifest + summary.md ─────────────
 
 
