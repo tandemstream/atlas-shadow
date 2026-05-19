@@ -65,6 +65,10 @@ class Classified:
     receipt_anchors: dict  # source_path / source_lines / source_commit / excerpt_sha
     snap_status: Optional[str]
     run_snap_status: Optional[str]  # PR #15
+    # PR #16 — raw retrieval signals when the artifact carries them.
+    retrieval_plan: Optional[dict]
+    citation_count: Optional[int]
+    reranker_candidates_considered: Optional[int]
     answer_len: Optional[int]
     rationale: str
     confidence: Optional[float]
@@ -109,6 +113,11 @@ def _classify_one(
     grade = row.get("grade", "")
     snap = row.get("source_snapshot_status")
     run_snap = row.get("run_snapshot_status")  # PR #15
+    # PR #16 — raw_result diagnostics. None on legacy artifacts and
+    # on doc_resolver rows.
+    retrieval_plan = row.get("atlas_retrieval_plan")
+    citation_count = row.get("atlas_citation_count")
+    reranker_candidates = row.get("atlas_reranker_candidates_considered")
     rationale = (row.get("rationale") or "")
     confidence = row.get("confidence")
     rec = receipts_by_qid.get(qid)
@@ -253,6 +262,9 @@ def _classify_one(
         receipt_anchors=anchors,
         snap_status=snap,
         run_snap_status=run_snap,
+        retrieval_plan=retrieval_plan,
+        citation_count=citation_count,
+        reranker_candidates_considered=reranker_candidates,
         answer_len=row.get("atlas_answer_len"),
         rationale=rationale[:400],
         confidence=confidence,

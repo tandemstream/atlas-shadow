@@ -632,6 +632,11 @@ def _grade_one_receipt(
     atlas_stderr_head: Optional[str] = None
     source_snapshot = None
     run_snapshot = None  # PR #15: only resolved on the code path
+    # PR #16: raw retrieval diagnostics. Initialized to the "no
+    # raw_result available" shape so the doc_resolver path (which
+    # doesn't go through the runner) lands well-defined Nones in the
+    # row rather than missing fields.
+    atlas_diagnostics: dict[str, Any] = _atlas_raw_result_diagnostics(None)
     tool_label = ""
 
     if isinstance(translation, DocQuery):
@@ -687,6 +692,13 @@ def _grade_one_receipt(
         atlas_returncode = atlas_response.returncode
         atlas_exception = atlas_response.exception
         atlas_stderr_head = (atlas_response.stderr or "")[:1000] or None
+        # PR #16: extract compact retrieval diagnostics from the raw
+        # workspace_atlas_query JSON. Doc-resolver path keeps the
+        # ``_atlas_raw_result_diagnostics(None)`` default initialized
+        # above (it has no atlas raw_result to extract from).
+        atlas_diagnostics = _atlas_raw_result_diagnostics(
+            atlas_response.raw_result
+        )
         source_snapshot = code_snapshot_mod.resolve_code_receipt_snapshot(
             receipt,
             repo_path=cfg.core_repo_path,
@@ -746,6 +758,13 @@ def _grade_one_receipt(
             atlas_returncode=atlas_returncode,
             atlas_exception=atlas_exception,
             atlas_stderr_head=atlas_stderr_head,
+            atlas_retrieval_plan=atlas_diagnostics["retrieval_plan"],
+            atlas_citation_locations=atlas_diagnostics["citation_locations"],
+            atlas_citation_count=atlas_diagnostics["citation_count"],
+            atlas_reranker_candidates_considered=(
+                atlas_diagnostics["reranker_candidates_considered"]
+            ),
+            atlas_reranker_top_k_count=atlas_diagnostics["reranker_top_k_count"],
             source_snapshot_status=snap_status,
             source_snapshot_hash_match=(
                 source_snapshot.hash_match if source_snapshot is not None else None
@@ -793,6 +812,13 @@ def _grade_one_receipt(
         atlas_returncode=atlas_returncode,
         atlas_exception=atlas_exception,
         atlas_stderr_head=atlas_stderr_head,
+        atlas_retrieval_plan=atlas_diagnostics["retrieval_plan"],
+        atlas_citation_locations=atlas_diagnostics["citation_locations"],
+        atlas_citation_count=atlas_diagnostics["citation_count"],
+        atlas_reranker_candidates_considered=(
+            atlas_diagnostics["reranker_candidates_considered"]
+        ),
+        atlas_reranker_top_k_count=atlas_diagnostics["reranker_top_k_count"],
         source_snapshot_status=snap_status,
         source_snapshot_hash_match=(
             source_snapshot.hash_match if source_snapshot is not None else None
@@ -811,6 +837,80 @@ def _grade_one_receipt(
         score_status=score_status,
         clean_excluded_reason=clean_reason,
     )
+
+
+def _atlas_raw_result_diagnostics(raw_result: Any) -> dict[str, Any]:
+    """Extract compact retrieval diagnostics from the
+    ``workspace_atlas_query`` JSON payload (PR #16).
+
+    The runner already captures ``raw_result`` from the atlas-side
+    response. We pull a small set of fields onto the row so downstream
+    classifiers (and future ground-truthed lane inference) don't have
+    to re-issue queries or parse rationale text:
+
+      - ``retrieval_plan`` — atlas's plan dict (``lanes_run``,
+        ``lanes_skipped``, ``boosts``, ``lane_quotas_applied``,
+        ``path_anchors``, ``symbol_anchors``, …). Persisted untouched.
+      - ``citation_locations`` — first 20 citations in compact
+        ``"path:line_start-line_end"`` form (or bare path when no
+        lines). The artifact stays human-readable + small.
+      - ``citation_count`` — full untruncated total so consumers can
+        tell when ``citation_locations`` was head-sampled.
+      - ``reranker_candidates_considered`` — how many candidates the
+        reranker scored. Useful for fuzzy-lane "candidate set was tiny"
+        diagnostics.
+      - ``reranker_top_k_count`` — how many of those made the top-k
+        cut atlas applies after reranking.
+
+    Robust to missing / malformed ``raw_result`` shapes: any field that
+    isn't a dict / list of the expected shape collapses to None or an
+    empty list rather than raising. The grader's main path catches
+    exceptions anyway, but extracting diagnostics from a partial
+    response shouldn't itself break grading.
+
+    No interpretation here — the row carries the raw signal. Lane
+    inference still happens in ``_infer_lane``; this helper just makes
+    the data available for it to consult in a future PR.
+    """
+    if not isinstance(raw_result, dict):
+        return {
+            "retrieval_plan": None,
+            "citation_locations": [],
+            "citation_count": None,
+            "reranker_candidates_considered": None,
+            "reranker_top_k_count": None,
+        }
+
+    citations = raw_result.get("citations") or []
+    citation_locations: list[str] = []
+    citation_count: Optional[int] = None
+    if isinstance(citations, list):
+        citation_count = len(citations)
+        for citation in citations[:20]:
+            if not isinstance(citation, dict):
+                continue
+            file_path = str(citation.get("file_path") or "")
+            line_start = citation.get("line_start")
+            line_end = citation.get("line_end")
+            if file_path and line_start and line_end:
+                citation_locations.append(f"{file_path}:{line_start}-{line_end}")
+            elif file_path:
+                citation_locations.append(file_path)
+
+    trace = raw_result.get("reranker_trace") or {}
+    top_k = trace.get("top_k") if isinstance(trace, dict) else None
+    retrieval_plan = raw_result.get("retrieval_plan")
+    return {
+        "retrieval_plan": (
+            retrieval_plan if isinstance(retrieval_plan, dict) else None
+        ),
+        "citation_locations": citation_locations,
+        "citation_count": citation_count,
+        "reranker_candidates_considered": (
+            trace.get("candidates_considered") if isinstance(trace, dict) else None
+        ),
+        "reranker_top_k_count": len(top_k) if isinstance(top_k, list) else None,
+    }
 
 
 def _infer_lane(
@@ -892,8 +992,17 @@ def _derive_score_status(
     Per Codex's PR #14 design note: ``grade`` stays narrow
     (full_match | partial_match | no_match | atlas_not_found). The
     skip is bookkeeping on a separate field, not a fifth grade value.
+
+    Codex PR #16 review note: both ``no_match`` AND ``atlas_not_found``
+    are failure grades that the skip paths should cover. In the real
+    PR #15 probe, q12 came back as ``atlas_not_found`` (atlas's exact-
+    source fast path returned an empty answer rather than a wrong-
+    content answer), so a `grade != "no_match"` predicate left the
+    drift skip dormant for exactly the case PR #15 was designed to
+    catch. The fix treats both failure grades the same — pass-grades
+    are still never flipped.
     """
-    if grade != "no_match":
+    if grade not in {"no_match", "atlas_not_found"}:
         return ("counted", None)
     # Receipt-side stale takes precedence — atlas was never measured on
     # a renderable receipt commit.
@@ -1368,6 +1477,15 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "atlas_returncode": row.atlas_returncode,
         "atlas_exception": row.atlas_exception,
         "atlas_stderr_head": row.atlas_stderr_head,
+        # PR #16: raw retrieval diagnostics — atlas's plan dict, the
+        # compact list of citation "path:lines" strings, and the
+        # reranker summary signals. Doc_resolver rows carry these as
+        # None / empty since they don't go through workspace_atlas_query.
+        "atlas_retrieval_plan": row.atlas_retrieval_plan,
+        "atlas_citation_locations": list(row.atlas_citation_locations or []),
+        "atlas_citation_count": row.atlas_citation_count,
+        "atlas_reranker_candidates_considered": row.atlas_reranker_candidates_considered,
+        "atlas_reranker_top_k_count": row.atlas_reranker_top_k_count,
         "source_snapshot_status": row.source_snapshot_status,
         "source_snapshot_hash_match": row.source_snapshot_hash_match,
         "source_snapshot_sha256": row.source_snapshot_sha256,

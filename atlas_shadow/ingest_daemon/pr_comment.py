@@ -78,6 +78,23 @@ class ReceiptGradingRow:
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
+    # PR #16: raw retrieval diagnostics from workspace_atlas_query.
+    # ``atlas_retrieval_plan`` is the raw dict atlas emits — keys like
+    # ``lanes_run`` / ``lanes_skipped`` / ``boosts`` /
+    # ``lane_quotas_applied`` / ``path_anchors`` / ``symbol_anchors``.
+    # Persisted untouched so downstream consumers (and future
+    # ground-truthed lane inference) can analyze it directly.
+    # ``atlas_citation_locations`` is the compact "path:line_start-line_end"
+    # form of the citations list, truncated to the first 20 to keep
+    # artifact JSONs tight. ``atlas_citation_count`` records the full
+    # untruncated total so consumers can tell when the head was sampled.
+    # The reranker_* pair are summary signals for fuzzy retrieval —
+    # how many candidates the reranker considered and the top_k cap.
+    atlas_retrieval_plan: Optional[dict[str, Any]] = None
+    atlas_citation_locations: list[str] = field(default_factory=list)
+    atlas_citation_count: Optional[int] = None
+    atlas_reranker_candidates_considered: Optional[int] = None
+    atlas_reranker_top_k_count: Optional[int] = None
     source_snapshot_status: Optional[str] = None
     source_snapshot_hash_match: Optional[bool] = None
     source_snapshot_sha256: Optional[str] = None
