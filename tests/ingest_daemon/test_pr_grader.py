@@ -2908,3 +2908,86 @@ def test_serialize_row_includes_evidence_type():
     out = gs._serialize_row(row)
     assert out["evidence_type"] == "absence_search"
     assert out["score_status"] == "skipped_absence_search"
+
+
+# ─── PR #18 review fix: doc receipts defer source-unavailable to doc_resolver ───
+
+
+def test_classify_pre_atlas_skip_doc_receipt_with_git_source_missing_not_pre_skipped():
+    """PR #18 review (Codex): a DocQuery receipt whose source_path
+    doesn't render in raw git should NOT be pre-skipped. Doc receipts
+    defer to doc_resolver so DB-based + alias-aware resolution can
+    run first."""
+    from atlas_shadow.ingest_daemon.code_snapshot import (
+        CodeSnapshotResult, STATUS_SOURCE_MISSING,
+    )
+    from atlas_shadow.ingest_daemon.grader_service import DocQuery
+
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="Atlas/docs/specs/instruction-memory-v1.md",  # alias-able
+        source_lines="1-20",
+        source_commit=BASE_SHA,
+    )
+    snap = CodeSnapshotResult(status=STATUS_SOURCE_MISSING)
+    translation = DocQuery(receipt=r)
+    assert grader_service_mod._classify_pre_atlas_skip(
+        r, source_snapshot=snap, translation=translation,
+    ) is None  # NOT pre-skipped — doc_resolver gets a chance
+
+
+def test_classify_pre_atlas_skip_code_receipt_with_git_source_missing_pre_skipped():
+    """Code receipts still get pre-skipped on git_source_missing —
+    the review fix only changed doc-receipt behavior."""
+    from atlas_shadow.ingest_daemon.code_snapshot import (
+        CodeSnapshotResult, STATUS_SOURCE_MISSING,
+    )
+    from atlas_shadow.ingest_daemon.grader_service import CodeQuery
+
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="core/missing.py",
+        source_lines="1-10",
+        source_commit=BASE_SHA,
+        command_text="scripts/qa_lookup.sh sed-range core/missing.py 1 10",
+    )
+    snap = CodeSnapshotResult(status=STATUS_SOURCE_MISSING)
+    translation = CodeQuery(tool="find_code", question="q", receipt=r)
+    assert grader_service_mod._classify_pre_atlas_skip(
+        r, source_snapshot=snap, translation=translation,
+    ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
+
+
+def test_derive_score_status_doc_unresolved_source_ref_post_resolver():
+    """Doc receipts that doc_resolver returns ``unresolved_source_ref``
+    for land in skipped_unavailable_source_ref post-grading. Captures
+    the case where the alias-aware resolver tried and still couldn't
+    materialize the source."""
+    assert grader_service_mod._derive_score_status(
+        grade="atlas_not_found",
+        source_snapshot_status="git_source_missing",  # raw git says missing
+        revision_binding="unresolved_source_ref",  # resolver also said no
+    ) == ("skipped_unavailable_source_ref", "unavailable_source_ref")
+
+
+def test_derive_score_status_doc_db_resolved_stays_counted_despite_git_missing():
+    """The case Codex's doc-alias PR enables: receipt path doesn't
+    render in raw git (alias path), but doc_resolver resolves via DB
+    using the canonical path. We MUST NOT pre-skip these as
+    unavailable — they're real atlas measurements."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",  # atlas missed the doc
+        source_snapshot_status="git_source_missing",  # raw git says missing
+        revision_binding="db_commit_scoped",  # resolver found it via DB
+    ) == ("counted", None)
+
+
+def test_derive_score_status_doc_git_fallback_stays_counted():
+    """``git_receipt_snapshot`` binding means doc_resolver fell back
+    to a git-side lookup that DID resolve. Still a real measurement,
+    not a skip."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_match",
+        revision_binding="git_receipt_snapshot",
+    ) == ("counted", None)

@@ -657,7 +657,11 @@ def _grade_one_receipt(
     # ``lambda *_, **__: None`` to disable the skip and exercise the
     # full grading flow.
     classify_skip = _classify_skip or _classify_pre_atlas_skip
-    pre_skip = classify_skip(receipt, source_snapshot=source_snapshot)
+    pre_skip = classify_skip(
+        receipt,
+        source_snapshot=source_snapshot,
+        translation=translation,  # PR #18 review: doc receipts bypass the snapshot pre-skip
+    )
     if pre_skip is not None:
         return _build_pre_atlas_skip_row(
             receipt=receipt,
@@ -764,6 +768,7 @@ def _grade_one_receipt(
             grade="no_match",
             source_snapshot_status=snap_status,
             run_snapshot_status=run_snap_status,
+            revision_binding=revision_binding,
         )
         return pr_comment_mod.ReceiptGradingRow(
             question_id=receipt.question_id,
@@ -819,6 +824,7 @@ def _grade_one_receipt(
         grade=grading.grade,
         source_snapshot_status=snap_status,
         run_snapshot_status=run_snap_status,
+        revision_binding=revision_binding,
     )
     return pr_comment_mod.ReceiptGradingRow(
         question_id=receipt.question_id,
@@ -971,6 +977,7 @@ def _classify_pre_atlas_skip(
     receipt: PacketReceipt,
     *,
     source_snapshot: Optional[Any] = None,
+    translation: Optional[Any] = None,
 ) -> Optional[tuple[str, str]]:
     """Decide whether this receipt should be skipped BEFORE calling
     atlas. PR #17.
@@ -985,17 +992,27 @@ def _classify_pre_atlas_skip(
     specific status:
 
       1. ``skipped_doc_corpus_excluded`` — source_path in docs/work/**
-         (PR #277 exclusion). The path itself is the discriminator,
-         independent of evidence_type or snapshot state.
+         (PR #277 exclusion). Path-based policy, deterministic.
       2. ``skipped_non_repo_evidence`` — evidence_type in
          {external_tool_docs, user_context}. The receipt's claim lives
          outside the repo entirely.
       3. ``skipped_absence_search`` — evidence_type = absence_search.
          Receipt claims a negative.
-      4. ``skipped_unavailable_source_ref`` — receipt has source anchors
-         but the snapshot resolver said ``git_source_missing`` (commit
-         not in repo / file not at that commit). Atlas isn't being
-         tested fairly when its anchor target is unreachable.
+      4. ``skipped_unavailable_source_ref`` — code receipt whose
+         source can't be materialized via raw git
+         (``source_snapshot_status=git_source_missing``).
+
+    **PR #18 review fix (Codex):** the snapshot-based check only
+    applies to receipts that would route to the CODE path
+    (CodeQuery — find_code / scan_search). DocQuery receipts get
+    deferred to doc_resolver so the DB-based + alias-aware
+    resolution path can run first; their "unresolvable" classification
+    happens post-resolver via ``_derive_score_status`` consulting
+    ``revision_binding``. Without this gating, doc receipts whose raw
+    receipt path doesn't render in git (e.g. ``Atlas/docs/...`` that's
+    actually stored at ``products/tandem/packages/python/atlas/docs/...``
+    in the corpus) would get pre-skipped even though doc_resolver
+    could resolve them via DB or alias.
 
     Pass-grades never reach this helper — the call site invokes it
     BEFORE atlas dispatch, so by definition no grade exists yet.
@@ -1014,11 +1031,10 @@ def _classify_pre_atlas_skip(
     if evidence_type in _ABSENCE_SEARCH_EVIDENCE_TYPES:
         return ("skipped_absence_search", "absence_search")
 
-    # Source-materialization check: code + doc receipts alike. We use
-    # the receipt-commit snapshot's ``git_source_missing`` status as
-    # the signal — that's the only condition where ``git show`` failed
-    # to materialize the cited bytes at the receipt's pinned commit.
-    if source_snapshot is not None:
+    # Source-materialization check: CODE-PATH ONLY. Doc receipts defer
+    # to doc_resolver (DB-aware) — see PR #18 review note in docstring.
+    is_doc_query = isinstance(translation, DocQuery)
+    if not is_doc_query and source_snapshot is not None:
         snap_status = getattr(source_snapshot, "status", None)
         if snap_status == "git_source_missing":
             return (
@@ -1149,6 +1165,7 @@ def _derive_score_status(
     grade: str,
     source_snapshot_status: Optional[str],
     run_snapshot_status: Optional[str] = None,
+    revision_binding: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Decide whether this row should count toward the clean denominator.
 
@@ -1195,9 +1212,34 @@ def _derive_score_status(
     """
     if grade not in {"no_match", "atlas_not_found"}:
         return ("counted", None)
+
+    # PR #18 review fix: doc_resolver had the authoritative say on
+    # whether the receipt's source could be resolved via DB + alias.
+    # When it explicitly returned ``unresolved_source_ref``, the
+    # receipt was unreachable even after the alias path tried — this
+    # is the doc-side analog of the code-side pre-atlas
+    # ``skipped_unavailable_source_ref`` skip. Caught here (after
+    # grading) because pre-atlas can't know what doc_resolver would
+    # have done.
+    if revision_binding == "unresolved_source_ref":
+        return (
+            "skipped_unavailable_source_ref",
+            "unavailable_source_ref",
+        )
     # Receipt-side stale takes precedence — atlas was never measured on
-    # a renderable receipt commit.
-    if source_snapshot_status == "git_source_missing":
+    # a renderable receipt commit. Code-path defense-in-depth: in
+    # production code receipts hit the pre-atlas skip first and never
+    # reach this branch. Doc receipts skip via the revision_binding
+    # check above. PR #18 review: when ``revision_binding`` indicates
+    # the doc_resolver DID resolve (``db_commit_scoped`` /
+    # ``git_receipt_snapshot``), don't flip to receipt-stale just
+    # because raw git couldn't materialize the alias path — that would
+    # undo doc_resolver's alias-aware resolution.
+    resolver_resolved = revision_binding in (
+        "db_commit_scoped",
+        "git_receipt_snapshot",
+    )
+    if source_snapshot_status == "git_source_missing" and not resolver_resolved:
         return ("skipped_receipt_stale", "receipt_stale")
     # Run-commit drift: receipt matched at authoring, but at the
     # grading commit the same path/lines either render different bytes
