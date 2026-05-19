@@ -102,6 +102,8 @@ _SUBPROCESS_TIMEOUT_SECONDS = 30
 # authors. The leading prefix is optional in our whitelist so users
 # typing the raw ``sed-range`` form also work.
 _QA_LOOKUP_PREFIX = "scripts/qa_lookup.sh"
+_ATLAS_LEAF_PREFIX = "products/tandem/packages/python/atlas/"
+_ATLAS_DOC_ALIAS_PREFIX = "Atlas/"
 
 
 # ─── Result dataclass ─────────────────────────────────────────────────
@@ -300,6 +302,70 @@ def _head(text: str) -> str:
     return text[:_OUTPUT_HEAD_CHARS]
 
 
+def _normalize_git_path(path: Optional[str]) -> str:
+    """Normalize a receipt/command path for git object lookups."""
+    if not path:
+        return ""
+    out = str(path).strip().replace("\\", "/")
+    while out.startswith("./"):
+        out = out[2:]
+    return out.lstrip("/").rstrip("/")
+
+
+def _command_path_suffixes(command_path: str) -> list[str]:
+    """Return suffixes that may appear in a monorepo-rooted source_ref.
+
+    Packet receipts sometimes record command_text from the Atlas package
+    root (for example ``sed-range schema_v0.2.sql``) while source_ref.path
+    stores the canonical monorepo path
+    ``products/tandem/packages/python/atlas/schema_v0.2.sql``. The
+    source_ref path is the more precise anchor, so command_snapshot should
+    use it when it clearly suffix-matches the command path.
+    """
+    path = _normalize_git_path(command_path)
+    suffixes: list[str] = []
+    for candidate in (path,):
+        if candidate and candidate not in suffixes:
+            suffixes.append(candidate)
+        if candidate.startswith(_ATLAS_DOC_ALIAS_PREFIX):
+            alias = candidate[len(_ATLAS_DOC_ALIAS_PREFIX):]
+            if alias and alias not in suffixes:
+                suffixes.append(alias)
+        if candidate.startswith(_ATLAS_LEAF_PREFIX):
+            leaf = candidate[len(_ATLAS_LEAF_PREFIX):]
+            if leaf and leaf not in suffixes:
+                suffixes.append(leaf)
+    return suffixes
+
+
+def _resolve_command_path(receipt, command_path: str) -> str:
+    """Resolve command path against source_ref.path when unambiguous.
+
+    This is intentionally narrow: source_ref.path wins only when it is a
+    clear suffix match for the command path (including the common
+    ``Atlas/...`` alias). Otherwise we preserve the original command path.
+    """
+    command_norm = _normalize_git_path(command_path)
+    source_norm = _normalize_git_path(getattr(receipt, "source_path", None))
+    if not source_norm:
+        return command_norm
+
+    for suffix in _command_path_suffixes(command_norm):
+        if source_norm == suffix or source_norm.endswith(f"/{suffix}"):
+            return source_norm
+        leaf_prefixed = f"{_ATLAS_LEAF_PREFIX}{suffix}"
+        if source_norm == leaf_prefixed:
+            return source_norm
+    return command_norm
+
+
+def _with_resolved_path(receipt, parsed: dict, key: str = "path") -> dict:
+    resolved = _resolve_command_path(receipt, parsed[key])
+    if resolved == parsed[key]:
+        return parsed
+    return {**parsed, "resolved_path": resolved}
+
+
 def _git_show(
     repo_path: Path,
     commit: str,
@@ -410,7 +476,9 @@ def _handle_show_range(
     is honored even if it differs from source_commit (rare but valid).
     """
     commit = parsed["commit"]
-    body, exit_code = _git_show(repo_path, commit, parsed["path"],
+    parsed = _with_resolved_path(receipt, parsed)
+    body, exit_code = _git_show(repo_path, commit,
+                                parsed.get("resolved_path", parsed["path"]),
                                 _subprocess_run=_subprocess_run)
     if body is None:
         return CommandSnapshotResult(
@@ -436,7 +504,9 @@ def _handle_sed_range(
             status=STATUS_UNSUPPORTED,
             parsed=parsed,
         )
-    body, exit_code = _git_show(repo_path, commit, parsed["path"],
+    parsed = _with_resolved_path(receipt, parsed)
+    body, exit_code = _git_show(repo_path, commit,
+                                parsed.get("resolved_path", parsed["path"]),
                                 _subprocess_run=_subprocess_run)
     if body is None:
         return CommandSnapshotResult(
@@ -509,7 +579,9 @@ def _handle_ls(
     commit = getattr(receipt, "source_commit", None)
     if not commit:
         return CommandSnapshotResult(status=STATUS_UNSUPPORTED, parsed=parsed)
-    out, exit_code = _git_ls_tree(repo_path, commit, parsed["path"],
+    parsed = _with_resolved_path(receipt, parsed)
+    out, exit_code = _git_ls_tree(repo_path, commit,
+                                  parsed.get("resolved_path", parsed["path"]),
                                   _subprocess_run=_subprocess_run)
     if out is None:
         return CommandSnapshotResult(
@@ -554,8 +626,15 @@ def _handle_grep(
     commit = getattr(receipt, "source_commit", None)
     if not commit:
         return CommandSnapshotResult(status=STATUS_UNSUPPORTED, parsed=parsed)
+    resolved_paths = [
+        _resolve_command_path(receipt, path)
+        for path in parsed["paths"]
+    ]
+    if resolved_paths != parsed["paths"]:
+        parsed = {**parsed, "resolved_paths": resolved_paths}
     out, exit_code = _git_grep(repo_path, commit, parsed["pattern"],
-                               parsed["paths"], _subprocess_run=_subprocess_run)
+                               parsed.get("resolved_paths", parsed["paths"]),
+                               _subprocess_run=_subprocess_run)
     if out is None:
         return CommandSnapshotResult(
             status=STATUS_ERROR,
@@ -582,7 +661,9 @@ def _handle_wc_l(
     commit = getattr(receipt, "source_commit", None)
     if not commit:
         return CommandSnapshotResult(status=STATUS_UNSUPPORTED, parsed=parsed)
-    body, exit_code = _git_show(repo_path, commit, parsed["path"],
+    parsed = _with_resolved_path(receipt, parsed)
+    body, exit_code = _git_show(repo_path, commit,
+                                parsed.get("resolved_path", parsed["path"]),
                                 _subprocess_run=_subprocess_run)
     if body is None:
         return CommandSnapshotResult(
