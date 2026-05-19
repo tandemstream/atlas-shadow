@@ -1643,6 +1643,11 @@ def run_pr_grading(
                 # PR #20: command-snapshot lane skip count.
                 "skipped_command_snapshot_count":
                     summary.skipped_command_snapshot_count,
+                # Per-evidence-type breakdown (PR-evidence-breakdown).
+                # Carried per-packet so the run aggregator can sum
+                # across packets AND so per-packet drilldowns show
+                # which evidence_type the receipts came from.
+                "by_evidence_type": summary.by_evidence_type,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the

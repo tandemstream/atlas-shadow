@@ -575,6 +575,111 @@ def _summary_skipped_command_snapshot_count(summary) -> int:
     return getattr(summary, "skipped_command_snapshot_count", 0) or 0
 
 
+# ─── Per-evidence-type rollup (PR-evidence-breakdown) ────────────────
+
+
+# Canonical bucket order — matches GradingSummary.by_evidence_type and
+# grader_service's routing constants. Defined once here so the
+# aggregator, manifest writer, and dashboard renderer agree on
+# column ordering across runs.
+EVIDENCE_TYPE_BUCKETS: tuple[str, ...] = (
+    "source_excerpt",
+    "external_tool_docs",
+    "user_context",
+    "absence_search",
+    "other",
+)
+
+
+def _empty_evidence_bucket() -> dict[str, Any]:
+    """Zero-filled bucket. Always returns all 5 fields so consumers can
+    rely on the shape regardless of whether any rows landed here."""
+    return {
+        "receipts": 0,
+        "correct": 0,
+        "excluded": 0,
+        "clean_total": 0,
+        "clean_pct": None,
+    }
+
+
+def _empty_evidence_breakdown() -> dict[str, dict[str, Any]]:
+    """Zero-filled breakdown across all 5 canonical buckets."""
+    return {b: _empty_evidence_bucket() for b in EVIDENCE_TYPE_BUCKETS}
+
+
+def _summary_by_evidence_type(summary) -> dict[str, dict[str, Any]]:
+    """Read ``by_evidence_type`` with back-compat zeros.
+
+    Pre-evidence-breakdown summaries (and test fixtures using bare
+    dataclasses without rows that have evidence_type set) won't
+    carry this field — return a zero-filled breakdown so the
+    aggregator's sum-of-zeros stays well-defined.
+    """
+    if isinstance(summary, dict):
+        raw = summary.get("by_evidence_type") or {}
+    else:
+        raw = getattr(summary, "by_evidence_type", None) or {}
+    if not isinstance(raw, dict):
+        return _empty_evidence_breakdown()
+    # Normalize: fill in missing buckets so downstream code can index
+    # without KeyError, even if a packet only emitted receipts in one
+    # bucket.
+    out = _empty_evidence_breakdown()
+    for bucket, vals in raw.items():
+        if not isinstance(vals, dict):
+            continue
+        key = bucket if bucket in EVIDENCE_TYPE_BUCKETS else "other"
+        out[key]["receipts"] += int(vals.get("receipts", 0) or 0)
+        out[key]["correct"] += int(vals.get("correct", 0) or 0)
+        out[key]["excluded"] += int(vals.get("excluded", 0) or 0)
+    # Recompute clean_total / clean_pct from the summed receipts/excluded;
+    # don't trust the per-packet value here — when summing across packets
+    # we need the run-level denominator, not a sum-of-percentages.
+    for vals in out.values():
+        clean_total = vals["receipts"] - vals["excluded"]
+        vals["clean_total"] = clean_total
+        vals["clean_pct"] = (
+            round(vals["correct"] * 100 / clean_total, 1)
+            if clean_total > 0 else None
+        )
+    return out
+
+
+def _accumulate_evidence_breakdown(
+    target: dict[str, dict[str, Any]],
+    incoming: dict[str, dict[str, Any]],
+) -> None:
+    """Add ``incoming``'s receipts/correct/excluded into ``target`` in
+    place. Does NOT recompute clean_total / clean_pct — those are
+    derived by :func:`_finalize_evidence_breakdown` after all packets
+    have been accumulated, so percentages reflect the run-level (not
+    sum-of-per-packet) denominator.
+    """
+    for bucket in EVIDENCE_TYPE_BUCKETS:
+        src = incoming.get(bucket, {})
+        tgt = target[bucket]
+        tgt["receipts"] += int(src.get("receipts", 0) or 0)
+        tgt["correct"] += int(src.get("correct", 0) or 0)
+        tgt["excluded"] += int(src.get("excluded", 0) or 0)
+
+
+def _finalize_evidence_breakdown(
+    breakdown: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Compute clean_total + clean_pct for each bucket from
+    receipts/excluded. Returns the same dict (mutates in place)
+    for chaining."""
+    for vals in breakdown.values():
+        clean_total = vals["receipts"] - vals["excluded"]
+        vals["clean_total"] = clean_total
+        vals["clean_pct"] = (
+            round(vals["correct"] * 100 / clean_total, 1)
+            if clean_total > 0 else None
+        )
+    return breakdown
+
+
 def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """Sum receipts/correct counts across every packet in this run.
 
@@ -603,6 +708,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_skipped_doc_corpus_excluded = 0
     # PR #20: command-snapshot lane total.
     total_skipped_command_snapshot = 0
+    # Per-evidence-type rollup (run level). Per-packet breakdowns are
+    # stored under per_packet_pct[slug]["by_evidence_type"] below.
+    total_by_evidence_type = _empty_evidence_breakdown()
     per_packet_pct: dict[str, dict[str, Any]] = {}
     for outcome in packet_outcomes:
         slug = outcome.get("packet_slug", "unknown")
@@ -616,6 +724,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_unavailable = 0
         packet_corpus_excluded = 0
         packet_command_snapshot = 0
+        packet_by_evidence_type = _empty_evidence_breakdown()
         for summary in outcome.get("summaries", []):
             packet_receipts += _summary_total(summary)
             packet_correct += _summary_pass_count(summary)
@@ -627,6 +736,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             packet_unavailable += _summary_skipped_unavailable_source_ref_count(summary)
             packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
             packet_command_snapshot += _summary_skipped_command_snapshot_count(summary)
+            summary_breakdown = _summary_by_evidence_type(summary)
+            _accumulate_evidence_breakdown(packet_by_evidence_type, summary_breakdown)
+            _accumulate_evidence_breakdown(total_by_evidence_type, summary_breakdown)
         total_receipts += packet_receipts
         total_correct += packet_correct
         total_excluded += packet_excluded
@@ -660,6 +772,12 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "skipped_doc_corpus_excluded": packet_corpus_excluded,
             # PR #20: command_snapshot lane per-packet count.
             "skipped_command_snapshot": packet_command_snapshot,
+            # Per-evidence-type breakdown for this packet — same
+            # bucket shape as total_by_evidence_type, scoped to this
+            # packet's rows only.
+            "by_evidence_type": _finalize_evidence_breakdown(
+                packet_by_evidence_type
+            ),
             "status": outcome.get("status"),
         }
     overall_pct = (
@@ -696,6 +814,15 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_skipped_doc_corpus_excluded": total_skipped_doc_corpus_excluded,
         # PR #20: command-snapshot lane total.
         "total_skipped_command_snapshot": total_skipped_command_snapshot,
+        # Per-evidence-type breakdown across the whole run. Same bucket
+        # shape as the per-packet by_evidence_type. Surfaces "where is
+        # Atlas actually being measured?" at the run level so the
+        # dashboard can chart non-retrieval volume separately from the
+        # source_excerpt denominator that PR #14 onwards has been
+        # cleaning.
+        "total_by_evidence_type": _finalize_evidence_breakdown(
+            total_by_evidence_type
+        ),
         "per_packet_pct": per_packet_pct,
     }
 
