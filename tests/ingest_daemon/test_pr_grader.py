@@ -2781,6 +2781,31 @@ def test_classify_pre_atlas_skip_returns_none_for_normal_receipt():
     ) is None
 
 
+def test_classify_pre_atlas_command_source_missing_does_not_override_snapshot_match():
+    """A command path can be package-relative while code_snapshot can
+    resolve the source_ref through Atlas leaf aliases. In that case a
+    command_snapshot source-missing result must not pre-skip the row as
+    unavailable; let atlas grading run.
+    """
+    from types import SimpleNamespace
+    from atlas_shadow.ingest_daemon import command_snapshot as command_snapshot_mod
+    from atlas_shadow.ingest_daemon.code_snapshot import (
+        CodeSnapshotResult, STATUS_MATCH,
+    )
+    r = _mk_skip_receipt(
+        evidence_type="source_excerpt",
+        source_path="core/ai.py",
+        source_lines="100-110",
+        source_commit=BASE_SHA,
+        command_text="scripts/qa_lookup.sh sed-range core/ai.py 100 110",
+    )
+    snap = CodeSnapshotResult(status=STATUS_MATCH, hash_match=True)
+    cmd = SimpleNamespace(status=command_snapshot_mod.STATUS_SOURCE_MISSING)
+    assert grader_service_mod._classify_pre_atlas_skip(
+        r, source_snapshot=snap, command_snapshot=cmd,
+    ) is None
+
+
 def test_classify_pre_atlas_skip_priority_docs_work_beats_evidence_type():
     """docs/work/** check runs first — even if evidence_type would
     qualify for another skip, the path-based exclusion wins (it's the

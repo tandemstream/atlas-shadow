@@ -33,6 +33,14 @@ def _git_repo(tmp_path):
     path.parent.mkdir(parents=True)
     body = "line one\nline two\nline three\nline four\n"
     path.write_text(body, encoding="utf-8")
+    schema = repo / "products" / "tandem" / "packages" / "python" / "atlas" / "schema_v0.2.sql"
+    schema.parent.mkdir(parents=True)
+    schema_body = "create table artifact_chunks (\n  chunk_id uuid,\n  artifact_id uuid\n);\n"
+    schema.write_text(schema_body, encoding="utf-8")
+    chunker = repo / "products" / "tandem" / "packages" / "python" / "atlas" / "core" / "ingest" / "chunkers" / "markdown_chunker.py"
+    chunker.parent.mkdir(parents=True)
+    chunker_body = "class MarkdownChunker:\n    def chunk(self, text):\n        return text.splitlines()\n"
+    chunker.write_text(chunker_body, encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
     commit = subprocess.run(
@@ -77,6 +85,65 @@ def test_code_snapshot_source_missing(tmp_path):
 
     assert result.status == code_snapshot_mod.STATUS_SOURCE_MISSING
     assert result.hash_match is None
+
+
+def test_code_snapshot_resolves_atlas_leaf_schema_path(tmp_path):
+    """Receipts may cite Atlas package paths from the package root.
+
+    Snapshot checks run from the monorepo root, so `schema_v0.2.sql`
+    should resolve to `products/tandem/packages/python/atlas/schema_v0.2.sql`.
+    """
+    repo, commit, _body = _git_repo(tmp_path)
+    full_path = "products/tandem/packages/python/atlas/schema_v0.2.sql"
+    body = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{full_path}"],
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout
+    sliced = "\n".join(body.splitlines()[1:3])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    receipt = _mk_receipt(
+        source_commit=commit,
+        source_path="schema_v0.2.sql",
+        source_lines="2-3",
+        excerpt_sha256=hashlib.sha256(canon.encode("utf-8")).hexdigest(),
+    )
+
+    result = code_snapshot_mod.resolve_code_receipt_snapshot(
+        receipt,
+        repo_path=repo,
+    )
+
+    assert result.status == code_snapshot_mod.STATUS_MATCH
+    assert result.path == full_path
+
+
+def test_code_snapshot_resolves_atlas_leaf_core_path(tmp_path):
+    """Atlas package-relative `core/...` paths should also resolve."""
+    repo, commit, _body = _git_repo(tmp_path)
+    full_path = (
+        "products/tandem/packages/python/atlas/core/ingest/chunkers/"
+        "markdown_chunker.py"
+    )
+    body = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{full_path}"],
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout
+    sliced = "\n".join(body.splitlines()[0:1])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    receipt = _mk_receipt(
+        source_commit=commit,
+        source_path="core/ingest/chunkers/markdown_chunker.py",
+        source_lines="1-1",
+        excerpt_sha256=hashlib.sha256(canon.encode("utf-8")).hexdigest(),
+    )
+
+    result = code_snapshot_mod.resolve_code_receipt_snapshot(
+        receipt,
+        repo_path=repo,
+    )
+
+    assert result.status == code_snapshot_mod.STATUS_MATCH
+    assert result.path == full_path
 
 
 def test_code_snapshot_no_line_range(tmp_path):

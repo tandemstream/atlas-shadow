@@ -1024,13 +1024,15 @@ def _classify_command_snapshot_outcome(
         ``("skipped_command_snapshot", "command_snapshot")``. Receipt
         verified by deterministic source check; atlas wasn't needed.
       - ``command_snapshot_mismatch`` /
-        ``command_snapshot_found_but_expected_absent`` /
-        ``command_snapshot_source_missing`` →
+        ``command_snapshot_found_but_expected_absent`` →
         ``("skipped_unavailable_source_ref", "unavailable_source_ref")``.
         Receipt contradicted or unresolvable at the pinned commit —
         atlas wasn't being tested fairly.
-      - ``command_snapshot_unsupported`` / ``command_snapshot_error`` /
-        ``None`` → fall through (None return).
+      - ``command_snapshot_source_missing`` /
+        ``command_snapshot_unsupported`` / ``command_snapshot_error`` /
+        ``None`` → fall through (None return). Source-missing is not
+        decisive here because code_snapshot may resolve Atlas package
+        aliases that command_snapshot cannot.
     """
     if command_snapshot is None:
         return None
@@ -1043,7 +1045,6 @@ def _classify_command_snapshot_outcome(
     if status in (
         command_snapshot_mod.STATUS_MISMATCH,
         command_snapshot_mod.STATUS_FOUND_BUT_EXPECTED_ABSENT,
-        command_snapshot_mod.STATUS_SOURCE_MISSING,
     ):
         return (
             "skipped_unavailable_source_ref",
