@@ -475,3 +475,113 @@ def test_regenerate_legacy_command_snapshot_defaults_zero(tmp_path: Path):
     _, json_path = os_mod.regenerate(tmp_path)
     run = json.loads(json_path.read_text())["runs"][0]
     assert run["total_skipped_command_snapshot"] == 0
+
+
+# ─── Per-evidence-type breakdown in dashboard ─────────────────────────
+
+
+def _sample_breakdown(
+    *,
+    source_excerpt: tuple[int, int, int] = (0, 0, 0),
+    external_tool_docs: tuple[int, int, int] = (0, 0, 0),
+    user_context: tuple[int, int, int] = (0, 0, 0),
+    absence_search: tuple[int, int, int] = (0, 0, 0),
+    other: tuple[int, int, int] = (0, 0, 0),
+) -> dict:
+    """Build a breakdown dict matching the shape `_aggregate_run_totals`
+    emits. Each tuple is (receipts, correct, excluded)."""
+    def bucket(t):
+        r, c, e = t
+        clean_total = r - e
+        return {
+            "receipts": r, "correct": c, "excluded": e,
+            "clean_total": clean_total,
+            "clean_pct": (
+                round(c * 100 / clean_total, 1)
+                if clean_total > 0 else None
+            ),
+        }
+    return {
+        "source_excerpt": bucket(source_excerpt),
+        "external_tool_docs": bucket(external_tool_docs),
+        "user_context": bucket(user_context),
+        "absence_search": bucket(absence_search),
+        "other": bucket(other),
+    }
+
+
+def test_regenerate_by_evidence_type_lands_in_json(tmp_path: Path):
+    """overall-summary.json must expose total_by_evidence_type per run
+    so downstream tooling (charts, the upcoming probe-compare CLI) can
+    consume the rollup directly."""
+    bd = _sample_breakdown(
+        source_excerpt=(40, 12, 5),
+        external_tool_docs=(3, 0, 3),
+        user_context=(2, 0, 2),
+        absence_search=(1, 0, 1),
+    )
+    _write_run(tmp_path, "baseline-breakdown", total_by_evidence_type=bd)
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_by_evidence_type"] is not None
+    assert run["total_by_evidence_type"]["source_excerpt"]["receipts"] == 40
+    assert run["total_by_evidence_type"]["source_excerpt"]["clean_total"] == 35
+    assert (
+        run["total_by_evidence_type"]["external_tool_docs"]["clean_pct"]
+        is None  # all excluded
+    )
+
+
+def test_regenerate_legacy_run_total_by_evidence_type_is_none(tmp_path: Path):
+    """Pre-breakdown manifests get None (not a zero-filled stub) so
+    consumers can distinguish 'no breakdown available' from 'all
+    buckets at zero.'"""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_by_evidence_type"] is None
+
+
+def test_format_md_includes_evidence_type_section_when_breakdown_present(
+    tmp_path: Path,
+):
+    """When the latest run carries a non-zero by-evidence-type
+    breakdown, the markdown gains a 'Latest run — by evidence type'
+    section listing each non-empty bucket."""
+    bd = _sample_breakdown(
+        source_excerpt=(40, 12, 5),
+        external_tool_docs=(3, 0, 3),
+    )
+    _write_run(tmp_path, "baseline-pr20", total_by_evidence_type=bd)
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "## Latest run — by evidence type" in out
+    # Check for the actual table rows (pipe-prefixed) rather than just
+    # the bucket name — the explanatory blurb names every bucket so a
+    # bare substring check would always match.
+    assert "| `source_excerpt` |" in out
+    assert "| `external_tool_docs` |" in out
+    # user_context/absence_search/other had zero receipts → suppressed
+    # from the table even though they're still named in the blurb.
+    assert "| `user_context` |" not in out
+    assert "| `absence_search` |" not in out
+    assert "| `other` |" not in out
+
+
+def test_format_md_skips_evidence_type_section_for_legacy_runs(tmp_path: Path):
+    """If the latest run lacks the breakdown field entirely, the
+    section is omitted (rather than rendering an empty table)."""
+    _write_run(tmp_path, "baseline-legacy")
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "Latest run — by evidence type" not in out
+
+
+def test_format_md_skips_evidence_type_section_when_all_zero(tmp_path: Path):
+    """A breakdown with every bucket at zero (e.g. a run with zero
+    receipts) doesn't render an empty section."""
+    bd = _sample_breakdown()  # all defaults at zero
+    _write_run(tmp_path, "baseline-zero", total_by_evidence_type=bd)
+    runs = os_mod.load_run_manifests(tmp_path)
+    out = os_mod._format_md(runs, [], [])
+    assert "Latest run — by evidence type" not in out

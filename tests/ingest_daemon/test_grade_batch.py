@@ -778,6 +778,196 @@ def test_aggregate_run_totals_handles_zero_receipt_packet():
     assert totals["per_packet_pct"]["empty-pkt"]["pct"] == 0.0
 
 
+# ───────── by_evidence_type rollup ────────────────────────────────────
+
+
+def _mk_summary_dict_with_evidence(
+    packet_id: str,
+    by_evidence_type: dict,
+    *,
+    total: int = 0,
+    pass_count: int = 0,
+    excluded_count: int = 0,
+) -> dict:
+    """Same dict shape ``run_pr_grading`` emits, but with explicit
+    ``by_evidence_type`` plumbed through. Used to exercise the
+    aggregator's sum path."""
+    return {
+        "packet_id": packet_id,
+        "passed": False,
+        "pass_pct": 0,
+        "pass_count": pass_count,
+        "total": total,
+        "excluded_count": excluded_count,
+        "by_evidence_type": by_evidence_type,
+        "artifact_path": None,
+    }
+
+
+def test_aggregate_run_totals_sums_by_evidence_type_across_packets():
+    """Run-level total_by_evidence_type sums receipts/correct/excluded
+    across every packet, then derives clean_total + clean_pct from the
+    SUMMED counts (not by averaging per-packet percentages)."""
+    outcomes = [
+        {
+            "packet_slug": "p1",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_evidence(
+                "p1",
+                {
+                    "source_excerpt": {
+                        "receipts": 10, "correct": 4, "excluded": 2,
+                        "clean_total": 8, "clean_pct": 50.0,
+                    },
+                    "external_tool_docs": {
+                        "receipts": 3, "correct": 0, "excluded": 3,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "user_context": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "absence_search": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "other": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                },
+                total=13, pass_count=4, excluded_count=5,
+            )],
+        },
+        {
+            "packet_slug": "p2",
+            "status": "ok",
+            "summaries": [_mk_summary_dict_with_evidence(
+                "p2",
+                {
+                    "source_excerpt": {
+                        "receipts": 6, "correct": 3, "excluded": 0,
+                        "clean_total": 6, "clean_pct": 50.0,
+                    },
+                    "external_tool_docs": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "user_context": {
+                        "receipts": 2, "correct": 0, "excluded": 2,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "absence_search": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                    "other": {
+                        "receipts": 0, "correct": 0, "excluded": 0,
+                        "clean_total": 0, "clean_pct": None,
+                    },
+                },
+                total=8, pass_count=3, excluded_count=2,
+            )],
+        },
+    ]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_evidence_type"]
+
+    # source_excerpt: 10+6=16 receipts, 4+3=7 correct, 2+0=2 excluded
+    # clean_total=14, clean_pct=7/14=50.0
+    assert run["source_excerpt"]["receipts"] == 16
+    assert run["source_excerpt"]["correct"] == 7
+    assert run["source_excerpt"]["excluded"] == 2
+    assert run["source_excerpt"]["clean_total"] == 14
+    assert run["source_excerpt"]["clean_pct"] == 50.0
+
+    # external_tool_docs: all excluded → clean_total=0, clean_pct=None
+    assert run["external_tool_docs"]["receipts"] == 3
+    assert run["external_tool_docs"]["excluded"] == 3
+    assert run["external_tool_docs"]["clean_total"] == 0
+    assert run["external_tool_docs"]["clean_pct"] is None
+
+    # user_context: 2 receipts both excluded
+    assert run["user_context"]["receipts"] == 2
+    assert run["user_context"]["clean_pct"] is None
+
+    # Always-emitted buckets (zero-filled).
+    assert run["absence_search"]["receipts"] == 0
+    assert run["other"]["receipts"] == 0
+
+    # Per-packet breakdown also present.
+    assert totals["per_packet_pct"]["p1"]["by_evidence_type"]["source_excerpt"][
+        "receipts"
+    ] == 10
+    assert totals["per_packet_pct"]["p2"]["by_evidence_type"]["user_context"][
+        "receipts"
+    ] == 2
+
+
+def test_aggregate_run_totals_by_evidence_type_back_compat_missing_field():
+    """Legacy summaries (pre-evidence-breakdown) lack ``by_evidence_type``.
+    Aggregator must still emit zero-filled run-level breakdown rather
+    than raising or returning a partial dict."""
+    outcomes = [{
+        "packet_slug": "legacy",
+        "status": "ok",
+        "summaries": [{
+            "packet_id": "legacy", "passed": False, "pass_pct": 0,
+            "pass_count": 0, "total": 5,
+            # No by_evidence_type field at all.
+            "artifact_path": None,
+        }],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_evidence_type"]
+    # Every canonical bucket present with zero counts.
+    for bucket in (
+        "source_excerpt", "external_tool_docs",
+        "user_context", "absence_search", "other",
+    ):
+        assert bucket in run
+        assert run[bucket]["receipts"] == 0
+        assert run[bucket]["clean_total"] == 0
+        assert run[bucket]["clean_pct"] is None
+    # Per-packet breakdown also zero-filled.
+    assert totals["per_packet_pct"]["legacy"]["by_evidence_type"][
+        "source_excerpt"
+    ]["receipts"] == 0
+
+
+def test_aggregate_run_totals_by_evidence_type_unknown_bucket_routed_to_other():
+    """If a packet's summary carries an unexpected bucket key (e.g. a
+    future evidence_type rolled out before the aggregator was updated),
+    its counts route into 'other' rather than corrupting a canonical
+    bucket or raising KeyError."""
+    outcomes = [{
+        "packet_slug": "p1",
+        "status": "ok",
+        "summaries": [_mk_summary_dict_with_evidence(
+            "p1",
+            {
+                "source_excerpt": {
+                    "receipts": 5, "correct": 2, "excluded": 0,
+                    "clean_total": 5, "clean_pct": 40.0,
+                },
+                # Unexpected bucket from a future grader version.
+                "newly_invented_type": {
+                    "receipts": 2, "correct": 1, "excluded": 0,
+                    "clean_total": 2, "clean_pct": 50.0,
+                },
+            },
+            total=7, pass_count=3, excluded_count=0,
+        )],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    run = totals["total_by_evidence_type"]
+    assert run["source_excerpt"]["receipts"] == 5
+    # The unknown bucket landed in 'other'.
+    assert run["other"]["receipts"] == 2
+    assert run["other"]["correct"] == 1
+    assert run["other"]["clean_pct"] == 50.0
+
+
 # ───────── write_packet_artifact + manifest + summary.md ─────────────
 
 

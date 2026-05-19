@@ -275,6 +275,65 @@ class GradingSummary:
         )
 
     @property
+    def by_evidence_type(self) -> dict[str, dict[str, Any]]:
+        """Breakdown of receipts by ``evidence_type``.
+
+        Returns a dict keyed by evidence_type bucket. The four buckets
+        match :mod:`grader_service`'s routing distinctions:
+        ``source_excerpt`` (default for legacy receipts whose
+        ``evidence_type`` is None or missing), ``external_tool_docs``,
+        ``user_context``, ``absence_search``. Any unexpected future
+        value lands in ``other`` so adding a new evidence_type
+        upstream doesn't silently corrupt counts.
+
+        Each bucket carries ``receipts`` / ``correct`` / ``excluded``
+        / ``clean_total`` / ``clean_pct``. ``clean_pct`` is ``None``
+        when ``clean_total == 0`` (mirrors :attr:`clean_pass_pct`).
+
+        Surfaced so the dashboard can answer the standing question
+        "where is Atlas actually being measured?" — non-retrieval
+        buckets should drop to zero clean_total once PR #17 + #19
+        skip-routing land, leaving ``source_excerpt`` as the only
+        bucket carrying a real clean denominator.
+        """
+        # Match the routing constants in :mod:`grader_service` — order
+        # is deterministic so JSON rendering is stable across runs.
+        buckets = [
+            "source_excerpt",
+            "external_tool_docs",
+            "user_context",
+            "absence_search",
+        ]
+        out: dict[str, dict[str, Any]] = {
+            b: {"receipts": 0, "correct": 0, "excluded": 0} for b in buckets
+        }
+        out["other"] = {"receipts": 0, "correct": 0, "excluded": 0}
+        for row in self.rows:
+            et = (row.evidence_type or "").strip()
+            if not et:
+                # Legacy receipts and explicit-source_excerpt collapse
+                # together — they share routing semantics in
+                # :func:`grader_service._derive_score_status`.
+                key = "source_excerpt"
+            elif et in out:
+                key = et
+            else:
+                key = "other"
+            out[key]["receipts"] += 1
+            if row.grade in ("full_match", "partial_match"):
+                out[key]["correct"] += 1
+            if row.score_status != "counted":
+                out[key]["excluded"] += 1
+        for vals in out.values():
+            clean_total = vals["receipts"] - vals["excluded"]
+            vals["clean_total"] = clean_total
+            vals["clean_pct"] = (
+                round(vals["correct"] * 100 / clean_total, 1)
+                if clean_total > 0 else None
+            )
+        return out
+
+    @property
     def clean_total(self) -> int:
         """Denominator for :attr:`clean_pass_pct`."""
         return self.total - self.excluded_count

@@ -34,6 +34,18 @@ IMPROVEMENT_THRESHOLD_PP = 10  # >=10pp gain from prior run flags as improvement
 OVERALL_MD_NAME = "overall-summary.md"
 OVERALL_JSON_NAME = "overall-summary.json"
 
+# Canonical bucket order for the by-evidence-type breakdown. Kept in
+# sync with :data:`atlas_shadow.ingest_daemon.grade_batch.EVIDENCE_TYPE_BUCKETS`
+# — both modules render the same column order so a chart consumer
+# reading the JSON doesn't have to detect order.
+_EVIDENCE_TYPE_RENDER_ORDER: tuple[str, ...] = (
+    "source_excerpt",
+    "external_tool_docs",
+    "user_context",
+    "absence_search",
+    "other",
+)
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` via tempfile → fsync → rename.
@@ -198,6 +210,56 @@ def _format_md(
             )
         lines.append("")
 
+    # Per-evidence-type breakdown for the LATEST run only. The dashboard
+    # answers "where is Atlas actually being measured?" — non-retrieval
+    # buckets (external_tool_docs / user_context / absence_search)
+    # should show zero clean_total once #17 + #19 routing is fully
+    # working, leaving source_excerpt as the only bucket carrying a
+    # real clean denominator. We render only the latest run because a
+    # per-run breakdown would balloon the markdown; the JSON exposes
+    # every run for downstream charting.
+    if runs:
+        latest_breakdown = runs[-1].get("total_by_evidence_type")
+        if isinstance(latest_breakdown, dict) and any(
+            (latest_breakdown.get(b) or {}).get("receipts", 0)
+            for b in _EVIDENCE_TYPE_RENDER_ORDER
+        ):
+            lines.append("## Latest run — by evidence type")
+            lines.append("")
+            lines.append(
+                "| Evidence type | Receipts | Excluded | Clean total | "
+                "Correct | Clean % |"
+            )
+            lines.append("|---|---|---|---|---|---|")
+            for bucket in _EVIDENCE_TYPE_RENDER_ORDER:
+                vals = latest_breakdown.get(bucket) or {}
+                receipts = int(vals.get("receipts", 0) or 0)
+                # Suppress all-zero rows so the table stays scannable.
+                # The full breakdown is always in the JSON.
+                if receipts == 0:
+                    continue
+                excluded = int(vals.get("excluded", 0) or 0)
+                clean_total = int(vals.get("clean_total", 0) or 0)
+                correct = int(vals.get("correct", 0) or 0)
+                clean_pct = vals.get("clean_pct")
+                clean_pct_str = (
+                    f"{clean_pct:.1f}%" if isinstance(clean_pct, (int, float))
+                    else "—"
+                )
+                lines.append(
+                    f"| `{bucket}` | {receipts} | {excluded} | "
+                    f"{clean_total} | {correct} | {clean_pct_str} |"
+                )
+            lines.append("")
+            lines.append(
+                "_Non-retrieval buckets (`external_tool_docs`, "
+                "`user_context`, `absence_search`) should show "
+                "`clean_total=0` once skip routing is fully working "
+                "— their rows aren't testing Atlas retrieval. "
+                "`source_excerpt` carries the real tuning denominator._"
+            )
+            lines.append("")
+
     lines.append("## Run history")
     lines.append("")
     # PR #14: dashboard now shows raw + clean pct side by side. Legacy
@@ -306,6 +368,11 @@ def _format_json(
                 "total_skipped_command_snapshot": r.get(
                     "total_skipped_command_snapshot", 0
                 ),
+                # Per-evidence-type breakdown (run level). None on legacy
+                # manifests that pre-date the rollup — consumers should
+                # treat None as "no breakdown available" rather than
+                # "all buckets at zero."
+                "total_by_evidence_type": r.get("total_by_evidence_type"),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }

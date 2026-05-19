@@ -2918,6 +2918,127 @@ def test_serialize_row_includes_evidence_type():
     assert out["score_status"] == "skipped_absence_search"
 
 
+# ─── by_evidence_type breakdown (per-evidence-type rollup) ────────────
+
+
+def test_grading_summary_by_evidence_type_partitions_rows():
+    """Every row lands in exactly one bucket; counts + clean math
+    match the per-bucket denominators."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        # source_excerpt: 2 receipts, 1 correct, 0 excluded → clean_pct=50.0
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            evidence_type="source_excerpt",
+            score_status="counted",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="no_match",
+            confidence=1.0, rationale="missed", tool="find_code",
+            evidence_type="source_excerpt",
+            score_status="counted",
+        ),
+        # external_tool_docs: 1 receipt, all excluded → clean_total=0, clean_pct=None
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            evidence_type="external_tool_docs",
+            score_status="skipped_non_repo_evidence",
+        ),
+        # absence_search: 1 receipt excluded
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q4", question="q4", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            evidence_type="absence_search",
+            score_status="skipped_absence_search",
+        ),
+        # None evidence_type collapses to source_excerpt bucket
+        # (matches grader_service's routing default).
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q5", question="q5", grade="partial_match",
+            confidence=0.7, rationale="meh", tool="find_code",
+            evidence_type=None,
+            score_status="counted",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    bd = s.by_evidence_type
+
+    assert bd["source_excerpt"]["receipts"] == 3
+    assert bd["source_excerpt"]["correct"] == 2  # q1 + q5
+    assert bd["source_excerpt"]["excluded"] == 0
+    assert bd["source_excerpt"]["clean_total"] == 3
+    # 2/3 rounded to 1dp == 66.7
+    assert bd["source_excerpt"]["clean_pct"] == 66.7
+
+    assert bd["external_tool_docs"]["receipts"] == 1
+    assert bd["external_tool_docs"]["excluded"] == 1
+    assert bd["external_tool_docs"]["clean_total"] == 0
+    assert bd["external_tool_docs"]["clean_pct"] is None
+
+    assert bd["absence_search"]["receipts"] == 1
+    assert bd["absence_search"]["clean_total"] == 0
+    assert bd["absence_search"]["clean_pct"] is None
+
+    # user_context bucket gets zero-fill so consumers can index it
+    # consistently across runs.
+    assert bd["user_context"]["receipts"] == 0
+    assert bd["user_context"]["clean_total"] == 0
+    assert bd["user_context"]["clean_pct"] is None
+
+    # Receipts across buckets sum to row count (no double counting).
+    total = sum(b["receipts"] for b in bd.values())
+    assert total == len(rows)
+
+
+def test_grading_summary_by_evidence_type_unknown_value_routes_to_other():
+    """Future evidence_type values land in 'other' rather than
+    silently corrupting one of the canonical buckets."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            evidence_type="some_future_type",
+            score_status="counted",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    bd = s.by_evidence_type
+    assert bd["other"]["receipts"] == 1
+    assert bd["other"]["correct"] == 1
+    assert bd["other"]["clean_pct"] == 100.0
+    # Canonical buckets stayed empty — no leakage.
+    assert bd["source_excerpt"]["receipts"] == 0
+
+
+def test_grading_summary_by_evidence_type_empty_summary():
+    """No rows → every bucket zero-filled, no exceptions."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=[],
+    )
+    bd = s.by_evidence_type
+    for bucket in (
+        "source_excerpt", "external_tool_docs",
+        "user_context", "absence_search", "other",
+    ):
+        assert bd[bucket]["receipts"] == 0
+        assert bd[bucket]["clean_total"] == 0
+        assert bd[bucket]["clean_pct"] is None
+
+
 # ─── PR #18 review fix: doc receipts defer source-unavailable to doc_resolver ───
 
 
