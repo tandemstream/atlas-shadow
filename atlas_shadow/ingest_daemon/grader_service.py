@@ -1215,13 +1215,19 @@ def _derive_score_status(
 
     # PR #18 review fix: doc_resolver had the authoritative say on
     # whether the receipt's source could be resolved via DB + alias.
-    # When it explicitly returned ``unresolved_source_ref``, the
+    # When it explicitly returned the "unresolved" binding, the
     # receipt was unreachable even after the alias path tried — this
     # is the doc-side analog of the code-side pre-atlas
     # ``skipped_unavailable_source_ref`` skip. Caught here (after
     # grading) because pre-atlas can't know what doc_resolver would
     # have done.
-    if revision_binding == "unresolved_source_ref":
+    #
+    # PR #19 fix: ``doc_resolver`` emits ``BINDING_NONE = "none"`` (a
+    # string sentinel) on its DocResolverResult.revision_binding field
+    # when both the DB lookup AND the git fallback fail. We also
+    # accept the longer ``"unresolved_source_ref"`` form for forward-
+    # compatibility / direct testing.
+    if revision_binding in ("none", "unresolved_source_ref"):
         return (
             "skipped_unavailable_source_ref",
             "unavailable_source_ref",
