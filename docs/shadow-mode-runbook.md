@@ -230,6 +230,41 @@ no_match rows get `score_status: "skipped_receipt_stale"` +
 drops them from BOTH numerator and denominator so the score reflects
 retrieval performance, not receipt drift.
 
+**Command-snapshot lane (PR #20):** Some receipts' `command_text` is
+itself a deterministic source check (`sed-range`, `grep`, `ls`,
+`find`, `wc -l`) rather than a question for atlas. The daemon parses
+these against a strict whitelist, executes the equivalent git-backed
+operation against `source_commit`, hashes the output against
+`receipt.excerpt_sha256`, and either skips the row entirely (verified)
+or marks it as unavailable_source_ref (contradicted). Atlas is not
+called for command-shaped receipts.
+
+Receipts with `source_path` but empty `command_text` synthesize:
+- `source_path + source_lines` → equivalent of `sed-range`
+- `source_path` only → equivalent of `ls <path>` (path existence + listing)
+
+This covers q10/q12 (Makefile / scripts/) and q17 (grep absence)
+shape receipts that previously got misrouted through find_code or
+treated as generic absence_search skips.
+
+| Inner status (`command_snapshot_status`) | Outer `score_status` |
+|---|---|
+| `command_snapshot_match` | `skipped_command_snapshot` |
+| `command_snapshot_no_match_expected_absent` | `skipped_command_snapshot` |
+| `command_snapshot_mismatch` | `skipped_unavailable_source_ref` |
+| `command_snapshot_found_but_expected_absent` | `skipped_unavailable_source_ref` |
+| `command_snapshot_source_missing` | `skipped_unavailable_source_ref` |
+| `command_snapshot_unsupported` / `_error` | (falls through; atlas runs) |
+
+Safety:
+- The parser is a strict whitelist. Shell metacharacters (`&`, `;`,
+  `|`, `>`, `<`, backtick, `$`) cause parse failure.
+- All subprocess calls have a hard 30-second timeout.
+- `git show` / `git ls-tree` / `git grep` against the local clone —
+  no arbitrary shell execution.
+- Output is canonicalized + hashed for stable comparison; only the
+  first 2,000 chars are stored on the row in `command_snapshot_head`.
+
 **Pre-atlas skips (PR #17):** Some receipts shouldn't go through
 find_code/scan_search/doc_resolver at all — either because the
 question is by-construction non-retrieval, the receipt's source

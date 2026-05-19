@@ -79,6 +79,19 @@ class ReceiptGradingRow:
     # (external_tool_docs / user_context / absence_search) separately
     # from source_excerpt receipts. None for legacy artifacts.
     evidence_type: Optional[str] = None
+    # PR #20: command-snapshot lane diagnostics. Populated when a
+    # receipt's ``command_text`` (or a synthesized command from
+    # source_path/source_lines) resolves through
+    # :mod:`command_snapshot`. ``status`` is one of the
+    # ``command_snapshot.STATUS_*`` constants. ``hash_match`` /
+    # ``sha256`` mirror the source_snapshot fields' semantics.
+    # ``output_head`` is capped at 2,000 chars for artifact-size
+    # control.
+    command_snapshot_status: Optional[str] = None
+    command_snapshot_hash_match: Optional[bool] = None
+    command_snapshot_sha256: Optional[str] = None
+    command_snapshot_head: Optional[str] = None
+    command_snapshot_exit_code: Optional[int] = None
     atlas_answer_len: int = 0
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
@@ -244,6 +257,21 @@ class GradingSummary:
         return sum(
             1 for r in self.rows
             if r.score_status == "skipped_doc_corpus_excluded"
+        )
+
+    @property
+    def skipped_command_snapshot_count(self) -> int:
+        """PR #20: rows whose ``command_text`` (or synthesized
+        path/line equivalent) was resolved as a deterministic source
+        check rather than an atlas query. Routed through
+        :mod:`command_snapshot`. Surfaced separately so operators can
+        chart the command-lane volume independently — its upstream
+        fix (extend the command shape whitelist or improve parsers)
+        is distinct from receipt staleness or doc corpus completeness.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_command_snapshot"
         )
 
     @property

@@ -2147,6 +2147,11 @@ def test_grade_one_populates_run_snapshot_drift_skip(daemon_config, tmp_path):
         # "edited" version). The grader compares against the receipt's
         # original "line two/line three" claim, so it says no_match.
         _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
+        # PR #20: bypass command_snapshot's pre-atlas skip. This test
+        # documents the post-atlas drift-detection path; the
+        # command_text here ALSO satisfies the command-snapshot lane,
+        # which would otherwise pre-empt the drift codepath.
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
 
     assert row.grade == "no_match"
@@ -2206,6 +2211,9 @@ def test_grade_one_both_snapshots_match_stays_counted(daemon_config, tmp_path):
         run_commit=commit,  # same as receipt_commit — no drift
         _runner_run_one=_fake_runner_run_one(),
         _grader_grade=_fake_grader(grade="no_match", confidence=0.1, rationale="stub"),
+        # PR #20: bypass command_snapshot pre-skip — see sibling
+        # drift test for rationale.
+        _classify_skip=lambda *_args, **_kwargs: None,
     )
 
     assert row.grade == "no_match"
@@ -2991,3 +2999,298 @@ def test_derive_score_status_doc_git_fallback_stays_counted():
         source_snapshot_status="git_source_hash_match",
         revision_binding="git_receipt_snapshot",
     ) == ("counted", None)
+
+
+# ─── PR #20: command-snapshot lane integration ───────────────────────
+
+
+def test_grade_one_command_snapshot_short_circuits_atlas(daemon_config, tmp_path):
+    """End-to-end: a receipt with a whitelisted ``sed-range`` command
+    AND a matching excerpt_sha256 gets resolved by command_snapshot
+    BEFORE atlas dispatch. Asserts the runner is NOT called.
+    """
+    import hashlib
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "src" / "example.py"
+    src.parent.mkdir(parents=True)
+    body = "line one\nline two\nline three\nline four\n"
+    src.write_text(body, encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
+    commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    sliced = "\n".join(body.splitlines()[1:3])
+    canon = doc_resolver_mod._excerpt_canonical(sliced)
+    expected_sha = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="cmd-snapshot test",
+        source_path="src/example.py",
+        source_lines="2-3",
+        source_commit=commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt=sliced,
+        oracle_claim="claim",
+        command_text="scripts/qa_lookup.sh sed-range src/example.py 2 3",
+    )
+
+    def runner_should_not_fire(*args, **kwargs):
+        raise AssertionError("atlas runner should not be called for command-snapshot row")
+
+    def resolver_should_not_fire(*args, **kwargs):
+        raise AssertionError("doc_resolver should not be called for command-snapshot row")
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        run_commit=commit,
+        _runner_run_one=runner_should_not_fire,
+        _doc_resolver=resolver_should_not_fire,
+    )
+    assert row.score_status == "skipped_command_snapshot"
+    assert row.clean_excluded_reason == "command_snapshot"
+    assert row.lane == "non_retrieval"
+    assert row.tool == "skipped"
+    assert row.command_snapshot_status == "command_snapshot_match"
+    assert row.command_snapshot_hash_match is True
+
+
+def test_grade_one_command_snapshot_absence_search_verified(daemon_config, tmp_path):
+    """Acceptance target: q17-shape — absence_search + grep command
+    where the pattern is absent in the searched paths → row lands as
+    skipped_command_snapshot with the no_match_expected_absent inner
+    status."""
+    import subprocess as sp
+    from dataclasses import replace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src_dir = repo / "core"
+    src_dir.mkdir(parents=True)
+    (src_dir / "x.py").write_text("def x():\n    pass\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
+    commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q17",
+        question="no heading_path anywhere",
+        oracle_claim="no occurrences of heading_path in core or tests",
+        oracle_excerpt="",
+        evidence_type="absence_search",
+        source_commit=commit,
+        command_text='scripts/qa_lookup.sh grep "heading_path" core tests',
+    )
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+    )
+    assert row.score_status == "skipped_command_snapshot"
+    assert row.command_snapshot_status == "command_snapshot_no_match_expected_absent"
+    assert row.lane == "non_retrieval"
+
+
+def test_grade_one_synthesized_command_for_directory_receipt(daemon_config, tmp_path):
+    """Acceptance target: q12 shape — trailing-slash directory path
+    with empty command_text gets synthesized ``ls`` and lands as
+    skipped_command_snapshot.
+
+    Note: q10's Makefile (file path, no trailing slash) is
+    deliberately out of scope for v1 — file paths without explicit
+    command_text continue to route through atlas to preserve existing
+    measurements. q10 → command_snapshot will require an explicit
+    ``command_text`` (e.g. ``wc -l Makefile``) on the receipt.
+    """
+    import subprocess as sp
+    from dataclasses import replace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "build.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
+    commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q12",
+        question="scripts/ directory shape",
+        oracle_claim="scripts/ directory exists",
+        oracle_excerpt="",
+        source_path="scripts/",  # trailing slash → synthesizes ls
+        source_commit=commit,
+        command_text="",
+    )
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+    )
+    assert row.score_status == "skipped_command_snapshot"
+    assert row.command_snapshot_status == "command_snapshot_match"
+    assert row.lane == "non_retrieval"
+
+
+def test_grade_one_command_snapshot_mismatch_to_unavailable(daemon_config, tmp_path):
+    """A receipt whose sed-range hash doesn't match the actual repo
+    content lands as skipped_unavailable_source_ref (contradicted —
+    atlas wasn't being tested fairly)."""
+    import subprocess as sp
+    from dataclasses import replace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    (repo / "src.py").write_text("hello\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=10)
+    commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q",
+        question="q",
+        oracle_claim="c",
+        oracle_excerpt="",
+        source_commit=commit,
+        excerpt_sha256="0" * 64,  # intentionally wrong
+        command_text="scripts/qa_lookup.sh sed-range src.py 1 1",
+    )
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+    )
+    assert row.score_status == "skipped_unavailable_source_ref"
+    assert row.clean_excluded_reason == "unavailable_source_ref"
+    assert row.command_snapshot_status == "command_snapshot_mismatch"
+
+
+def test_grade_one_unsupported_command_falls_through(daemon_config):
+    """A receipt with shell-metacharacter command_text (unsupported)
+    AND no source anchors (so ``synthesize_command`` also returns
+    None) falls through to existing routing — command_snapshot
+    doesn't short-circuit and atlas grades the receipt normally.
+    """
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q",
+        question="q",
+        oracle_claim="c",
+        oracle_excerpt="",
+        source_path=None,
+        source_lines=None,
+        source_commit=None,
+        command_text="ls foo && find bar",  # compound shell — unsupported
+    )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=_fake_runner_run_one(),
+        _grader_grade=_fake_grader(grade="full_match", confidence=0.9, rationale="r"),
+    )
+    # The UNSUPPORTED sentinel surfaces on the row to confirm
+    # command_snapshot didn't short-circuit.
+    assert row.command_snapshot_status == "command_snapshot_unsupported"
+    # Atlas was called → the grader returned full_match → row counted.
+    assert row.grade == "full_match"
+    assert row.score_status == "counted"
+
+
+def test_grading_summary_skipped_command_snapshot_count():
+    """GradingSummary's new PR #20 counter rolls up only command-
+    snapshot skips."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q1", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_command_snapshot",
+            clean_excluded_reason="command_snapshot",
+            command_snapshot_status="command_snapshot_match",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q2", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_command_snapshot",
+            clean_excluded_reason="command_snapshot",
+            command_snapshot_status="command_snapshot_no_match_expected_absent",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q3", grade="full_match",
+            confidence=0.9, rationale="ok", tool="find_code",
+            score_status="counted",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.skipped_command_snapshot_count == 2
+    assert s.excluded_count == 2
+    assert s.clean_total == 1
+
+
+def test_serialize_row_includes_command_snapshot_fields():
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q", question="q", grade="atlas_not_found",
+        confidence=1.0, rationale="r", tool="skipped",
+        command_snapshot_status="command_snapshot_match",
+        command_snapshot_hash_match=True,
+        command_snapshot_sha256="deadbeef" * 8,
+        command_snapshot_head="line two\nline three",
+        command_snapshot_exit_code=0,
+    )
+    out = gs._serialize_row(row)
+    assert out["command_snapshot_status"] == "command_snapshot_match"
+    assert out["command_snapshot_hash_match"] is True
+    assert out["command_snapshot_sha256"] == "deadbeef" * 8
+    assert out["command_snapshot_head"] == "line two\nline three"
+    assert out["command_snapshot_exit_code"] == 0

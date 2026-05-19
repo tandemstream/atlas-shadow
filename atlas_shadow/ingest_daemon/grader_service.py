@@ -525,6 +525,7 @@ from . import pr_comment as pr_comment_mod  # noqa: E402
 from . import state_file as state_file_mod  # noqa: E402
 from . import doc_resolver as doc_resolver_mod  # noqa: E402
 from . import code_snapshot as code_snapshot_mod  # noqa: E402
+from . import command_snapshot as command_snapshot_mod  # noqa: E402  # PR #20
 
 
 def _fetch_pr_files(
@@ -640,6 +641,17 @@ def _grade_one_receipt(
         receipt,
         repo_path=cfg.core_repo_path,
     )
+    # PR #20: command_snapshot lane — runs a deterministic git-backed
+    # verification of receipt.command_text (or a synthesized command
+    # from source_path/source_lines) BEFORE atlas dispatch. When the
+    # result is decisive (match / mismatch / source_missing /
+    # absence-verified), `_classify_pre_atlas_skip` short-circuits and
+    # we never call atlas. Unsupported / errored command_text falls
+    # through to normal routing.
+    command_snapshot = command_snapshot_mod.resolve_command_snapshot(
+        receipt,
+        repo_path=cfg.core_repo_path,
+    )
     run_snapshot = None  # PR #15: still only resolved on the code path
     # PR #16: raw retrieval diagnostics. Initialized to the "no
     # raw_result available" shape so the doc_resolver path (which
@@ -661,11 +673,13 @@ def _grade_one_receipt(
         receipt,
         source_snapshot=source_snapshot,
         translation=translation,  # PR #18 review: doc receipts bypass the snapshot pre-skip
+        command_snapshot=command_snapshot,  # PR #20
     )
     if pre_skip is not None:
         return _build_pre_atlas_skip_row(
             receipt=receipt,
             source_snapshot=source_snapshot,
+            command_snapshot=command_snapshot,
             score_status=pre_skip[0],
             clean_excluded_reason=pre_skip[1],
         )
@@ -867,6 +881,26 @@ def _grade_one_receipt(
         lane=lane,
         score_status=score_status,
         clean_excluded_reason=clean_reason,
+        # PR #20: surface command_snapshot diagnostics even when the
+        # row went through atlas (e.g. command_text was UNSUPPORTED or
+        # ERROR — useful diagnostic so consumers can see "command lane
+        # was tried but didn't apply").
+        command_snapshot_status=(
+            command_snapshot.status if command_snapshot is not None else None
+        ),
+        command_snapshot_hash_match=(
+            command_snapshot.hash_match if command_snapshot is not None else None
+        ),
+        command_snapshot_sha256=(
+            command_snapshot.resolved_sha256 if command_snapshot is not None else None
+        ),
+        command_snapshot_head=(
+            (command_snapshot.output_head or None)
+            if command_snapshot is not None else None
+        ),
+        command_snapshot_exit_code=(
+            command_snapshot.exit_code if command_snapshot is not None else None
+        ),
     )
 
 
@@ -973,11 +1007,57 @@ _ABSENCE_SEARCH_EVIDENCE_TYPES = frozenset({"absence_search"})
 _DOCS_WORK_EXCLUDED_PREFIXES = ("docs/work/",)
 
 
+def _classify_command_snapshot_outcome(
+    command_snapshot: Optional[Any],
+) -> Optional[tuple[str, str]]:
+    """PR #20: translate a :class:`command_snapshot.CommandSnapshotResult`
+    into a ``(score_status, clean_excluded_reason)`` pair.
+
+    Returns ``None`` when command_snapshot didn't decisively classify
+    the receipt — the caller should fall through to the existing
+    pre-atlas skip logic / atlas dispatch.
+
+    Mapping (per Codex's PR #20 brief):
+
+      - ``command_snapshot_match`` /
+        ``command_snapshot_no_match_expected_absent`` →
+        ``("skipped_command_snapshot", "command_snapshot")``. Receipt
+        verified by deterministic source check; atlas wasn't needed.
+      - ``command_snapshot_mismatch`` /
+        ``command_snapshot_found_but_expected_absent`` /
+        ``command_snapshot_source_missing`` →
+        ``("skipped_unavailable_source_ref", "unavailable_source_ref")``.
+        Receipt contradicted or unresolvable at the pinned commit —
+        atlas wasn't being tested fairly.
+      - ``command_snapshot_unsupported`` / ``command_snapshot_error`` /
+        ``None`` → fall through (None return).
+    """
+    if command_snapshot is None:
+        return None
+    status = getattr(command_snapshot, "status", None)
+    if status in (
+        command_snapshot_mod.STATUS_MATCH,
+        command_snapshot_mod.STATUS_NO_MATCH_EXPECTED_ABSENT,
+    ):
+        return ("skipped_command_snapshot", "command_snapshot")
+    if status in (
+        command_snapshot_mod.STATUS_MISMATCH,
+        command_snapshot_mod.STATUS_FOUND_BUT_EXPECTED_ABSENT,
+        command_snapshot_mod.STATUS_SOURCE_MISSING,
+    ):
+        return (
+            "skipped_unavailable_source_ref",
+            "unavailable_source_ref",
+        )
+    return None
+
+
 def _classify_pre_atlas_skip(
     receipt: PacketReceipt,
     *,
     source_snapshot: Optional[Any] = None,
     translation: Optional[Any] = None,
+    command_snapshot: Optional[Any] = None,
 ) -> Optional[tuple[str, str]]:
     """Decide whether this receipt should be skipped BEFORE calling
     atlas. PR #17.
@@ -1019,11 +1099,20 @@ def _classify_pre_atlas_skip(
     """
     source_path = (receipt.source_path or "").strip()
     if source_path:
-        # The docs/work/** prefix can appear with or without a leading
-        # path component (e.g. ``docs/work/2026-…`` vs
-        # ``products/tandem/.../docs/work/2026-…``). Match anywhere.
+        # docs/work/** wins first — path-based policy, applies
+        # regardless of command_text / evidence_type / snapshot state.
         if any(prefix in source_path for prefix in _DOCS_WORK_EXCLUDED_PREFIXES):
             return ("skipped_doc_corpus_excluded", "doc_corpus_excluded")
+
+    # PR #20: command_snapshot has higher priority than evidence_type-
+    # based skips. For an absence_search receipt with a grep command,
+    # we want ``skipped_command_snapshot`` (verified locally) rather
+    # than the generic ``skipped_absence_search`` fallback. A
+    # source_excerpt receipt with a sed-range command similarly
+    # short-circuits before the snapshot-based skip below.
+    cmd_outcome = _classify_command_snapshot_outcome(command_snapshot)
+    if cmd_outcome is not None:
+        return cmd_outcome
 
     evidence_type = (receipt.evidence_type or "").strip()
     if evidence_type in _NON_REPO_EVIDENCE_TYPES:
@@ -1051,6 +1140,7 @@ def _build_pre_atlas_skip_row(
     source_snapshot: Optional[Any],
     score_status: str,
     clean_excluded_reason: str,
+    command_snapshot: Optional[Any] = None,
 ) -> "pr_comment_mod.ReceiptGradingRow":
     """Construct a ``ReceiptGradingRow`` for a receipt that's being
     skipped before any atlas dispatch (PR #17).
@@ -1090,6 +1180,13 @@ def _build_pre_atlas_skip_row(
     snap_sha256 = (
         source_snapshot.resolved_sha256 if source_snapshot is not None else None
     )
+    # PR #20: surface command_snapshot fields if the skip was driven by
+    # the command lane (or just happened to have run).
+    cs_status = getattr(command_snapshot, "status", None)
+    cs_hash_match = getattr(command_snapshot, "hash_match", None)
+    cs_sha256 = getattr(command_snapshot, "resolved_sha256", None)
+    cs_head = getattr(command_snapshot, "output_head", None) or None
+    cs_exit = getattr(command_snapshot, "exit_code", None)
     return pr_comment_mod.ReceiptGradingRow(
         question_id=receipt.question_id,
         question=receipt.question,
@@ -1117,6 +1214,13 @@ def _build_pre_atlas_skip_row(
         lane="non_retrieval",
         score_status=score_status,
         clean_excluded_reason=clean_excluded_reason,
+        # PR #20: command_snapshot diagnostics — populated when the
+        # skip was driven by the command lane.
+        command_snapshot_status=cs_status,
+        command_snapshot_hash_match=cs_hash_match,
+        command_snapshot_sha256=cs_sha256,
+        command_snapshot_head=cs_head,
+        command_snapshot_exit_code=cs_exit,
     )
 
 
@@ -1530,6 +1634,9 @@ def run_pr_grading(
                     summary.skipped_unavailable_source_ref_count,
                 "skipped_doc_corpus_excluded_count":
                     summary.skipped_doc_corpus_excluded_count,
+                # PR #20: command-snapshot lane skip count.
+                "skipped_command_snapshot_count":
+                    summary.skipped_command_snapshot_count,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the
@@ -1750,4 +1857,10 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         # PR #17: receipt authoring intent (e.g. ``source_excerpt`` /
         # ``external_tool_docs`` / ``user_context`` / ``absence_search``).
         "evidence_type": row.evidence_type,
+        # PR #20: command_snapshot lane diagnostics.
+        "command_snapshot_status": row.command_snapshot_status,
+        "command_snapshot_hash_match": row.command_snapshot_hash_match,
+        "command_snapshot_sha256": row.command_snapshot_sha256,
+        "command_snapshot_head": row.command_snapshot_head,
+        "command_snapshot_exit_code": row.command_snapshot_exit_code,
     }
