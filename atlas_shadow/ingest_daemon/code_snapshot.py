@@ -30,6 +30,10 @@ from typing import Callable, Optional
 from . import doc_resolver as doc_resolver_mod
 
 
+_ATLAS_LEAF_PREFIX = "products/tandem/packages/python/atlas/"
+_ATLAS_DOC_ALIAS_PREFIX = "Atlas/"
+
+
 # Receipt-commit-pinned snapshot statuses (existing).
 STATUS_MATCH = "git_source_hash_match"
 STATUS_MISMATCH = "git_source_hash_mismatch"
@@ -60,6 +64,50 @@ class CodeSnapshotResult:
     raw_text_len: int = 0
     raw_text_head: str = ""
     warnings: list[str] = field(default_factory=list)
+
+
+def _normalize_git_path(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    out = str(path).strip().replace("\\", "/")
+    while out.startswith("./"):
+        out = out[2:]
+    return out.lstrip("/").rstrip("/")
+
+
+def _atlas_leaf_path(path: Optional[str]) -> Optional[str]:
+    """Return a monorepo-rooted Atlas package path for leaf-relative refs.
+
+    Shadow receipts often cite Atlas package paths as authors saw them
+    from the package root (``core/...``, ``scripts/...``,
+    ``schema_v0.2.sql``). Git snapshot checks run from the monorepo root.
+    This helper tries the canonical monorepo path before declaring the
+    source missing. Paths that are already monorepo-rooted are preserved.
+    """
+    norm = _normalize_git_path(path)
+    if not norm:
+        return None
+    if norm.startswith(_ATLAS_LEAF_PREFIX):
+        return norm
+    if norm.startswith(_ATLAS_DOC_ALIAS_PREFIX):
+        return _ATLAS_LEAF_PREFIX + norm[len(_ATLAS_DOC_ALIAS_PREFIX):]
+    if norm.startswith(("core/", "docs/", "eval/", "memory/", "scripts/")):
+        return _ATLAS_LEAF_PREFIX + norm
+    if norm in {"schema_v0.2.sql", "Makefile", "README.md", "BACKLOG.md",
+                "CHANGELOG.md", "STATE.md", "ARCHITECTURE.md", "CLAUDE.md"}:
+        return _ATLAS_LEAF_PREFIX + norm
+    return None
+
+
+def _candidate_paths(path: Optional[str]) -> list[str]:
+    norm = _normalize_git_path(path)
+    out: list[str] = []
+    if norm:
+        out.append(norm)
+    leaf = _atlas_leaf_path(norm)
+    if leaf and leaf not in out:
+        out.append(leaf)
+    return out
 
 
 def _resolve_at_commit(
@@ -94,18 +142,27 @@ def _resolve_at_commit(
             source_lines=source_lines,
         )
 
-    body = doc_resolver_mod._git_show_file(
-        Path(repo_path),
-        commit,
-        path,
-        _subprocess_run=_subprocess_run,
-    )
+    tried: list[str] = []
+    body = None
+    resolved_path = _normalize_git_path(path)
+    for candidate in _candidate_paths(path):
+        tried.append(candidate)
+        body = doc_resolver_mod._git_show_file(
+            Path(repo_path),
+            commit,
+            candidate,
+            _subprocess_run=_subprocess_run,
+        )
+        if body is not None:
+            resolved_path = candidate
+            break
     if body is None:
         return CodeSnapshotResult(
             status=source_missing_status,
-            path=path,
+            path=_normalize_git_path(path),
             commit=commit,
             source_lines=source_lines,
+            warnings=[f"git_show_failed: tried={','.join(tried)}"] if tried else [],
         )
 
     sliced = doc_resolver_mod._slice_lines(body, line_range)
@@ -114,7 +171,7 @@ def _resolve_at_commit(
     hash_match = bool(expected_sha256 and resolved == expected_sha256)
     return CodeSnapshotResult(
         status=match_status if hash_match else mismatch_status,
-        path=path,
+        path=resolved_path,
         commit=commit,
         source_lines=source_lines,
         resolved_sha256=resolved,
