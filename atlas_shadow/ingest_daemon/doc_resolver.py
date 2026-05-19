@@ -217,6 +217,37 @@ def _build_doc_id(repo: str, commit: str, path: str) -> str:
     return f"{repo}@{commit}:{path}"
 
 
+_ATLAS_LEAF_PREFIX = "products/tandem/packages/python/atlas/"
+
+
+def _doc_path_variants(path: str) -> list[str]:
+    """Return conservative repo-relative variants for a receipt doc path.
+
+    Packet receipts sometimes cite paths from the Atlas leaf perspective,
+    e.g. ``Atlas/docs/specs/instruction-memory-v1.md``. Shadow doc ingest
+    stores the same file at the repo-root relpath
+    ``products/tandem/packages/python/atlas/docs/specs/...``. Try the
+    receipt path first for exact compatibility, then deterministic aliases.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return []
+
+    variants: list[str] = []
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip().lstrip("/")
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+
+    add(raw)
+    if raw.startswith("Atlas/"):
+        add(_ATLAS_LEAF_PREFIX + raw.removeprefix("Atlas/"))
+    if raw.startswith(_ATLAS_LEAF_PREFIX):
+        add("Atlas/" + raw.removeprefix(_ATLAS_LEAF_PREFIX))
+    return variants
+
+
 def _pick_chunk_for_lines(
     chunks: list[dict[str, Any]],
     oracle_excerpt: str,
@@ -415,6 +446,8 @@ def resolve_doc_receipt(
             warnings=warnings,
         )
 
+    path_variants = _doc_path_variants(src_path)
+
     # ---- Tier 1: primary DB lookup -----------------------------------------
     if _connect is None:
         try:
@@ -429,20 +462,29 @@ def resolve_doc_receipt(
             + ("psycopg2 not installed" if _connect is None else "no DB URL configured")
         )
     else:
-        try:
-            lookup = _primary_lookup_db(
-                org_id=org_id,
-                repo=repo,
-                commit=commit,
-                path=src_path,
-                oracle_excerpt=receipt.oracle_excerpt or "",
-                _connect=_connect,
-                db_url=db_url,
-            )
-        except Exception as exc:
-            # Per plan: psycopg errors -> unresolved + warning. No retry.
-            warnings.append(f"db_error: {type(exc).__name__}: {exc}")
-            lookup = None
+        lookup = None
+        lookup_path = src_path
+        for candidate_path in path_variants:
+            try:
+                lookup = _primary_lookup_db(
+                    org_id=org_id,
+                    repo=repo,
+                    commit=commit,
+                    path=candidate_path,
+                    oracle_excerpt=receipt.oracle_excerpt or "",
+                    _connect=_connect,
+                    db_url=db_url,
+                )
+            except Exception as exc:
+                # Per plan: psycopg errors -> unresolved + warning. No retry.
+                warnings.append(f"db_error: {type(exc).__name__}: {exc}")
+                lookup = None
+                break
+            if lookup is not None:
+                lookup_path = candidate_path
+                if lookup_path != src_path:
+                    warnings.append(f"path_alias_resolved:{src_path}->{lookup_path}")
+                break
         if lookup is not None:
             chunk = _pick_chunk_for_lines(
                 lookup["chunks"], receipt.oracle_excerpt or ""
@@ -461,7 +503,7 @@ def resolve_doc_receipt(
                 revision_binding=BINDING_DB_COMMIT_SCOPED,
                 artifact_id=lookup["artifact_id"],
                 chunk_id=chunk["chunk_id"] if chunk else None,
-                path=src_path,
+                path=lookup_path,
                 heading_path=list(heading_path) if heading_path else None,
                 heading_level=int(heading_level) if isinstance(heading_level, int) else None,
                 raw_text=chunk["raw_text"] if chunk else "",
@@ -471,12 +513,20 @@ def resolve_doc_receipt(
             )
 
     # ---- Tier 2: git_receipt_snapshot fallback ----------------------------
-    body = _git_show_file(
-        repo_path,
-        commit,
-        src_path,
-        _subprocess_run=_subprocess_run,
-    )
+    body = None
+    git_path = src_path
+    for candidate_path in path_variants:
+        body = _git_show_file(
+            repo_path,
+            commit,
+            candidate_path,
+            _subprocess_run=_subprocess_run,
+        )
+        if body is not None:
+            git_path = candidate_path
+            if git_path != src_path:
+                warnings.append(f"path_alias_resolved:{src_path}->{git_path}")
+            break
     if body is None:
         warnings.append("git_show_failed_or_repo_missing")
         return DocResolverResult(
@@ -504,7 +554,7 @@ def resolve_doc_receipt(
             return DocResolverResult(
                 status=STATUS_UNRESOLVED,
                 revision_binding=BINDING_NONE,
-                path=src_path,
+                path=git_path,
                 warnings=warnings,
             )
     else:
@@ -513,7 +563,7 @@ def resolve_doc_receipt(
     return DocResolverResult(
         status=STATUS_GIT_RECEIPT_SNAPSHOT,
         revision_binding=BINDING_GIT_RECEIPT_SNAPSHOT,
-        path=src_path,
+        path=git_path,
         raw_text=sliced,
         warnings=warnings,
     )

@@ -488,6 +488,142 @@ def test_doc_resolver_builds_correct_doc_id_format(monkeypatch):
     )
 
 
+def test_doc_resolver_aliases_atlas_leaf_doc_path_to_repo_root(monkeypatch):
+    """Receipts may cite `Atlas/...` leaf paths while shadow ingest stores
+    repo-root relpaths under `products/tandem/packages/python/atlas/...`.
+    The resolver should try the raw path first, then the canonical alias.
+    """
+    monkeypatch.setenv("ATLAS_DB_URL", "postgresql://test/fake")
+
+    raw_path = "Atlas/docs/specs/instruction-memory-v1.md"
+    aliased_path = (
+        "products/tandem/packages/python/atlas/"
+        "docs/specs/instruction-memory-v1.md"
+    )
+    commit = "deadbeef" * 5
+    raw_doc_id = f"{TEST_REPO}@{commit}:{raw_path}"
+    aliased_doc_id = f"{TEST_REPO}@{commit}:{aliased_path}"
+    chunk_text = "## Capture CLI\n\nThe Q13 answer span lives here.\n"
+
+    class _AliasCursor:
+        def __init__(self, parent):
+            self.parent = parent
+            self._last = ""
+            self._params = None
+
+        def execute(self, query, params=None):
+            self._last = query
+            self._params = params
+            self.parent.doc_ids.append(params[1] if params and "FROM artifacts" in query else None)
+
+        def fetchone(self):
+            if "FROM artifacts" in self._last and self._params[1] == aliased_doc_id:
+                return ("artifact-1", {"chunk_headings": {
+                    "0": {"heading_path": ["Capture CLI"], "heading_level": 2},
+                }})
+            return None
+
+        def fetchall(self):
+            if "FROM artifact_chunks" in self._last:
+                return [("chunk-1", 0, chunk_text, 0, len(chunk_text))]
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _AliasConnect:
+        def __init__(self):
+            self.doc_ids = []
+
+        def __call__(self, *args, **kwargs):
+            parent = self
+
+            class _Conn:
+                def cursor(self):
+                    return _AliasCursor(parent)
+
+                def close(self):
+                    pass
+
+            return _Conn()
+
+    connect = _AliasConnect()
+    receipt = _mk_doc_receipt(
+        source_path=raw_path,
+        source_commit=commit,
+        oracle_excerpt="The Q13 answer span lives here.",
+    )
+
+    result = doc_resolver_mod.resolve_doc_receipt(
+        receipt,
+        org_id=TEST_ORG_ID,
+        repo=TEST_REPO,
+        repo_path=Path("/nonexistent"),
+        _connect=connect,
+    )
+
+    assert result.status == doc_resolver_mod.STATUS_DB_COMMIT_SCOPED
+    assert result.path == aliased_path
+    assert result.chunk_id == "chunk-1"
+    assert result.heading_path == ["Capture CLI"]
+    assert raw_doc_id in connect.doc_ids
+    assert aliased_doc_id in connect.doc_ids
+    assert any("path_alias_resolved" in w for w in result.warnings)
+
+
+def test_doc_resolver_git_fallback_uses_atlas_leaf_alias(tmp_path, monkeypatch):
+    """The same `Atlas/...` alias should work for the git snapshot
+    fallback when the DB lookup misses."""
+    monkeypatch.setenv("ATLAS_DB_URL", "postgresql://test/fake")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, timeout=10)
+    aliased = repo / "products/tandem/packages/python/atlas/docs/specs/instruction-memory-v1.md"
+    aliased.parent.mkdir(parents=True)
+    body = "one\nCapture CLI\nthree\n"
+    aliased.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    subprocess.run(["git", "commit", "-q", "-m", "doc"], cwd=repo, check=True, timeout=10)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    ).stdout.strip()
+
+    canon = doc_resolver_mod._excerpt_canonical("Capture CLI", indent="")
+    expected_sha = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    receipt = _mk_doc_receipt(
+        source_path="Atlas/docs/specs/instruction-memory-v1.md",
+        source_commit=commit,
+        source_lines="2",
+        excerpt_sha256=expected_sha,
+    )
+
+    result = doc_resolver_mod.resolve_doc_receipt(
+        receipt,
+        org_id=TEST_ORG_ID,
+        repo=TEST_REPO,
+        repo_path=repo,
+        _connect=_fake_conn(None, []),
+    )
+
+    assert result.status == doc_resolver_mod.STATUS_GIT_RECEIPT_SNAPSHOT
+    assert result.path == (
+        "products/tandem/packages/python/atlas/"
+        "docs/specs/instruction-memory-v1.md"
+    )
+    assert result.raw_text == "Capture CLI"
+    assert any("path_alias_resolved" in w for w in result.warnings)
+
+
 def test_doc_resolver_org_id_is_first_where_predicate(monkeypatch):
     """Both primary queries must scope `org_id` as the FIRST WHERE
     predicate (mirrors --org-id required everywhere; prevents accidental
