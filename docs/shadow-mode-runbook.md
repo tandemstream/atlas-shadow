@@ -230,6 +230,27 @@ no_match rows get `score_status: "skipped_receipt_stale"` +
 drops them from BOTH numerator and denominator so the score reflects
 retrieval performance, not receipt drift.
 
+**Raw retrieval diagnostics (PR #16):** Every code-path row also
+carries the workspace_atlas_query response shape so downstream
+classifiers can analyze atlas's actual retrieval plan without
+re-issuing queries:
+
+- `atlas_retrieval_plan` — atlas's plan dict (`lanes_run`,
+  `lanes_skipped`, `boosts`, `lane_quotas_applied`, `path_anchors`,
+  `symbol_anchors`, …). Persisted untouched.
+- `atlas_citation_locations` — first 20 citations in compact
+  `"path:line_start-line_end"` form (bare path when no lines).
+- `atlas_citation_count` — full untruncated total so consumers can
+  tell when the head was sampled.
+- `atlas_reranker_candidates_considered` — how many candidates the
+  reranker scored. Useful for fuzzy-lane "candidate set was tiny"
+  diagnostics.
+- `atlas_reranker_top_k_count` — how many of those made the top-k cut.
+
+doc_resolver rows carry these as None / empty (they don't go through
+workspace_atlas_query). All fields are also None for pre-PR-16
+artifacts — back-compat.
+
 **Two snapshot fields tell the receipt-vs-grading-commit story:**
 
 - `source_snapshot_status=git_source_hash_match` (PR #13) means **the

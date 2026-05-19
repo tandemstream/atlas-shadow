@@ -2355,6 +2355,226 @@ def test_grading_summary_back_compat_no_new_fields():
     assert s.clean_pass_pct == 100
 
 
+# ─── PR #16: raw_result diagnostics threading ─────────────────────────
+
+
+def test_atlas_raw_result_diagnostics_extracts_full_payload():
+    """Happy path: a complete raw_result yields all five fields
+    populated."""
+    raw = {
+        "citations": [
+            {"file_path": "core/ai.py", "line_start": 100, "line_end": 120},
+            {"file_path": "core/query.py", "line_start": 200, "line_end": 250},
+            {"file_path": "core/util.py"},  # no lines
+        ],
+        "retrieval_plan": {
+            "lanes_run": ["symbol_exact", "vector"],
+            "boosts": ["symbol_exact"],
+        },
+        "reranker_trace": {
+            "candidates_considered": 56,
+            "top_k": [{"chunk": {}}, {"chunk": {}}, {"chunk": {}}],
+        },
+    }
+    out = grader_service_mod._atlas_raw_result_diagnostics(raw)
+    assert out["retrieval_plan"]["lanes_run"] == ["symbol_exact", "vector"]
+    assert out["citation_locations"] == [
+        "core/ai.py:100-120",
+        "core/query.py:200-250",
+        "core/util.py",  # bare path when lines absent
+    ]
+    assert out["citation_count"] == 3
+    assert out["reranker_candidates_considered"] == 56
+    assert out["reranker_top_k_count"] == 3
+
+
+def test_atlas_raw_result_diagnostics_handles_none():
+    """A None raw_result (doc_resolver path; or a runner that didn't
+    pass raw_result through) returns all-Nones / empty list."""
+    out = grader_service_mod._atlas_raw_result_diagnostics(None)
+    assert out["retrieval_plan"] is None
+    assert out["citation_locations"] == []
+    assert out["citation_count"] is None
+    assert out["reranker_candidates_considered"] is None
+    assert out["reranker_top_k_count"] is None
+
+
+def test_atlas_raw_result_diagnostics_handles_malformed_shapes():
+    """Robustness: any field that isn't the expected shape collapses
+    to safe defaults rather than raising. The grader's exception path
+    is the safety net but diagnostics extraction should never itself
+    be the cause of a row-construction failure."""
+    raw = {
+        "citations": "not-a-list",
+        "retrieval_plan": "not-a-dict",
+        "reranker_trace": ["not-a-dict"],
+    }
+    out = grader_service_mod._atlas_raw_result_diagnostics(raw)
+    assert out["retrieval_plan"] is None
+    assert out["citation_locations"] == []
+    assert out["citation_count"] is None
+    assert out["reranker_candidates_considered"] is None
+    assert out["reranker_top_k_count"] is None
+
+
+def test_atlas_raw_result_diagnostics_truncates_citations_to_20():
+    """Artifact JSON stays tight: only the first 20 citations land in
+    the compact list, but citation_count records the full total so
+    consumers can tell when truncation happened."""
+    raw = {
+        "citations": [
+            {"file_path": f"f{i}.py", "line_start": i, "line_end": i + 1}
+            for i in range(50)
+        ],
+    }
+    out = grader_service_mod._atlas_raw_result_diagnostics(raw)
+    assert len(out["citation_locations"]) == 20
+    assert out["citation_count"] == 50
+
+
+def test_atlas_raw_result_diagnostics_skips_non_dict_citation_entries():
+    """A citation entry that isn't a dict gets dropped, doesn't raise,
+    doesn't shift the citation_count (which is the raw length)."""
+    raw = {
+        "citations": [
+            {"file_path": "a.py", "line_start": 1, "line_end": 2},
+            "string-instead-of-dict",
+            {"file_path": "b.py", "line_start": 3, "line_end": 4},
+        ],
+    }
+    out = grader_service_mod._atlas_raw_result_diagnostics(raw)
+    assert out["citation_locations"] == ["a.py:1-2", "b.py:3-4"]
+    assert out["citation_count"] == 3  # all three contribute to the count
+
+
+def test_grade_one_populates_raw_result_fields_on_code_path(daemon_config, tmp_path):
+    """End-to-end on the code path: when the runner stub returns a
+    raw_result with retrieval_plan + citations + reranker_trace,
+    those fields land on the row."""
+    from atlas_shadow.runner import AtlasResponse, ShadowResponse
+
+    def runner_with_raw_result(receipt, **kwargs):
+        return ShadowResponse(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            fixture_id="pr-packet",
+            atlas_response=AtlasResponse(
+                tool_used=kwargs.get("tool", "find_code"),
+                answer_text="stub",
+                raw_result={
+                    "citations": [
+                        {"file_path": "core/ai.py", "line_start": 50, "line_end": 75},
+                    ],
+                    "retrieval_plan": {"lanes_run": ["symbol_exact"]},
+                    "reranker_trace": {
+                        "candidates_considered": 42,
+                        "top_k": [{}, {}],
+                    },
+                },
+                evidence_keys=[],
+                atlas_latency_ms=10,
+                request_id="r",
+                commit="",
+            ),
+            wall_time_ms=20,
+            captured_at="2026-05-19T00:00:00Z",
+            org_id=kwargs.get("org_id", ""),
+            tool=kwargs.get("tool", "find_code"),
+        )
+
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="q",
+        source_path="core/ai.py",
+        source_lines="50-75",
+        source_commit=BASE_SHA,
+        oracle_excerpt="e",
+        oracle_claim="c",
+        command_text="scripts/qa_lookup.sh sed-range core/ai.py 50 75",
+    )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _runner_run_one=runner_with_raw_result,
+        _grader_grade=_fake_grader(grade="full_match", confidence=0.9, rationale="ok"),
+    )
+    assert row.atlas_retrieval_plan == {"lanes_run": ["symbol_exact"]}
+    assert row.atlas_citation_locations == ["core/ai.py:50-75"]
+    assert row.atlas_citation_count == 1
+    assert row.atlas_reranker_candidates_considered == 42
+    assert row.atlas_reranker_top_k_count == 2
+
+
+def test_grade_one_raw_result_none_on_doc_resolver_path(daemon_config):
+    """doc_resolver path doesn't go through workspace_atlas_query, so
+    raw_result fields land as the explicit "no diagnostics available"
+    defaults (None / empty list)."""
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="q",
+        source_path="Atlas/docs/spec.md",  # .md routes to doc_resolver
+        source_lines="1-20",
+        source_commit=BASE_SHA,
+        oracle_excerpt="e",
+        oracle_claim="c",
+    )
+
+    def stub_resolver(receipt, **_kwargs):
+        from atlas_shadow.ingest_daemon.doc_resolver import DocResolverResult
+        return DocResolverResult(
+            status="ok",
+            revision_binding="db_commit_scoped",
+            raw_text="stub doc",
+            artifact_id=None,
+            chunk_id=None,
+            heading_path=None,
+            warnings=[],
+        )
+
+    row = grader_service_mod._grade_one_receipt(
+        cfg=daemon_config,
+        receipt=receipt,
+        code_revision_id="11111111-1111-1111-1111-111111111111",
+        repo_full_name="tandemstream/core",
+        _doc_resolver=stub_resolver,
+        _grader_grade=_fake_grader(grade="full_match", confidence=0.9, rationale="ok"),
+    )
+    assert row.tool == "doc_resolver"
+    assert row.atlas_retrieval_plan is None
+    assert row.atlas_citation_locations == []
+    assert row.atlas_citation_count is None
+    assert row.atlas_reranker_candidates_considered is None
+    assert row.atlas_reranker_top_k_count is None
+
+
+def test_serialize_row_includes_pr16_fields():
+    """The per-packet JSON artifact must carry the new raw_result
+    fields so the diagnostic classifier can consume them."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q1", question="q1", grade="no_match",
+        confidence=0.1, rationale="r", tool="find_code",
+        atlas_retrieval_plan={"lanes_run": ["vector"]},
+        atlas_citation_locations=["core/ai.py:1-10", "core/q.py:50-60"],
+        atlas_citation_count=2,
+        atlas_reranker_candidates_considered=10,
+        atlas_reranker_top_k_count=5,
+    )
+    out = gs._serialize_row(row)
+    assert out["atlas_retrieval_plan"] == {"lanes_run": ["vector"]}
+    assert out["atlas_citation_locations"] == [
+        "core/ai.py:1-10", "core/q.py:50-60",
+    ]
+    assert out["atlas_citation_count"] == 2
+    assert out["atlas_reranker_candidates_considered"] == 10
+    assert out["atlas_reranker_top_k_count"] == 5
+
+
 def test_serialize_row_includes_pr14_fields():
     """The per-packet JSON artifact must carry lane / score_status /
     clean_excluded_reason so downstream classifiers can apply the
