@@ -28,6 +28,7 @@ UNRESOLVED_STATUSES = {
     "skipped_doc_corpus_excluded",
     "skipped_unavailable_source_ref",
     "skipped_receipt_stale",
+    "skipped_revision_not_indexed",
 }
 
 
@@ -223,6 +224,8 @@ def unresolved_reason(row: dict[str, Any]) -> str:
         return "receipt_source_missing"
     if status == "skipped_unavailable_source_ref":
         return "unavailable_source_ref"
+    if status == "skipped_revision_not_indexed":
+        return "revision_not_indexed"
     return status or "unresolved"
 
 

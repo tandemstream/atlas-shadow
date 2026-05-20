@@ -138,6 +138,12 @@ class ReceiptGradingRow:
     # operators answer "did this run get faster because Atlas
     # improved, or because the cache hid the work?"
     atlas_cache_status: Optional[str] = None
+    # Receipt-SHA pinning: actual Atlas revision/commit used for this row.
+    # In live PR-gate mode this matches the event base revision. In offline
+    # receipt-source baselines it can differ per receipt so Planner and Atlas
+    # are scored against the same source snapshot.
+    atlas_code_revision_id: Optional[str] = None
+    atlas_commit_sha: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +286,19 @@ class GradingSummary:
         return sum(
             1 for r in self.rows
             if r.score_status == "skipped_command_snapshot"
+        )
+
+    @property
+    def skipped_revision_not_indexed_count(self) -> int:
+        """Rows whose receipt source SHA is not present in the ingest ledger.
+
+        These are excluded from clean accuracy because Atlas was not asked at
+        a matching historical revision; the fix is to ingest that SHA and
+        rerun, not to tune retrieval.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_revision_not_indexed"
         )
 
     # PR atlas-shadow-query-cache-v1: cache observability counts.

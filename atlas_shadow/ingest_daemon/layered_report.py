@@ -500,11 +500,11 @@ def render_run_summary_markdown(reports: list[LayeredReport]) -> str:
     ):
         lines.append("")
         lines.append(
-            "Atlas Evidence is higher than Planner Evidence on this run. Under "
-            "`run_commit` benchmarking, that usually means the planner is being "
-            "charged for receipt drift while Atlas retrieves the current corpus. "
-            "Treat Planner-vs-Atlas gaps as corpus-alignment-sensitive until "
-            "`receipt_commit` grading is available."
+            "Atlas Evidence is higher than Planner Evidence on this run. Treat "
+            "that gap as an attribution signal, not a simple upper-bound claim: "
+            "inspect Planner invalid evidence rows and the run's revision pinning "
+            "mode before deciding whether the gap reflects authoring drift, "
+            "receipt defects, or true retrieval quality."
         )
     return "\n".join(lines) + "\n"
 
