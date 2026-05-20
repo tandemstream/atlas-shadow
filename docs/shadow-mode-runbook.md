@@ -678,6 +678,83 @@ something, the receipt times out and grades as `atlas_not_found` with
 a timeout marker. Check `.ingest-daemon.log` for the receipt that
 stalled.
 
+### Generate the layered-grading pilot report
+
+The Phase-1 layered-grading pilot overlays one packet's batch artifact
+with a typed oracle spec. It is intentionally packet-scoped: use it to
+judge whether the evidence-oracle / synthesis-oracle shape is useful
+before migrating every Q&A file.
+
+```bash
+.venv/bin/python -m atlas_shadow.cli shadow-layered-report \
+  --packet-json shadow-runs/<baseline>/packets/2026-05-13-atlas-evidence-expansion-v1.json \
+  --oracle-spec docs/pilots/2026-05-13-atlas-evidence-expansion-v1-layered-oracle.yaml
+```
+
+The command writes:
+
+- `layered-shadow-report.md` — human-readable packet report.
+- `layered-shadow-report.json` — structured report for future dashboard
+  integration.
+
+The pilot separates:
+
+- Evidence Oracle coverage (`evidence verified + context verified +
+  command verified + unresolved`). Only the evidence bucket is the
+  shared Planner/Atlas evidence denominator.
+- Planner Evidence
+- Planner Synthesis
+- Atlas Evidence
+- Atlas Synthesis
+- Cost
+
+Unresolved oracle rows lower benchmark confidence; they do not get
+subtracted from Planner or Atlas correctness denominators.
+
+### Migrate historical packets to layered grading
+
+Historical packets can use sidecar oracle specs during migration. New
+packets should put typed oracle metadata directly in `02-qna-log.md`
+instead of creating a sidecar.
+
+Generate missing historical sidecars and a migration index:
+
+```bash
+python3 scripts/generate_layered_oracle_specs.py \
+  --run-dir shadow-runs/<baseline>
+```
+
+Render every packet report plus the run-level layered summary:
+
+```bash
+.venv/bin/python -m atlas_shadow.cli shadow-layered-batch \
+  --run-dir shadow-runs/<baseline> \
+  --oracle-dir docs/pilots
+```
+
+Offline baselines should be generated with the batch grader's default
+`--revision-pin-mode receipt-source`. That mode resolves every code
+receipt's `source_commit` to the matching Atlas `code_revision_id` before
+querying Atlas, so Planner Evidence and Atlas Evidence use the same
+source snapshot. Live PR grading still uses `event-base` semantics.
+
+If a historical `source_commit` has not been ingested, the receipt is
+excluded as `score_status=skipped_revision_not_indexed` /
+`clean_excluded_reason=revision_not_indexed`. Replay-ingest that commit
+before rerunning the baseline if the row should be measured.
+
+The batch command writes:
+
+- `shadow-runs/<baseline>/_layered/<packet>/layered-shadow-report.md`
+- `shadow-runs/<baseline>/_layered/<packet>/layered-shadow-report.json`
+- `shadow-runs/<baseline>/_layered/layered-summary.md`
+- `shadow-runs/<baseline>/_layered/layered-summary.json`
+
+Generated sidecars are marked `migration_status: auto_drafted`. Their
+evidence buckets are useful immediately, but their synthesis oracles are
+draft placeholders until a packet owner writes the actual ideal answer
+and rubric.
+
 ### Grading produces `revision_not_indexed` for every receipt
 
 The `--commit-sha` you passed isn't in the daemon's ledger. Pre-ingest:

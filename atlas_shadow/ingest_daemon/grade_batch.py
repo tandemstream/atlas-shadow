@@ -369,6 +369,7 @@ def grade_one_packet(
     core_repo_path: Path,
     atlas_query_cache: Any = None,
     max_workers: Optional[int] = None,
+    revision_pin_mode: str = "receipt-source",
     _run_pr_grading: Callable = gs.run_pr_grading,
     _read_file_at_commit: Callable = _read_file_via_git_show,
 ) -> dict[str, Any]:
@@ -413,6 +414,7 @@ def grade_one_packet(
         github_token=github_token,
         atlas_query_cache=atlas_query_cache,
         max_workers=max_workers,
+        revision_pin_mode=revision_pin_mode,
         _fetch_pr_files=_fetch_for_this_packet,
         _fetch_file_at_ref=_read_file_local,
         _post_pending=_noop_post_pending,
@@ -603,6 +605,13 @@ def _summary_atlas_cache_disabled_count(summary) -> int:
     if isinstance(summary, dict):
         return int(summary.get("atlas_cache_disabled_count", 0) or 0)
     return getattr(summary, "atlas_cache_disabled_count", 0) or 0
+
+
+def _summary_skipped_revision_not_indexed_count(summary) -> int:
+    """Receipt-SHA pinning: historical SHA missing from ingest ledger."""
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_revision_not_indexed_count", 0) or 0)
+    return getattr(summary, "skipped_revision_not_indexed_count", 0) or 0
 
 
 # ─── Per-evidence-type rollup (PR-evidence-breakdown) ────────────────
@@ -841,6 +850,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_skipped_doc_corpus_excluded = 0
     # PR #20: command-snapshot lane total.
     total_skipped_command_snapshot = 0
+    total_skipped_revision_not_indexed = 0
     # PR atlas-shadow-query-cache-v1: cache observability totals.
     # Together they answer "did this run get faster because Atlas
     # improved, or because the cache hid the work?"
@@ -866,6 +876,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_unavailable = 0
         packet_corpus_excluded = 0
         packet_command_snapshot = 0
+        packet_revision_not_indexed = 0
         packet_atlas_cache_hits = 0
         packet_atlas_cache_misses = 0
         packet_atlas_cache_disabled = 0
@@ -882,6 +893,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             packet_unavailable += _summary_skipped_unavailable_source_ref_count(summary)
             packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
             packet_command_snapshot += _summary_skipped_command_snapshot_count(summary)
+            packet_revision_not_indexed += _summary_skipped_revision_not_indexed_count(summary)
             packet_atlas_cache_hits += _summary_atlas_cache_hit_count(summary)
             packet_atlas_cache_misses += _summary_atlas_cache_miss_count(summary)
             packet_atlas_cache_disabled += _summary_atlas_cache_disabled_count(summary)
@@ -901,6 +913,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         total_skipped_unavailable_source_ref += packet_unavailable
         total_skipped_doc_corpus_excluded += packet_corpus_excluded
         total_skipped_command_snapshot += packet_command_snapshot
+        total_skipped_revision_not_indexed += packet_revision_not_indexed
         total_atlas_cache_hits += packet_atlas_cache_hits
         total_atlas_cache_misses += packet_atlas_cache_misses
         total_atlas_cache_disabled += packet_atlas_cache_disabled
@@ -927,6 +940,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "skipped_doc_corpus_excluded": packet_corpus_excluded,
             # PR #20: command_snapshot lane per-packet count.
             "skipped_command_snapshot": packet_command_snapshot,
+            "skipped_revision_not_indexed": packet_revision_not_indexed,
             # PR atlas-shadow-query-cache-v1: cache observability
             # per packet.
             "atlas_cache_hits": packet_atlas_cache_hits,
@@ -977,6 +991,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_skipped_doc_corpus_excluded": total_skipped_doc_corpus_excluded,
         # PR #20: command-snapshot lane total.
         "total_skipped_command_snapshot": total_skipped_command_snapshot,
+        "total_skipped_revision_not_indexed": total_skipped_revision_not_indexed,
         # PR atlas-shadow-query-cache-v1: per-run cache observability.
         # The three counters together answer "did this run get faster
         # because Atlas improved, or because the cache hid the work?"
@@ -1015,6 +1030,7 @@ def write_manifest(
     grader_backend: str,
     grader_model: str,
     packet_sha_mode: str = "run-commit",
+    revision_pin_mode: str = "receipt-source",
 ) -> Path:
     """Write ``output_dir/manifest.json`` with this run's summary.
 
@@ -1027,6 +1043,7 @@ def write_manifest(
         "commit_sha": commit_sha,
         "run_commit_sha": commit_sha,
         "packet_sha_mode": packet_sha_mode,
+        "revision_pin_mode": revision_pin_mode,
         "packet_base_shas": {
             outcome.get("packet_slug", "unknown"): outcome.get("base_sha")
             for outcome in packet_outcomes
@@ -1057,6 +1074,7 @@ def write_per_run_summary_md(
     *,
     commit_sha: str,
     packet_sha_mode: str = "run-commit",
+    revision_pin_mode: str = "receipt-source",
     packet_outcomes: list[dict[str, Any]],
     overall_pct: float,
     total_receipts: int,
@@ -1073,6 +1091,7 @@ def write_per_run_summary_md(
     total_skipped_doc_corpus_excluded: int = 0,
     # PR #20: command-snapshot lane skip total.
     total_skipped_command_snapshot: int = 0,
+    total_skipped_revision_not_indexed: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
@@ -1101,6 +1120,7 @@ def write_per_run_summary_md(
             (total_skipped_absence_search, "absence-search"),
             # PR #20: command-snapshot lane.
             (total_skipped_command_snapshot, "command-snapshot"),
+            (total_skipped_revision_not_indexed, "revision-not-indexed"),
         ]
         non_zero = [f"{n} {label}" for n, label in components if n > 0]
         breakdown = ", ".join(non_zero) if non_zero else "no breakdown"
@@ -1116,6 +1136,7 @@ def write_per_run_summary_md(
         "",
         f"- **Commit SHA:** `{commit_sha}`",
         f"- **Packet SHA mode:** `{packet_sha_mode}`",
+        f"- **Revision pin mode:** `{revision_pin_mode}`",
         f"- **Packets graded:** {len(packet_outcomes)}",
         f"- **Total receipts:** {total_receipts}",
         f"- **Raw correct:** {total_correct} ({overall_pct:.1f}%)",
@@ -1214,6 +1235,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         return 1
 
     packet_sha_mode = getattr(args, "packet_sha_mode", "run-commit")
+    revision_pin_mode = getattr(args, "revision_pin_mode", "receipt-source")
     packet_commit_shas = {
         qna_log: resolve_packet_commit_sha(
             core_repo_path,
@@ -1231,6 +1253,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
             "commit_sha": commit_sha,
             "run_commit_sha": commit_sha,
             "packet_sha_mode": packet_sha_mode,
+            "revision_pin_mode": revision_pin_mode,
             "packet_glob": args.packet_glob,
             "packets_matched": len(qna_logs),
             "packets": qna_logs,
@@ -1344,6 +1367,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 core_repo_path=core_repo_path,
                 atlas_query_cache=atlas_query_cache,
                 max_workers=effective_max_workers,
+                revision_pin_mode=revision_pin_mode,
             )
         except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
             partial_failures += 1
@@ -1358,6 +1382,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 "run_commit_sha": commit_sha,
                 "packet_base_sha": packet_commit_sha,
                 "packet_sha_mode": packet_sha_mode,
+                "revision_pin_mode": revision_pin_mode,
                 "pr_number": 0,
                 "repo_full_name": repo_full_name,
             }
@@ -1401,6 +1426,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         outcome.setdefault("run_commit_sha", commit_sha)
         outcome.setdefault("packet_base_sha", packet_commit_sha)
         outcome.setdefault("packet_sha_mode", packet_sha_mode)
+        outcome.setdefault("revision_pin_mode", revision_pin_mode)
         write_packet_artifact(outcome, output_dir)
         packet_outcomes.append(outcome)
 
@@ -1431,6 +1457,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         grader_backend=grader_backend,
         grader_model=grader_model,
         packet_sha_mode=packet_sha_mode,
+        revision_pin_mode=revision_pin_mode,
     )
     totals = _aggregate_run_totals(packet_outcomes)
     summary_path = write_per_run_summary_md(
@@ -1438,6 +1465,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         output_dir,
         commit_sha=commit_sha,
         packet_sha_mode=packet_sha_mode,
+        revision_pin_mode=revision_pin_mode,
         packet_outcomes=packet_outcomes,
         overall_pct=totals["overall_pct"],
         total_receipts=totals["total_receipts"],
@@ -1467,6 +1495,9 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         # PR #20: command-snapshot lane.
         total_skipped_command_snapshot=totals.get(
             "total_skipped_command_snapshot", 0
+        ),
+        total_skipped_revision_not_indexed=totals.get(
+            "total_skipped_revision_not_indexed", 0
         ),
     )
 
@@ -1537,6 +1568,21 @@ def build_subparser(subparsers) -> argparse.ArgumentParser:
             "before enabling historical modes (codex r1 PR #9 fix — the "
             "prior `created` default caused default batch runs to skip "
             "every packet)."
+        ),
+    )
+    p.add_argument(
+        "--revision-pin-mode",
+        choices=["receipt-source", "event-base"],
+        default="receipt-source",
+        help=(
+            "How to pin Atlas queries inside each packet. "
+            "'receipt-source' (default for offline baselines) looks up each "
+            "code receipt's source_commit in the ingest ledger and queries "
+            "that exact code_revision_id, so Planner and Atlas evidence are "
+            "scored against the same snapshot. Missing historical SHAs are "
+            "reported as skipped_revision_not_indexed. 'event-base' preserves "
+            "the live PR-gate behavior: every receipt uses the synthetic PR "
+            "base SHA selected by --packet-sha-mode."
         ),
     )
     p.add_argument(

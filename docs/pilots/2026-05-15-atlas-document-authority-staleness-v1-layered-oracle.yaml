@@ -1,0 +1,173 @@
+schema_version: 1
+packet_id: 2026-05-15-atlas-document-authority-staleness-v1
+title: 2026 05 15 Atlas Document Authority Staleness V1
+migration_status: hand_authored_synthesis
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-15-atlas-document-authority-staleness-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 10
+  verified_claim_count: 8
+  unresolved_claim_count: 2
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: document rows become CodePack facts
+  - qid: q2
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: claim-scoped document assessment exists
+  - qid: q3
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: claim policy distinguishes task status, runtime behavior, and design intent
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q4
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: CodePack report exposes adjacent-document tiers
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q5
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: DB report exposes tier counters
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: runtime-behavior CodePack fact regression test
+    oracle_failure_type: unavailable_source_ref
+  - qid: q7
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: evidence lookup ranks CodePack contamination tiers
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: evidence lookup ordering regression test
+    oracle_failure_type: unavailable_source_ref
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: code-reference lookup defaults to runtime behavior
+  - qid: q10
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: task status is reserved for status rows and task identifiers
+    planner_failure_type: current_benchmark_line_drift
+synthesis_oracle:
+  status: hand_authored
+  ideal_conclusion: >
+    The packet should conclude that document authority must distinguish
+    canonical runtime docs, stale packet/work docs, and code references, so
+    Atlas answers do not treat historical work notes as current product truth.
+  required_points:
+  - id: S1
+    text: The answer must identify canonical runtime/product docs as higher authority than docs/work artifacts.
+  - id: S2
+    text: The answer must explain how stale document evidence should be surfaced as uncertainty or context.
+  - id: S3
+    text: The answer must preserve code-reference lookup defaults and task/status vocabulary distinctions.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat docs/work evidence as current canonical documentation.
+  - id: F2
+    text: Do not collapse task status rows and task identifiers into the same authority class.
+  uncertainty_notes:
+  - id: U1
+    text: Some document authority questions are policy-heavy and should be scored with confidence caveats.
+  criteria:
+  - id: conclusion
+    label: Authority/staleness conclusion
+    points_possible: 1
+    planner_points: 1
+    atlas_points: 1
+    notes: Both should prioritize canonical current docs over historical workpacket notes.
+  - id: authority_ordering
+    label: Authority ordering explained
+    points_possible: 3
+    planner_points: 2
+    atlas_points: 3
+    planner_miss_class: current_benchmark_line_drift
+    notes: Must separate runtime/product docs, code references, and docs/work notes.
+  - id: stale_context
+    label: Stale context handled
+    points_possible: 3
+    planner_points: 2
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_present_answer_missed
+    notes: Stale docs should become uncertainty/context, not correctness misses.
+  - id: terminology_guard
+    label: Terminology guardrails
+    points_possible: 2
+    planner_points: 1
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    notes: Task status and task identifiers remain separate.

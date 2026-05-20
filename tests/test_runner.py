@@ -74,6 +74,82 @@ def test_build_atlas_query_argv_env_override_via_workspace_py_pair(monkeypatch):
     assert argv[2:5] == ["run", "atlas-query", "--"]
 
 
+def test_build_atlas_query_argv_prefers_daemon_query_script(tmp_path, monkeypatch):
+    """Modern core removed scripts.workspace_atlas_query; atlas-shadow should
+    use the daemon-owned workflow query script when that seam exists."""
+    monkeypatch.delenv("ATLAS_SHADOW_ATLAS_QUERY_CMD", raising=False)
+    monkeypatch.delenv("ATLAS_SHADOW_WORKSPACE_CMD", raising=False)
+    monkeypatch.delenv("WORKSPACE_PY", raising=False)
+    monkeypatch.delenv("WORKSPACE_VENV_PY", raising=False)
+
+    atlas_python = (
+        tmp_path
+        / "products"
+        / "tandem"
+        / "packages"
+        / "python"
+        / "atlas"
+        / ".venv"
+        / "bin"
+        / "python"
+    )
+    daemon_script = (
+        tmp_path
+        / "products"
+        / "tandem"
+        / "services"
+        / "tandem-daemon"
+        / "scripts"
+        / "atlas_workflow.py"
+    )
+    daemon_script.parent.mkdir(parents=True)
+    daemon_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    argv = runner_mod.build_atlas_query_argv(
+        question="q",
+        org_id="o",
+        atlas_python=str(atlas_python),
+    )
+
+    assert argv[:3] == [str(atlas_python), str(daemon_script), "query"]
+    assert "--question" in argv
+    assert "--org-id" in argv
+
+
+def test_build_atlas_query_argv_uses_daemon_venv_when_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_SHADOW_ATLAS_QUERY_CMD", raising=False)
+    monkeypatch.delenv("ATLAS_SHADOW_WORKSPACE_CMD", raising=False)
+    monkeypatch.delenv("WORKSPACE_PY", raising=False)
+    monkeypatch.delenv("WORKSPACE_VENV_PY", raising=False)
+
+    atlas_python = (
+        tmp_path
+        / "products"
+        / "tandem"
+        / "packages"
+        / "python"
+        / "atlas"
+        / ".venv"
+        / "bin"
+        / "python"
+    )
+    daemon_root = tmp_path / "products" / "tandem" / "services" / "tandem-daemon"
+    daemon_script = daemon_root / "scripts" / "atlas_workflow.py"
+    daemon_python = daemon_root / ".venv" / "bin" / "python"
+    daemon_script.parent.mkdir(parents=True)
+    daemon_python.parent.mkdir(parents=True)
+    daemon_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    daemon_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    argv = runner_mod.build_atlas_query_argv(
+        question="q",
+        org_id="o",
+        atlas_python=str(atlas_python),
+    )
+
+    assert argv[:3] == [str(daemon_python), str(daemon_script), "query"]
+
+
 def test_build_atlas_query_argv_passes_all_optional_kwargs():
     """Wrapper-drift check: ensure the runner threads every optional kwarg
     the wrapper accepts. Mirrors the dogfood-v2 reference's call shape."""
