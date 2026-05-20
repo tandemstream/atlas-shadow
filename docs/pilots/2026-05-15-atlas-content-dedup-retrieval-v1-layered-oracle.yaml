@@ -1,0 +1,164 @@
+schema_version: 1
+packet_id: 2026-05-15-atlas-content-dedup-retrieval-v1
+title: Atlas content dedup retrieval layered-grading sanity pilot
+
+cost:
+  claim_count: 12
+  verified_claim_count: 12
+  unresolved_claim_count: 0
+  tool_calls: null
+  model_calls: null
+  notes: >
+    Sanity pilot for command/source-heavy receipts. Most rows are
+    deterministic command evidence today; Phase 2 can decide whether
+    command rows should get a separate command score.
+
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: artifact_chunks carrier table shape and no content_hash today.
+    - qid: q2
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: documents table provides canonical content-hash precedent.
+    - qid: q3
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: document_carriers gives carrier-side junction precedent.
+    - qid: q4
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: artifact_versions content_hash precedent.
+    - qid: q5
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: chunk_embeddings currently keys by carrier chunk_id.
+    - qid: q6
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: chunk_artifact insert path currently lacks content_hash/upsert.
+    - qid: q7
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: code_chunker insert path is the second writer to touch.
+    - qid: q8
+      claim_type: design_context
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: D-054 docstring says memoization is not row-sharing.
+    - qid: q9
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: D-054 clone path bulk-inserts artifact_chunks and code_chunk_refs.
+    - qid: q10
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: code_chunk_refs chunk_id PK blocks shared carrier rows.
+    - qid: q11
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: file_memoization bulk insert is another carry-forward path.
+    - qid: q12
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: find_code public entry point is the downstream result assembly target.
+
+synthesis_oracle:
+  ideal_conclusion: >
+    Content dedup should use a sidecar canonical/carrier pattern rather
+    than rewriting artifact_chunks identity: preserve artifact_chunks and
+    code_chunk_refs behavior, add canonical chunk identity beside it, and
+    update all writer/reader surfaces deliberately.
+  required_points:
+    - id: S1
+      text: Preserve artifact_chunks as the carrier table.
+    - id: S2
+      text: Reuse the documents/document_carriers canonical/carrier precedent.
+    - id: S3
+      text: Include chunk_artifact and code_chunker writer paths.
+    - id: S4
+      text: Respect code_chunk_refs.chunk_id primary-key constraints.
+    - id: S5
+      text: Treat embedding reuse and retrieval-collapse as the real value, not storage savings alone.
+  forbidden_claims:
+    - id: F1
+      text: artifact_chunks can be row-shared directly without changing readers.
+    - id: F2
+      text: code_chunk_refs already supports multiple carriers per chunk_id.
+  uncertainty_notes:
+    - id: U1
+      text: This pilot's rows are command-verified, so Atlas Evidence is intentionally empty until command scoring is generalized.
+  criteria:
+    - id: conclusion
+      label: Correct conclusion
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      notes: Sidecar canonical/carrier architecture is the right conclusion.
+    - id: required_points
+      label: Required points covered
+      points_possible: 5
+      planner_points: 5
+      atlas_points: 5
+      notes: Command oracle confirms the structural substrate.
+    - id: forbidden_claims
+      label: Forbidden claims avoided
+      points_possible: 2
+      planner_points: 2
+      atlas_points: 2
+      notes: Do not propose in-place row sharing.
+    - id: uncertainty
+      label: Uncertainty handled
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      notes: Command-heavy packet should not masquerade as retrieval evidence.

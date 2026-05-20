@@ -1,0 +1,155 @@
+schema_version: 1
+packet_id: 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1
+title: 2026 05 14 Atlas Shadow Pre Merge Grading Gate V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-shadow-pre-merge-grading-gate-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 12
+  verified_claim_count: 7
+  unresolved_claim_count: 5
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: '`find_code` signature and `code_revision_id` parameter'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: '`scan_search` signature and `code_revision_id` parameter'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q3
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: '`workspace_atlas_query.py` tool routing (3-tool fan-out)'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q4
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`auto_route` heuristic (scan_search > find_code > answer priority)'
+  - qid: q5
+    claim_type: schema_fact
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: '`check_qa_receipts.py` schema and hard-mode behavior'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q6
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: No `pr_grader.py` in atlas module today (absence)
+  - qid: q7
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: '`--org-id` is required in `workspace_atlas_query.py` (no defaulting)'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`--code-revision-id` argparse entry in `workspace_atlas_query.py`'
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`_run_find_code` in `workspace_atlas_query.py` accepts `code_revision_id`'
+  - qid: q10
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`chunk_artifact` routes `.md` artifacts through `MarkdownChunker` and persists heading
+      metadata as `artifacts.metadata.chunk_headings` JSONB'
+  - qid: q11
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`MarkdownChunker.chunk_with_metadata` returns `(chunks, [{heading_path, heading_level},
+      ...])`'
+  - qid: q12
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`artifact_chunks` has `start_offset` / `end_offset` columns for chunk span persistence'
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-shadow-pre-merge-grading-gate-v1.
+    A packet owner should replace this with the intended planning conclusion before synthesis scores
+    are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=0, context=5, command=7.'
+  criteria: []

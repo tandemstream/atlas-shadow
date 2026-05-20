@@ -1,0 +1,266 @@
+schema_version: 1
+packet_id: 2026-05-14-atlas-shadow-substrate-enablers-v1
+title: 2026 05 14 Atlas Shadow Substrate Enablers V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-shadow-substrate-enablers-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 23
+  verified_claim_count: 12
+  unresolved_claim_count: 11
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: dogfood smoketest passes incremental=False (Spike A)
+    oracle_failure_type: unavailable_source_ref
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "artifact_chunks DDL \u2014 primary key, FKs, org-scoping (Spike B)"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q3
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "code_chunk_refs DDL \u2014 chunk_id PRIMARY KEY, FK topology (Spike B)"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q4
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: ingest_scip_upload incremental=True dispatch branch
+  - qid: q5
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "_write_chunks_with_refs_bulk \u2014 current raw INSERT path (no UPSERT)"
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: _find_parent_revision_id and _load_parent_chunk_map signatures
+    oracle_failure_type: unavailable_source_ref
+  - qid: q7
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: _DOC_EXTENSIONS definition in ingest.py
+    oracle_failure_type: unavailable_source_ref
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "MD dispatch path in ingest.py \u2014 dispatch_extractor call site"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q9
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: chunk_markdown_by_section reference implementation in dogfood_pass_b.py
+    oracle_failure_type: unavailable_source_ref
+  - qid: q10
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "dogfood argparse \u2014 no --incremental flag exists (Spike A continued)"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q11
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "code_chunker D-054 clone semantics \u2014 new chunk_id per clone, raw_text preserved"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q12
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: absence of content_hash column on artifact_chunks today
+  - qid: q13
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: absence of markdown_chunker.py in core/code today
+  - qid: q14
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: D5 daemon state file stores latest_code_revision_id (r2 patch receipt)
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q15
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: prior packet 2026-05-13-atlas-evidence-expansion-v1 explicitly deferred section chunking
+      to "packet 5" (r2 patch receipt)
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q16
+    claim_type: user_context
+    evidence_type: user_context
+    oracle_bucket: context
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "prod-DB size \u2014 design assumption (r2 patch: removed inline claim, replaced with assumption)"
+  - qid: q17
+    claim_type: schema_fact
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: code_revisions table has commit_sha TEXT NOT NULL column (r2 patch receipt for T3 parent_shas
+      bridge)
+  - qid: q18
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: core.ingest.pipeline.ingest is the canonical generic-doc ingest entry point with source_channel
+      parameter
+  - qid: q19
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: SOURCE_CHANNELS contains 'doc' and ingest_artifact validates source_channel against it
+  - qid: q20
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: chunk_artifact routes .md files through MarkdownChunker and writes metadata.chunk_headings
+  - qid: q21
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: chunk_for_doc dispatcher routes .md/.markdown to MarkdownChunker
+  - qid: q22
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: MarkdownChunker.chunk_with_metadata is the production heading-aware chunker
+  - qid: q23
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: SCIP-path MD dispatch explicitly does NOT write artifact_chunks today; reframed T1 fills
+      this gap by calling existing helpers
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-shadow-substrate-enablers-v1.
+    A packet owner should replace this with the intended planning conclusion before synthesis scores
+    are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=0, context=12, command=11.'
+  criteria: []

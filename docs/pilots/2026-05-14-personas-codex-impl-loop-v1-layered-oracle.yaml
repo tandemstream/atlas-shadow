@@ -1,0 +1,203 @@
+schema_version: 1
+packet_id: 2026-05-14-personas-codex-impl-loop-v1
+title: 2026 05 14 Personas Codex Impl Loop V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-personas-codex-impl-loop-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 17
+  verified_claim_count: 17
+  unresolved_claim_count: 0
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: review_courier.py exposes four argparse subcommands
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: HANDOFF_RE regex parses the Current Handoff yaml block
+  - qid: q3
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: HANDOFF_KEYS lists 14 keys with backward-compatible parsing
+  - qid: q4
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: run_codex_review invokes `codex exec` with read-only sandbox flags
+  - qid: q5
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: Branch-safety check refuses dispatch when worktree mismatches review-log branch
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`once` and `consult` subcommands default `--timeout` to 180 seconds'
+  - qid: q7
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: acquire_lock enforces single-lock-per-repo with O_EXCL on docs/.review-courier.lock
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: infer_verdict parses approve / approve_with_changes / block / timeout / informational
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "complete_handoff verdict\u2192state mapping"
+  - qid: q10
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: scoring_v1.review_budgets PR caps
+  - qid: q11
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "persona-shared.md \xA713 subprocess discipline"
+  - qid: q12
+    claim_type: design_context
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "implementation-plan-template.md \xA711 plan freeze rule"
+  - qid: q13
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: absence of cmd_impl / impl_courier / impl_dispatch in current courier surface
+  - qid: q14
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: absence of codex-implementer prompt + adjacency proof of three existing codex-* prompts
+  - qid: q15
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: parse_handoff_block stores yaml lines into a dict; render_handoff_block writes HANDOFF_KEYS
+      first then sorted extras
+  - qid: q17
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: review_courier needs_codex_review existing scan predicate
+  - qid: q16
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: implementer-prompt no-provider cost heuristic
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-14-personas-codex-impl-loop-v1. A packet
+    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=0, context=0, command=17.'
+  criteria: []

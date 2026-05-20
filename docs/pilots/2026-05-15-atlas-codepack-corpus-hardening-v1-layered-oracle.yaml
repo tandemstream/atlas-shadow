@@ -1,0 +1,183 @@
+schema_version: 1
+packet_id: 2026-05-15-atlas-codepack-corpus-hardening-v1
+title: 2026 05 15 Atlas Codepack Corpus Hardening V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-15-atlas-codepack-corpus-hardening-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 15
+  verified_claim_count: 0
+  unresolved_claim_count: 15
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: existing CodePack collector surface
+    oracle_failure_type: unavailable_source_ref
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: query text is currently discarded
+    oracle_failure_type: unavailable_source_ref
+  - qid: q3
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: DocumentPack source authority tiers exist
+    oracle_failure_type: unavailable_source_ref
+  - qid: q4
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: DocumentPack contamination tiers exist
+    oracle_failure_type: unavailable_source_ref
+  - qid: q5
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: DocumentPack code-reference evidence lookup exists
+    oracle_failure_type: unavailable_source_ref
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: current v3 metric shape is flat file precision and contamination
+    oracle_failure_type: unavailable_source_ref
+  - qid: q7
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: baseline v3 corpus report metrics
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: baseline v3 Q-112 gap
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: baseline v2 smoke report
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q10
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: baseline v3-a04 clean state
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q11
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: build_code_pack_corpus_report symbol exists
+    oracle_failure_type: unavailable_source_ref
+  - qid: q12
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: CodePack source_authority symbol exists
+    oracle_failure_type: unavailable_source_ref
+  - qid: q13
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: baseline v2 response count
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q14
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: CodePack alias resolver behavior
+    oracle_failure_type: unavailable_source_ref
+  - qid: q15
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: CodePack symbol filter behavior
+    oracle_failure_type: unavailable_source_ref
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-15-atlas-codepack-corpus-hardening-v1.
+    A packet owner should replace this with the intended planning conclusion before synthesis scores
+    are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=0, context=15, command=0.'
+  criteria: []
