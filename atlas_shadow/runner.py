@@ -1,4 +1,4 @@
-"""runner — shells out to `workspace run atlas-query` for each receipt.
+"""runner — shells out to Atlas's query surface for each receipt.
 
 The runner is the bridge between atlas-shadow (pure Python) and Atlas (the
 sibling `tandemstream/core` checkout). For each :class:`Receipt`, it builds
@@ -6,11 +6,11 @@ the `workspace run atlas-query -- ...` argv, runs it from the Atlas leaf,
 captures stdout, parses the JSON payload, and emits a per-question response
 record.
 
-The wrapper itself is implemented in
-`tandemstream/core` at
-`products/tandem/packages/python/atlas/scripts/workspace_atlas_query.py`.
-Its kwargs + output schema are mirrored here so any drift surfaces as a
-test failure rather than silent data corruption.
+Modern `tandemstream/core` exposes this through the daemon-owned workflow
+script at `products/tandem/services/tandem-daemon/scripts/atlas_workflow.py
+query`. Older checkouts used the Atlas-leaf module
+`scripts.workspace_atlas_query`. The kwargs + output schema are mirrored here
+so any drift surfaces as a test failure rather than silent data corruption.
 
 Default-mode runs use `continuous_shadow_org_id` from `shadow-config.yaml`.
 Out-of-band runs (`--commit <sha>`) invoke `atlas_shadow.ingest` first and
@@ -127,6 +127,27 @@ class ShadowResponse:
     atlas_cache_status: Optional[str] = None
 
 
+def _daemon_query_launcher_for_atlas_python(atlas_python: Optional[str]) -> Optional[list[str]]:
+    """Return the daemon-owned query launcher for modern core checkouts.
+
+    ``atlas_python`` is usually
+    ``<core>/products/tandem/packages/python/atlas/.venv/bin/python``. Walk
+    upward instead of hard-coding a parent depth so tests and alternate
+    worktree layouts stay cheap.
+    """
+    if not atlas_python:
+        return None
+    python_path = Path(atlas_python).expanduser()
+    for parent in [python_path.parent, *python_path.parents]:
+        script = parent / "products" / "tandem" / "services" / "tandem-daemon" / "scripts" / "atlas_workflow.py"
+        if script.is_file():
+            daemon_root = script.parent.parent
+            daemon_python = daemon_root / ".venv" / "bin" / "python"
+            launcher_python = daemon_python if daemon_python.exists() else python_path
+            return [str(launcher_python), str(script), "query"]
+    return None
+
+
 def _atlas_query_launcher(*, atlas_python: Optional[str] = None) -> list[str]:
     """Resolve the Atlas query launcher.
 
@@ -137,12 +158,13 @@ def _atlas_query_launcher(*, atlas_python: Optional[str] = None) -> list[str]:
       3. Legacy ``WORKSPACE_PY`` + ``WORKSPACE_VENV_PY`` env vars (Atlas
          shell-function convention) — if both set, return
          ``[$WORKSPACE_VENV_PY, $WORKSPACE_PY]``.
-      4. The Atlas leaf's Python interpreter with
+      4. Modern core's daemon-owned workflow query script, when present.
+      5. The Atlas leaf's Python interpreter with
          ``-m scripts.workspace_atlas_query``.
 
     The workspace CLI forwarding contract has drifted more than once. The
-    module invocation is the stable path because ``run_one`` already uses
-    the Atlas leaf as cwd.
+    direct Python launcher is the stable path because ``run_one`` already uses
+    the Atlas leaf as cwd and passes the Atlas venv interpreter.
     """
     direct = os.environ.get("ATLAS_SHADOW_ATLAS_QUERY_CMD")
     if direct:
@@ -154,6 +176,9 @@ def _atlas_query_launcher(*, atlas_python: Optional[str] = None) -> list[str]:
     venv_py = os.environ.get("WORKSPACE_VENV_PY")
     if py and venv_py:
         return [venv_py, py, "run", "atlas-query", "--"]
+    daemon_launcher = _daemon_query_launcher_for_atlas_python(atlas_python)
+    if daemon_launcher:
+        return daemon_launcher
     return [atlas_python or sys.executable, "-m", "scripts.workspace_atlas_query"]
 
 
