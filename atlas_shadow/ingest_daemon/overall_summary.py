@@ -561,6 +561,9 @@ def _format_json(
                 "total_skipped_command_snapshot": r.get(
                     "total_skipped_command_snapshot", 0
                 ),
+                "total_skipped_legacy_receipt_defect": r.get(
+                    "total_skipped_legacy_receipt_defect", 0
+                ),
                 # Per-evidence-type breakdown (run level). None on legacy
                 # manifests that pre-date the rollup — consumers should
                 # treat None as "no breakdown available" rather than

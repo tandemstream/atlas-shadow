@@ -1,0 +1,29 @@
+schema_version: 1
+purpose: >
+  Explicit corrections for frozen legacy packet receipts that cannot be fixed
+  in core because the historical packet corpus was retired from current main.
+  Offline batch grading may use these corrections to keep clean Atlas Evidence
+  from measuring known-bad authored anchors. Live PR grading does not load this
+  file.
+corrections:
+  - packet_id: 2026-05-13-atlas-evidence-expansion-v1
+    question_id: q21
+    source_commit: 408858a2215d6e0ba5660e70d5b4641bc6be821b
+    action: skip_legacy_receipt_defect
+    clean_excluded_reason: legacy_receipt_anchor_mismatch
+    note: >
+      The structured anchor points at core/policy/types.py:164-177, which only
+      shows the Envelope dataclass and explicitly lacks citation fields. The
+      receipt claim asks about evidence["citations"] fields, whose cited
+      location was only mentioned in free-form notes. This is an authored
+      anchor/claim mismatch, not an Atlas retrieval miss.
+  - packet_id: 2026-05-14-mattergraph-code-pack-corpus-v1
+    question_id: q8
+    source_commit: 69f0ecbf27008a594c04ba6b38d79a5be072224f
+    action: skip_legacy_receipt_defect
+    clean_excluded_reason: legacy_non_indexed_fixture
+    note: >
+      The structured anchor targets eval/code_benchmark_v3/queries.jsonl. The
+      fixture is tracked in git, but the Atlas code index does not index JSONL
+      data fixtures, so this row is a corpus-shape/receipt-authoring issue
+      rather than a fair retrieval measurement.

@@ -604,9 +604,11 @@ def _grade_one_receipt(
     receipt: PacketReceipt,
     code_revision_id: Optional[str],
     repo_full_name: str,
+    packet_id: Optional[str] = None,
     run_commit: Optional[str] = None,
     atlas_query_cache: Any = None,
     revision_pin_mode: str = "event-base",
+    legacy_receipt_corrections: Any = None,
     _runner_run_one: Optional[Callable] = None,
     _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
     _grader_grade: Optional[Callable] = None,
@@ -679,6 +681,45 @@ def _grade_one_receipt(
     effective_code_revision_id = code_revision_id
     effective_run_commit = run_commit
     effective_atlas_commit_sha = run_commit
+
+    # Legacy frozen-corpus corrections are explicit sidecar entries used by
+    # offline batch grading only. They handle retired historical packet rows
+    # whose authored anchors are known-bad but cannot be repaired in core main
+    # because the packet corpus was retired. Live PR grading does not pass this
+    # object, so new packet rows must be fixed in their Q&A source instead.
+    legacy_correction = None
+    if legacy_receipt_corrections is not None:
+        legacy_correction = legacy_receipt_corrections.match(
+            packet_id=packet_id,
+            question_id=receipt.question_id,
+            source_commit=receipt.source_commit,
+        )
+    if (
+        legacy_correction is not None
+        and legacy_correction.action == "skip_legacy_receipt_defect"
+    ):
+        row = _build_pre_atlas_skip_row(
+            receipt=receipt,
+            source_snapshot=source_snapshot,
+            command_snapshot=command_snapshot,
+            score_status="skipped_legacy_receipt_defect",
+            clean_excluded_reason=legacy_correction.clean_excluded_reason,
+            atlas_code_revision_id=None,
+            atlas_commit_sha=None,
+        )
+        return pr_comment_mod.ReceiptGradingRow(
+            **{
+                **asdict(row),
+                "warnings": [
+                    *list(row.warnings or []),
+                    f"legacy_receipt_correction:{legacy_correction.note}",
+                ],
+                "rationale": (
+                    f"Skipped pre-atlas: {legacy_correction.clean_excluded_reason}. "
+                    f"{legacy_correction.note}"
+                ),
+            }
+        )
 
     # PR #17: pre-atlas skip check. Routes non-retrieval receipts
     # (external_tool_docs / user_context / absence_search), receipts
@@ -1488,6 +1529,7 @@ def run_pr_grading(
     atlas_query_cache: Any = None,
     max_workers: Optional[int] = None,
     revision_pin_mode: str = "event-base",
+    legacy_receipt_corrections: Any = None,
     _fetch_pr_files: Callable = _fetch_pr_files,
     _fetch_file_at_ref: Callable = _fetch_file_at_ref,
     _post_pending: Callable = gh_check_mod.post_pending_status,
@@ -1712,6 +1754,7 @@ def run_pr_grading(
                         receipt=receipt,
                         code_revision_id=code_revision_id,
                         repo_full_name=event.repo_full_name,
+                        packet_id=packet_id,
                         # PR #15: the grading-anchor commit. For the
                         # PR-gate path this is the merge base; for
                         # grade-packet-batch it's --commit-sha
@@ -1726,6 +1769,7 @@ def run_pr_grading(
                         # results.
                         atlas_query_cache=atlas_query_cache,
                         revision_pin_mode=revision_pin_mode,
+                        legacy_receipt_corrections=legacy_receipt_corrections,
                     )
                 except Exception as exc:  # noqa: BLE001 — preserve old behavior
                     row = pr_comment_mod.ReceiptGradingRow(
@@ -1876,6 +1920,8 @@ def run_pr_grading(
                     summary.skipped_command_snapshot_count,
                 "skipped_revision_not_indexed_count":
                     summary.skipped_revision_not_indexed_count,
+                "skipped_legacy_receipt_defect_count":
+                    summary.skipped_legacy_receipt_defect_count,
                 # Per-evidence-type breakdown (PR-evidence-breakdown).
                 # Carried per-packet so the run aggregator can sum
                 # across packets AND so per-packet drilldowns show

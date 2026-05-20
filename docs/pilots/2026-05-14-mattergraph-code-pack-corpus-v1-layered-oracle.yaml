@@ -9,8 +9,8 @@ migration_source:
     treating synthesis scores as authoritative.
 cost:
   claim_count: 8
-  verified_claim_count: 8
-  unresolved_claim_count: 0
+  verified_claim_count: 7
+  unresolved_claim_count: 1
   tool_calls: null
   model_calls: null
   notes: Auto-drafted historical sidecar; real cost tracking is future work.
@@ -88,12 +88,18 @@ evidence_oracle:
     claim_type: current_behavior
     evidence_type: source_excerpt
     oracle_bucket: evidence
-    oracle_status: verified
-    planner_evidence_status: pass
+    oracle_status: unresolved
+    oracle_failure_type: legacy_non_indexed_fixture
+    planner_evidence_status: fail
+    planner_failure_type: legacy_non_indexed_fixture
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: v3 query gold includes required claims Atlas currently misses this verified evidence row.
+    notes: >
+      Legacy receipt defect: the row anchors a JSONL eval fixture. The file is
+      tracked in git, but the Atlas code corpus does not index JSONL fixtures,
+      so this is not a fair Atlas evidence row until it is re-anchored or typed
+      out under the forward Q&A contract.
 synthesis_oracle:
   status: hand_authored
   ideal_conclusion: >

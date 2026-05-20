@@ -907,6 +907,85 @@ def test_grade_one_receipt_source_pin_skips_unindexed_receipt_sha(
     assert row.atlas_code_revision_id is None
 
 
+def test_grade_one_receipt_applies_legacy_receipt_defect_skip(
+    daemon_config, tmp_path
+):
+    """Frozen-corpus correction sidecars should pre-skip only the targeted
+    packet/qid/source-commit row and must not call Atlas.
+    """
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+    from atlas_shadow.ingest_daemon.legacy_receipt_corrections import (
+        LegacyReceiptCorrection,
+        LegacyReceiptCorrections,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "pkg" / "thing.py"
+    src.parent.mkdir()
+    src.write_text("one\nneedle\nthree\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "receipt"], cwd=repo, check=True, timeout=10)
+    receipt_commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    canonical = doc_resolver_mod._excerpt_canonical("needle")
+    expected_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="Where is the needle?",
+        source_path="pkg/thing.py",
+        source_lines="2-2",
+        source_commit=receipt_commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt="needle",
+        oracle_claim="needle is on line 2",
+        command_text="unsupported command shape",
+    )
+    corrections = LegacyReceiptCorrections([
+        LegacyReceiptCorrection(
+            packet_id="packet-a",
+            question_id="q1",
+            source_commit=receipt_commit[:8],
+            action="skip_legacy_receipt_defect",
+            clean_excluded_reason="legacy_receipt_anchor_mismatch",
+            note="structured anchor is wrong",
+        )
+    ])
+
+    def runner_should_not_fire(*args, **kwargs):
+        raise AssertionError("legacy-corrected row must not call Atlas")
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="event-base-revision",
+        repo_full_name="tandemstream/core",
+        packet_id="packet-a",
+        run_commit=HEAD_SHA,
+        revision_pin_mode="event-base",
+        legacy_receipt_corrections=corrections,
+        _runner_run_one=runner_should_not_fire,
+        _grader_grade=_fake_grader(grade="full_match", confidence=1.0),
+    )
+
+    assert row.score_status == "skipped_legacy_receipt_defect"
+    assert row.clean_excluded_reason == "legacy_receipt_anchor_mismatch"
+    assert row.lane == "non_retrieval"
+    assert "structured anchor is wrong" in row.rationale
+    assert any(
+        w.startswith("legacy_receipt_correction:") for w in row.warnings
+    )
+
+
 def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monkeypatch):
     """End-to-end orchestrator run with all I/O stubbed.
 
