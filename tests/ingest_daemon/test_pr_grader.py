@@ -1950,6 +1950,18 @@ def test_derive_score_status_receipt_stale():
     ) == ("skipped_receipt_stale", "receipt_stale")
 
 
+def test_derive_score_status_receipt_hash_mismatch():
+    """If the receipt's own pinned source renders but its bytes do not
+    match the recorded excerpt hash, the receipt anchor is internally
+    inconsistent. Exclude it from the clean denominator rather than
+    charging Atlas for a corrupted source ref."""
+    assert grader_service_mod._derive_score_status(
+        grade="no_match",
+        source_snapshot_status="git_source_hash_mismatch",
+        run_snapshot_status="run_commit_hash_mismatch",
+    ) == ("skipped_receipt_stale", "receipt_hash_mismatch")
+
+
 def test_derive_score_status_no_snapshot_treated_as_counted():
     """source_snapshot_status=None (e.g. doc_resolver receipts) means
     no snapshot was resolved — never a stale skip."""
@@ -2072,14 +2084,14 @@ def test_derive_score_status_run_drift_requires_receipt_match():
     """Don't flip to run_drift unless we have an explicit receipt-side
     match — otherwise the receipt itself could be the issue and we
     shouldn't attribute the miss to file movement."""
-    # Receipt-side is mismatched (not just unmatched) — atlas's
-    # interpretation of the rendering is suspect. Stays counted (the
-    # row isn't covered by either skip path).
+    # Receipt-side is mismatched (not just unmatched) — the receipt's
+    # own source ref is internally inconsistent. This should skip via
+    # receipt_hash_mismatch, not via run_commit_line_drift.
     assert grader_service_mod._derive_score_status(
         grade="no_match",
         source_snapshot_status="git_source_hash_mismatch",
         run_snapshot_status="run_commit_hash_mismatch",
-    ) == ("counted", None)
+    ) == ("skipped_receipt_stale", "receipt_hash_mismatch")
 
 
 def test_grade_one_populates_run_snapshot_drift_skip(daemon_config, tmp_path):
