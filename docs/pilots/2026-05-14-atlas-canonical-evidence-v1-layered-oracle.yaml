@@ -1,0 +1,251 @@
+schema_version: 1
+packet_id: 2026-05-14-atlas-canonical-evidence-v1
+title: 2026 05 14 Atlas Canonical Evidence V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-canonical-evidence-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 20
+  verified_claim_count: 9
+  unresolved_claim_count: 11
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "query-side identifier extraction today \u2014 only structured anchors, no Q-ID / err-msg\
+      \ sweep"
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "find_code scope \u2014 symbol-graph + lexical chunks, not whole-file line scan"
+    oracle_failure_type: receipt_source_missing
+  - qid: q3
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "corpus shape \u2014 sweep target artifact types are `code` + `doc` + `proposal` (chunked\
+      \ text in `artifact_chunks`)"
+    oracle_failure_type: receipt_source_missing
+  - qid: q4
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "v3-a04 retrieval miss confirmed \u2014 BACKLOG:1089 absent from all 3 surfaces"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q5
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "synthesis prompt path \u2014 `core/ai.py:synthesize` builds `user_content` then sends\
+      \ to Claude"
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "synthesis envelope shape \u2014 `answer` is free-form prose; cites embedded inline"
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q7
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "verifiable evidence spans \u2014 retrieved chunk + expanded block + sweep hit, three sources"
+    oracle_failure_type: receipt_source_missing
+  - qid: q8
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "v3-a01 post-packet-4 baseline \u2014 the fabrication signal HAS resolved; 10/12 dock is\
+      \ now under-enumeration"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "synthesis prompt template \u2014 `_SYNTH_SYSTEM` is a single multi-line constant; precedence\
+      \ rules go here"
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q10
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "v3-b03 framing trace \u2014 atlas frames as \"no real contradiction\" instead of within-spec\
+      \ evolution"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q11
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "prompt-template-test pattern \u2014 packet-4 `test_synth_trace.py` is the model"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q12
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "rollback knob \u2014 packet-4 `ATLAS_EVIDENCE_EXPANSION=off` checked in `_resolve_scan`"
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q13
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "token-budget \u2014 `ExpansionCaps` dataclass body shows `total_expanded_chars: int =\
+      \ 120_000` (default value)"
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q14
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "sweep mechanism \u2014 `git grep` style not used today; must use DB-backed `artifact_chunks.raw_text`\
+      \ scan"
+  - qid: q15
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "scan_synth pass-through pattern \u2014 additive kw-only args mirror packet-4 `expanded_context`"
+    oracle_failure_type: receipt_source_missing
+  - qid: q16
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "anchors already parsed by `_resolve_scan` \u2014 sweep extractor reuses, doesn't duplicate"
+    oracle_failure_type: receipt_source_missing
+  - qid: q17
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "v3 ingest provenance \u2014 `aa41e37` is the corpus sha for the post-packet-4 run"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q18
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "tests harness \u2014 `tests/test_scan_synth.py` is the integration site for verifier +\
+      \ scaffold tests"
+    oracle_failure_type: unavailable_source_ref
+  - qid: q19
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "separator pattern in `user_content` \u2014 sweep + scaffold sections compose without new\
+      \ prompt re-shape"
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q20
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "non-code DB read shape \u2014 `artifact_chunks ac JOIN artifacts a ON a.artifact_id =\
+      \ ac.artifact_id`, filter via `a.doc_id` / `a.source_channel`"
+    planner_failure_type: current_benchmark_line_drift
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-canonical-evidence-v1. A packet
+    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=8, context=11, command=1.'
+  criteria: []

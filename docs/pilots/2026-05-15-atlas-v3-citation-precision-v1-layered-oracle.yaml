@@ -1,0 +1,134 @@
+schema_version: 1
+packet_id: 2026-05-15-atlas-v3-citation-precision-v1
+title: 2026 05 15 Atlas V3 Citation Precision V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-15-atlas-v3-citation-precision-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 10
+  verified_claim_count: 2
+  unresolved_claim_count: 8
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: missed anchors vs packet-7 citations
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: find_code construction steps
+    oracle_failure_type: receipt_source_missing
+  - qid: q3
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: Path B chunk-window fallback
+    oracle_failure_type: receipt_source_missing
+  - qid: q4
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: dedupe and insertion points
+    oracle_failure_type: receipt_source_missing
+  - qid: q5
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: scan_search upper-bound anchor check
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: packet-7 cherry-pick clean check
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q7
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: callee-def tokenize filter samples
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q8
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: scan_search raw_text plumbing
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q9
+    claim_type: schema_fact
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: verifier span schema if E ships
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q10
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: b03 strict-overlap accounting
+    oracle_failure_type: doc_corpus_excluded
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-15-atlas-v3-citation-precision-v1. A packet
+    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=2, context=8, command=0.'
+  criteria: []

@@ -36,6 +36,7 @@ from . import parser as parser_mod
 from . import runner as runner_mod
 from .ingest_daemon import compare_runs as compare_runs_mod
 from .ingest_daemon import counted_misses as counted_misses_mod
+from .ingest_daemon import layered_report as layered_report_mod
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -379,6 +380,123 @@ def shadow_counted_misses(run_dir: Path, output_dir: Optional[Path]) -> None:
         f"counted_misses={report.total_misses} "
         f"by_lane={json.dumps(report.by_lane, sort_keys=True)}"
     )
+
+
+@main.command("shadow-layered-report")
+@click.option(
+    "--packet-json",
+    "packet_json_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to one grade-packet-batch packets/<packet>.json file.",
+)
+@click.option(
+    "--oracle-spec",
+    "oracle_spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the typed layered-oracle YAML spec for the packet.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help=(
+        "Directory to write layered-shadow-report.{md,json}. Defaults "
+        "to <packet-json-dir>/../_layered/<packet>/."
+    ),
+)
+def shadow_layered_report(
+    packet_json_path: Path,
+    oracle_spec_path: Path,
+    output_dir: Optional[Path],
+) -> None:
+    """Render a Phase-1 layered shadow report for one packet.
+
+    This is the pilot command for workflow-level scoring. It keeps the
+    current Atlas evidence rows intact, then overlays a typed oracle spec
+    that separates evidence-oracle coverage, planner evidence, planner
+    synthesis, Atlas evidence, Atlas synthesis, and cost.
+    """
+    report = layered_report_mod.build_report(
+        spec_path=oracle_spec_path,
+        packet_json_path=packet_json_path,
+    )
+    if output_dir is None:
+        packet_slug = packet_json_path.stem
+        output_dir = packet_json_path.parent.parent / "_layered" / packet_slug
+    md_path, json_path = layered_report_mod.write_reports(report, output_dir)
+    click.echo(f"[atlas-shadow] wrote {md_path} and {json_path}", err=True)
+    click.echo(
+        f"oracle={report.oracle_verified} verified + "
+        f"{report.context_verified} context + "
+        f"{report.command_verified} command + "
+        f"{report.oracle_unresolved} unresolved; "
+        f"planner_evidence={report.planner_evidence_pass}/"
+        f"{report.planner_evidence_total}; "
+        f"atlas_evidence={report.atlas_evidence_pass}/"
+        f"{report.atlas_evidence_total}"
+    )
+
+
+@main.command("shadow-layered-batch")
+@click.option(
+    "--run-dir",
+    "run_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Run directory containing packets/*.json.",
+)
+@click.option(
+    "--oracle-dir",
+    "oracle_dir",
+    default=Path("docs/pilots"),
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directory containing <packet>-layered-oracle.yaml specs.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Directory to write reports. Defaults to <run-dir>/_layered/.",
+)
+def shadow_layered_batch(
+    run_dir: Path,
+    oracle_dir: Path,
+    output_dir: Optional[Path],
+) -> None:
+    """Render layered reports for every packet in a run directory."""
+    packet_dir = run_dir / "packets"
+    packet_paths = sorted(packet_dir.glob("*.json"))
+    if not packet_paths:
+        raise click.ClickException(f"no packet JSON files found under {packet_dir}")
+    if output_dir is None:
+        output_dir = run_dir / "_layered"
+
+    reports = []
+    missing_specs = []
+    for packet_path in packet_paths:
+        packet_slug = packet_path.stem
+        spec_path = oracle_dir / f"{packet_slug}-layered-oracle.yaml"
+        if not spec_path.exists():
+            missing_specs.append(str(spec_path))
+            continue
+        report = layered_report_mod.build_report(
+            spec_path=spec_path,
+            packet_json_path=packet_path,
+        )
+        layered_report_mod.write_reports(report, output_dir / packet_slug)
+        reports.append(report)
+
+    if missing_specs:
+        raise click.ClickException(
+            "missing layered oracle specs:\n" + "\n".join(missing_specs)
+        )
+    md_path, json_path = layered_report_mod.write_run_summary(reports, output_dir)
+    click.echo(f"[atlas-shadow] wrote {md_path} and {json_path}", err=True)
+    click.echo(f"layered_packets={len(reports)}")
 
 
 def _fmt_pct(v: Optional[float]) -> str:

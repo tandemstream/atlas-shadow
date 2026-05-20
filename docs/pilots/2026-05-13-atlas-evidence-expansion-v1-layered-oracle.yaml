@@ -1,0 +1,338 @@
+schema_version: 1
+packet_id: 2026-05-13-atlas-evidence-expansion-v1
+title: Atlas Evidence Expansion v1 layered-grading pilot
+
+cost:
+  claim_count: 29
+  verified_claim_count: 21
+  unresolved_claim_count: 8
+  tool_calls: null
+  model_calls: null
+  notes: >
+    Phase-1 pilot values. Actual tool/model counts will be wired in the
+    generalized implementation; this spec records the intended cost surface.
+
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1]
+      notes: scan synthesis passes caller-supplied chunks through to synthesis.
+    - qid: q2
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1, S3]
+      notes: core.ai.synthesize builds evidence_lines from retrieved chunks.
+    - qid: q3
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: uncertainty_note
+      required_point_ids: [U1]
+      notes: synthesis context-size knobs bound expansion cost.
+    - qid: q4
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: context_only
+      notes: chunk text is truncated before prompt assembly.
+    - qid: q5
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S2]
+      notes: retrieval and synthesis boundary is in answer resolution.
+    - qid: q6
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: context_only
+      notes: anchors_parsed carries query anchor diagnostics.
+    - qid: q7
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1]
+      notes: find_code citations include precise file and line fields.
+    - qid: q8
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: current_benchmark_line_drift
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S2]
+      notes: scan_search citation fields are shallower than find_code.
+    - qid: q9
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: context_only
+      notes: find_code path returns code citations.
+    - qid: q10
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S4]
+      notes: code_symbols table has line range fields for symbol expansion.
+    - qid: q11
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S4]
+      notes: file memoization can reconstruct full files by chunk_index.
+    - qid: q12
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S4]
+      notes: artifact_chunks has offsets and chunk_index needed for reconstruction.
+    - qid: q13
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S4]
+      notes: full-file reconstruction orders chunks by chunk_index.
+    - qid: q14
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S5]
+      notes: anchor parsing recognizes path, symbol, and literal anchors.
+    - qid: q15
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S5]
+      notes: dogfood rechunk script demonstrates code-file row reads.
+    - qid: q16
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: fail
+      planner_failure_type: receipt_hash_mismatch
+      oracle_bucket: evidence
+      synthesis_role: forbidden_claim
+      required_point_ids: [F1]
+      notes: MarkdownChunker does not emit structured heading metadata in this packet.
+    - qid: q17
+      claim_type: absence_claim
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: command
+      synthesis_role: forbidden_claim
+      required_point_ids: [F1]
+      notes: absence-style test claim should not be measured as fuzzy retrieval.
+    - qid: q18
+      claim_type: absence_claim
+      evidence_type: absence_search
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: command
+      synthesis_role: uncertainty_note
+      required_point_ids: [U1]
+      notes: no prompt-token measurement utility existed.
+    - qid: q19
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: playground Atlas/memory source was removed; preserved as context.
+    - qid: q20
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: file-size distribution over removed playground tree.
+    - qid: q21
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S2]
+      notes: Envelope does not carry rich citations directly.
+    - qid: q22
+      claim_type: absence_claim
+      evidence_type: absence_search
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: command
+      synthesis_role: forbidden_claim
+      required_point_ids: [F2]
+      notes: expanded_context was a new concept in this packet.
+    - qid: q23
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground runtime guard evidence.
+    - qid: q24
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground runtime guard evidence.
+    - qid: q25
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground OrgMismatchError evidence.
+    - qid: q26
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground exception class evidence.
+    - qid: q27
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground body extent evidence.
+    - qid: q28
+      claim_type: historical_context
+      evidence_type: user_context
+      oracle_status: unresolved
+      oracle_failure_type: historical_playground_source_unavailable
+      planner_evidence_status: not_scored
+      oracle_bucket: context
+      synthesis_role: context_only
+      notes: removed playground body extent evidence.
+    - qid: q29
+      claim_type: schema_fact
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S6]
+      notes: exception classes map to kind=class because there is no exception kind.
+
+synthesis_oracle:
+  ideal_conclusion: >
+    Evidence expansion should proceed as an additive retrieval-to-synthesis
+    layer: preserve existing citation envelopes, expand only around explicit
+    anchors, enforce hard caps, and treat absence or removed-playground claims
+    as non-Atlas retrieval evidence.
+  required_points:
+    - id: S1
+      text: Preserve source paths and line ranges through find_code citations.
+    - id: S2
+      text: Do not claim scan_search citations are as rich as find_code citations.
+    - id: S3
+      text: Account for prompt context caps and per-chunk truncation.
+    - id: S4
+      text: Use artifact chunk ordering and offsets for full-file reconstruction.
+    - id: S5
+      text: Restrict expansion to explicit path, symbol, and literal anchors.
+    - id: S6
+      text: Respect current code_symbols.kind values; exception classes are classes.
+  forbidden_claims:
+    - id: F1
+      text: Existing markdown chunking already emits structured heading metadata.
+    - id: F2
+      text: expanded_context was already an established answer-envelope field.
+    - id: F3
+      text: Removed playground Atlas/memory receipts are valid Atlas retrieval targets.
+  uncertainty_notes:
+    - id: U1
+      text: Prompt-size and cost tooling was weak at planning time and needs measurement.
+    - id: U2
+      text: Historical playground evidence is useful context but not a current benchmark target.
+  criteria:
+    - id: conclusion
+      label: Correct conclusion
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      notes: Both should conclude that additive evidence expansion is viable but bounded.
+    - id: required_points
+      label: Required points covered
+      points_possible: 6
+      planner_points: 5
+      atlas_points: 4
+      notes: Atlas synthesis is expected to miss some removed/context-only evidence.
+    - id: forbidden_claims
+      label: Forbidden claims avoided
+      points_possible: 3
+      planner_points: 2
+      atlas_points: 2
+      notes: The packet historically blurred playground context and current Atlas evidence.
+    - id: uncertainty
+      label: Uncertainty handled
+      points_possible: 2
+      planner_points: 1
+      atlas_points: 1
+      notes: Cost and removed-source uncertainty need explicit caveats.
