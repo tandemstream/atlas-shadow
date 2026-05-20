@@ -802,3 +802,39 @@ def test_format_md_skips_lane_section_when_all_zero(tmp_path: Path):
     runs = os_mod.load_run_manifests(tmp_path)
     out = os_mod._format_md(runs, [], [])
     assert "Latest run — by retrieval lane" not in out
+
+
+
+
+# ─── Atlas-query cache totals in dashboard JSON (PR query-cache-v1) ──
+
+
+def test_regenerate_atlas_cache_totals_land_in_json(tmp_path: Path):
+    """overall-summary.json carries the three cache observability
+    totals per run so cross-run charts can answer "did this run get
+    faster because Atlas improved or because the cache hid the work?"."""
+    _write_run(
+        tmp_path, "baseline-with-cache",
+        total_atlas_cache_hits=42,
+        total_atlas_cache_misses=8,
+        total_atlas_cache_disabled=3,
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_atlas_cache_hits"] == 42
+    assert run["total_atlas_cache_misses"] == 8
+    assert run["total_atlas_cache_disabled"] == 3
+
+
+def test_regenerate_legacy_run_atlas_cache_totals_default_zero(tmp_path: Path):
+    """Pre-cache manifests lack the cache fields. JSON renders them
+    as zero (not null) — zero is the right semantic because those
+    runs predate the cache. Distinct from total_by_lane which uses
+    null for "field didn't exist yet" because zero would mean
+    "all buckets at zero" instead."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    run = json.loads(json_path.read_text())["runs"][0]
+    assert run["total_atlas_cache_hits"] == 0
+    assert run["total_atlas_cache_misses"] == 0
+    assert run["total_atlas_cache_disabled"] == 0

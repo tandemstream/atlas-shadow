@@ -130,6 +130,14 @@ class ReceiptGradingRow:
     lane: Optional[str] = None  # explicit_source_fast_path|fuzzy_find_code|scan_search|doc_resolver
     score_status: str = "counted"  # counted | skipped_receipt_stale | skipped_run_commit_line_drift | …
     clean_excluded_reason: Optional[str] = None  # receipt_stale | run_commit_line_drift | …
+    # PR atlas-shadow-query-cache-v1: per-row observability for the
+    # atlas-query cache. ``hit`` / ``miss`` / ``disabled`` when the
+    # grading path called atlas; ``None`` for receipts that never
+    # reached the atlas subprocess (pre-skipped via command_snapshot,
+    # unavailable_source_ref, doc_corpus_excluded, etc.). Lets
+    # operators answer "did this run get faster because Atlas
+    # improved, or because the cache hid the work?"
+    atlas_cache_status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +280,41 @@ class GradingSummary:
         return sum(
             1 for r in self.rows
             if r.score_status == "skipped_command_snapshot"
+        )
+
+    # PR atlas-shadow-query-cache-v1: cache observability counts.
+    # Three counters that together answer "did this run get faster
+    # because Atlas improved, or because the cache hid the work?"
+
+    @property
+    def atlas_cache_hit_count(self) -> int:
+        """Rows where ``runner.run_one`` returned a cached response
+        without invoking the workspace_atlas_query subprocess. A high
+        hit-count on a baseline rerun is expected; a high hit-count
+        on a NEW commit is the signal that the cache key is missing
+        an input that should have invalidated it."""
+        return sum(
+            1 for r in self.rows if r.atlas_cache_status == "hit"
+        )
+
+    @property
+    def atlas_cache_miss_count(self) -> int:
+        """Rows where the cache was checked but missed → subprocess
+        fired and the result was stored. First run of a fresh commit
+        is all misses."""
+        return sum(
+            1 for r in self.rows if r.atlas_cache_status == "miss"
+        )
+
+    @property
+    def atlas_cache_disabled_count(self) -> int:
+        """Rows where the runner was called WITHOUT a cache instance
+        (cache off via env var, OR the caller — like the webhook
+        path — explicitly didn't pass one). Distinct from rows that
+        never called atlas at all (those have
+        ``atlas_cache_status=None``)."""
+        return sum(
+            1 for r in self.rows if r.atlas_cache_status == "disabled"
         )
 
     @property

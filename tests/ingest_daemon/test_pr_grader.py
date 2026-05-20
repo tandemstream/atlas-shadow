@@ -3616,3 +3616,120 @@ def test_serialize_row_includes_command_snapshot_fields():
     assert out["command_snapshot_sha256"] == "deadbeef" * 8
     assert out["command_snapshot_head"] == "line two\nline three"
     assert out["command_snapshot_exit_code"] == 0
+
+
+# ─── Atlas-query cache observability (PR query-cache-v1) ─────────────
+
+
+def test_grading_summary_atlas_cache_counts_partition_correctly():
+    """The three cache counts (hit/miss/disabled) partition the rows
+    that called Atlas; receipts that never called Atlas (pre-skipped)
+    contribute to none of them. This is what makes the run-level
+    'cache hid the work vs Atlas improved' signal usable."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        # Three hit rows + two miss rows + one disabled + two None
+        # (pre-Atlas-skipped — never reached the runner).
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q", grade="full_match",
+            confidence=0.9, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="hit",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q", grade="full_match",
+            confidence=0.9, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="hit",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q3", question="q", grade="no_match",
+            confidence=1.0, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="hit",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q4", question="q", grade="full_match",
+            confidence=0.9, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="miss",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q5", question="q", grade="no_match",
+            confidence=1.0, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="miss",
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q6", question="q", grade="full_match",
+            confidence=0.9, rationale="r", tool="find_code",
+            score_status="counted", atlas_cache_status="disabled",
+        ),
+        # These two pre-skipped — never reached atlas → status None.
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q7", question="q", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_command_snapshot",
+            atlas_cache_status=None,
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q8", question="q", grade="atlas_not_found",
+            confidence=1.0, rationale="r", tool="skipped",
+            score_status="skipped_unavailable_source_ref",
+            atlas_cache_status=None,
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.atlas_cache_hit_count == 3
+    assert s.atlas_cache_miss_count == 2
+    assert s.atlas_cache_disabled_count == 1
+    # Sum of three cache counters = rows that called Atlas.
+    # Two pre-skipped rows are NOT in any cache count.
+    assert (
+        s.atlas_cache_hit_count
+        + s.atlas_cache_miss_count
+        + s.atlas_cache_disabled_count
+    ) == 6
+
+
+def test_grading_summary_atlas_cache_counts_back_compat():
+    """Legacy rows (pre-cache PR) carry ``atlas_cache_status=None``
+    by default. All three counters report zero for those rows so
+    pre-cache baselines aggregate to zero cache activity, not
+    spurious 'disabled' counts."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    rows = [
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q1", question="q", grade="full_match",
+            confidence=0.9, rationale="r", tool="find_code",
+            # atlas_cache_status default is None
+        ),
+        pr_comment_mod.ReceiptGradingRow(
+            question_id="q2", question="q", grade="no_match",
+            confidence=1.0, rationale="r", tool="find_code",
+        ),
+    ]
+    s = pr_comment_mod.GradingSummary(
+        packet_id="pkt", code_revision_id=None,
+        base_sha=BASE_SHA, threshold_pct=50, rows=rows,
+    )
+    assert s.atlas_cache_hit_count == 0
+    assert s.atlas_cache_miss_count == 0
+    assert s.atlas_cache_disabled_count == 0
+
+
+def test_serialize_row_includes_atlas_cache_status():
+    """The serialized artifact row carries atlas_cache_status so the
+    counted_misses report + downstream analysis tools can see per-row
+    cache behavior."""
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q1", question="q", grade="full_match",
+        confidence=0.9, rationale="r", tool="find_code",
+        score_status="counted",
+        atlas_cache_status="hit",
+    )
+    out = gs._serialize_row(row)
+    assert out["atlas_cache_status"] == "hit"

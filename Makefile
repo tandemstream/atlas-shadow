@@ -221,6 +221,29 @@ grading-up: ingest-up
 grading-verify:
 	$(PY) -m atlas_shadow.ingest_daemon --config $(SHADOW_CONFIG) grading-verify
 
+# PR atlas-shadow-query-cache-v1: operator-facing knobs for the
+# atlas-query subprocess result cache (default location:
+# ~/.atlas-shadow/query-cache.sqlite). The cache is consulted by
+# grade-packet-batch automatically; the webhook PR-grading path
+# explicitly does NOT use the cache (production gates can't observe
+# stale results).
+#
+# ATLAS_SHADOW_QUERY_CACHE=off disables the cache entirely.
+
+.PHONY: cache-stats
+cache-stats:
+	$(PY) -c 'from pathlib import Path; from atlas_shadow.ingest_daemon.atlas_query_cache import AtlasQueryCache, _DEFAULT_CACHE_PATH; \
+	import json; \
+	p = Path("$(CACHE_PATH)") if "$(CACHE_PATH)" else _DEFAULT_CACHE_PATH; \
+	print(json.dumps(AtlasQueryCache(p).stats(), indent=2))'
+
+.PHONY: truncate-cache
+truncate-cache:
+	$(PY) -c 'from pathlib import Path; from atlas_shadow.ingest_daemon.atlas_query_cache import AtlasQueryCache, _DEFAULT_CACHE_PATH; \
+	p = Path("$(CACHE_PATH)") if "$(CACHE_PATH)" else _DEFAULT_CACHE_PATH; \
+	c = AtlasQueryCache(p); n = c.truncate(); \
+	print(f"deleted {n} entries from {p}")'
+
 .PHONY: clean
 clean:
 	rm -rf $(VENV) __pycache__ .pytest_cache

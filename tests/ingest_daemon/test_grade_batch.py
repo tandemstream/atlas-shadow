@@ -1905,3 +1905,68 @@ def test_write_per_run_summary_md_includes_command_snapshot_breakout(tmp_path: P
     )
     text = path.read_text()
     assert "3 command-snapshot" in text
+
+
+# ─── Cache aggregation (PR atlas-shadow-query-cache-v1) ──────────────
+
+
+def test_aggregate_run_totals_sums_atlas_cache_counts_across_packets():
+    """``_aggregate_run_totals`` sums cache hit/miss/disabled counts
+    across packets so the manifest reports a single run-level total.
+    Without this aggregation, operators can't tell whether a fast run
+    came from cache hits (which means Atlas's measured improvement is
+    masked) or genuine Atlas improvement."""
+    outcomes = [
+        {
+            "packet_slug": "p1",
+            "status": "ok",
+            "summaries": [{
+                "packet_id": "p1", "passed": True, "pass_pct": 80,
+                "pass_count": 8, "total": 10,
+                "atlas_cache_hit_count": 3,
+                "atlas_cache_miss_count": 4,
+                "atlas_cache_disabled_count": 0,
+                "artifact_path": None,
+            }],
+        },
+        {
+            "packet_slug": "p2",
+            "status": "ok",
+            "summaries": [{
+                "packet_id": "p2", "passed": True, "pass_pct": 100,
+                "pass_count": 5, "total": 5,
+                "atlas_cache_hit_count": 2,
+                "atlas_cache_miss_count": 1,
+                "atlas_cache_disabled_count": 0,
+                "artifact_path": None,
+            }],
+        },
+    ]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_atlas_cache_hits"] == 5  # 3 + 2
+    assert totals["total_atlas_cache_misses"] == 5  # 4 + 1
+    assert totals["total_atlas_cache_disabled"] == 0
+    # Per-packet totals also present.
+    assert totals["per_packet_pct"]["p1"]["atlas_cache_hits"] == 3
+    assert totals["per_packet_pct"]["p2"]["atlas_cache_hits"] == 2
+
+
+def test_aggregate_run_totals_back_compat_when_cache_counts_missing():
+    """Legacy summaries (pre-cache PR) lack the atlas_cache_* fields.
+    Aggregator must treat them as zero so the manifest stays
+    well-formed without forcing pre-cache baselines to re-grade."""
+    outcomes = [{
+        "packet_slug": "legacy",
+        "status": "ok",
+        "summaries": [{
+            "packet_id": "legacy", "passed": True, "pass_pct": 50,
+            "pass_count": 1, "total": 2,
+            # No atlas_cache_* fields at all.
+            "artifact_path": None,
+        }],
+    }]
+    totals = gb._aggregate_run_totals(outcomes)
+    assert totals["total_atlas_cache_hits"] == 0
+    assert totals["total_atlas_cache_misses"] == 0
+    assert totals["total_atlas_cache_disabled"] == 0
+    assert totals["per_packet_pct"]["legacy"]["atlas_cache_hits"] == 0

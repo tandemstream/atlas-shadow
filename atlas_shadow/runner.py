@@ -103,7 +103,17 @@ class AtlasResponse:
 
 @dataclass(frozen=True)
 class ShadowResponse:
-    """Per-question record emitted to atlas-qa-shadow.jsonl (pre-grade)."""
+    """Per-question record emitted to atlas-qa-shadow.jsonl (pre-grade).
+
+    ``atlas_cache_status`` is populated when :func:`run_one` is called
+    with an :class:`AtlasQueryCache` instance. Values: ``"hit"`` (the
+    response came from the cache; no subprocess fired),
+    ``"miss"`` (the cache was checked, missed, response computed and
+    stored), ``"disabled"`` (run_one was called without a cache —
+    subprocess fired normally). ``None`` is reserved for callers that
+    don't go through the atlas subprocess path at all (e.g. doc
+    receipts resolved via :mod:`doc_resolver`).
+    """
 
     question_id: str
     question: str
@@ -114,6 +124,7 @@ class ShadowResponse:
     org_id: str
     tool: str
     extra: dict = field(default_factory=dict)
+    atlas_cache_status: Optional[str] = None
 
 
 def _atlas_query_launcher(*, atlas_python: Optional[str] = None) -> list[str]:
@@ -286,6 +297,7 @@ def run_one(
     domain_pack: Optional[str] = None,
     code_revision_id: Optional[str] = None,
     timeout: int = 180,
+    atlas_query_cache: Any = None,
     _invoke=invoke_atlas_query,
 ) -> ShadowResponse:
     """Run a single receipt; return a pre-grade :class:`ShadowResponse`.
@@ -294,6 +306,20 @@ def run_one(
     workspace command itself does ``cd`` into the Atlas leaf via the venv
     check, but workspace.yaml is anchored there — invoking from elsewhere
     surfaces resolution errors).
+
+    **Cache integration** (PR atlas-shadow-query-cache-v1): when
+    ``atlas_query_cache`` is an :class:`AtlasQueryCache` instance, the
+    cache is consulted before invoking the subprocess. On cache hit
+    the subprocess is skipped entirely; on cache miss the response is
+    stored after the call. The returned ShadowResponse's
+    ``atlas_cache_status`` field reports ``"hit"`` / ``"miss"`` /
+    ``"disabled"`` (the latter when ``atlas_query_cache is None``).
+
+    The cache is opt-in at the call site. Batch mode constructs a
+    cache and passes it; the live webhook PR-grading path does NOT,
+    so production gates never observe a cached result. See
+    :mod:`atlas_query_cache` module docstring for the boundary
+    rationale.
     """
     atlas_leaf = core_repo_path / "products" / "tandem" / "packages" / "python" / "atlas"
     if not atlas_leaf.exists():
@@ -301,6 +327,63 @@ def run_one(
             f"Atlas leaf not found under core_repo_path={core_repo_path}: "
             f"expected {atlas_leaf}"
         )
+
+    cache_status: Optional[str] = None
+    cache_key = None
+    if atlas_query_cache is not None:
+        # Local import to keep the cache module out of the runner's
+        # cold path when the caller doesn't use the cache.
+        from atlas_shadow.ingest_daemon.atlas_query_cache import CacheKey
+
+        cache_key = CacheKey(
+            query_text=receipt.question,
+            tool=tool,
+            source_path=receipt.source_path,
+            source_lines=receipt.source_lines,
+            source_commit=receipt.commit_sha or "",
+            code_revision_id=code_revision_id,
+            org_id=org_id,
+            principal_id=principal_id,
+            domain_pack=domain_pack,
+        )
+        hit = atlas_query_cache.get(cache_key)
+        if hit is not None:
+            # Reconstruct AtlasResponse from cached JSON. Treat any
+            # deserialization error as a cache miss (defensive — a
+            # malformed entry shouldn't be load-bearing).
+            try:
+                payload = json.loads(hit.response_json)
+                cached_response = AtlasResponse(
+                    tool_used=str(payload.get("tool_used") or ""),
+                    answer_text=str(payload.get("answer_text") or ""),
+                    raw_result=payload.get("raw_result"),
+                    evidence_keys=list(payload.get("evidence_keys") or []),
+                    atlas_latency_ms=int(payload.get("atlas_latency_ms") or 0),
+                    request_id=str(payload.get("request_id") or ""),
+                    commit=str(payload.get("commit") or ""),
+                    stderr=str(payload.get("stderr") or ""),
+                    returncode=int(payload.get("returncode") or 0),
+                    exception=payload.get("exception"),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                cached_response = None
+            if cached_response is not None:
+                return ShadowResponse(
+                    question_id=receipt.question_id,
+                    question=receipt.question,
+                    fixture_id=fixture_id,
+                    atlas_response=cached_response,
+                    wall_time_ms=hit.response_latency_ms,
+                    captured_at=datetime.now(timezone.utc).isoformat(),
+                    org_id=org_id,
+                    tool=tool,
+                    extra={"atlas_cache_key_prefix": hit.key_fingerprint[:12]},
+                    atlas_cache_status="hit",
+                )
+        cache_status = "miss"
+    else:
+        cache_status = "disabled"
+
     argv = build_atlas_query_argv(
         question=receipt.question,
         org_id=org_id,
@@ -313,6 +396,35 @@ def run_one(
     started = time.perf_counter()
     response = _invoke(argv, cwd=atlas_leaf, timeout=timeout)
     wall_ms = int((time.perf_counter() - started) * 1000)
+
+    # Store on cache miss. Only cache successful responses (returncode
+    # 0, no exception) — caching a transient subprocess failure would
+    # be a foot-gun. The defensive check also ensures we don't store
+    # garbage during partial atlas-side failures.
+    if (
+        atlas_query_cache is not None
+        and cache_key is not None
+        and response.returncode == 0
+        and not response.exception
+    ):
+        try:
+            atlas_query_cache.set(
+                cache_key,
+                response_json=json.dumps(_atlas_response_to_jsonable(response)),
+                response_latency_ms=wall_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 — cache failures non-fatal
+            import sys
+            print(
+                f"[runner] WARN: atlas_query_cache.set failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    extra = {"argv": shlex.join(argv)}
+    if cache_key is not None:
+        extra["atlas_cache_key_prefix"] = cache_key.fingerprint()[:12]
+
     return ShadowResponse(
         question_id=receipt.question_id,
         question=receipt.question,
@@ -322,8 +434,33 @@ def run_one(
         captured_at=datetime.now(timezone.utc).isoformat(),
         org_id=org_id,
         tool=tool,
-        extra={"argv": shlex.join(argv)},
+        extra=extra,
+        atlas_cache_status=cache_status,
     )
+
+
+def _atlas_response_to_jsonable(response: AtlasResponse) -> dict[str, Any]:
+    """Round-trip serializer for AtlasResponse → cache payload.
+
+    Mirrors the field set on :class:`AtlasResponse` exactly. The
+    deserializer side (in run_one's cache-hit path) reads from the
+    same set of keys. ``raw_result`` may be ``None`` or any
+    JSON-serializable structure — atlas's wrapper emits a dict, but
+    we don't constrain the shape because future atlas tooling may
+    add fields.
+    """
+    return {
+        "tool_used": response.tool_used,
+        "answer_text": response.answer_text,
+        "raw_result": response.raw_result,
+        "evidence_keys": list(response.evidence_keys),
+        "atlas_latency_ms": response.atlas_latency_ms,
+        "request_id": response.request_id,
+        "commit": response.commit,
+        "stderr": response.stderr,
+        "returncode": response.returncode,
+        "exception": response.exception,
+    }
 
 
 def run_batch(
@@ -338,10 +475,14 @@ def run_batch(
     code_revision_id: Optional[str] = None,
     timeout: int = 180,
     progress_cb=None,
+    atlas_query_cache: Any = None,
     _invoke=invoke_atlas_query,
 ) -> list[ShadowResponse]:
     """Run a list of receipts in order. ``progress_cb(i, n, response)`` is
     called after each completion if supplied.
+
+    The ``atlas_query_cache`` parameter is forwarded to each per-receipt
+    ``run_one`` call. See :func:`run_one` for cache semantics.
     """
     out: list[ShadowResponse] = []
     n = len(receipts)
@@ -356,6 +497,7 @@ def run_batch(
             domain_pack=domain_pack,
             code_revision_id=code_revision_id,
             timeout=timeout,
+            atlas_query_cache=atlas_query_cache,
             _invoke=_invoke,
         )
         out.append(resp)
