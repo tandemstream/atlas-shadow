@@ -71,6 +71,17 @@ DEFAULTS: dict[str, Any] = {
     "grader_model": "sonnet",
     "default_principal_id": None,
     "shadow_runs_dir": "shadow-runs",
+    # PR atlas-shadow-receipt-parallelism-v1: per-packet receipt-grading
+    # concurrency. Default 1 = serial (current behavior; no change for
+    # operators who don't opt in). Set to N>1 in shadow-config.yaml or
+    # via ``ATLAS_SHADOW_GRADING_MAX_WORKERS`` to parallelize the inner
+    # receipt loop with a ThreadPoolExecutor. Recommended range 2-8 —
+    # each worker spawns one atlas-query subprocess + 1 Anthropic API
+    # call per receipt, so the ceiling is set by subprocess cost and
+    # rate limits rather than CPU. Honored by both the live PR-grading
+    # path and ``grade-packet-batch``; the batch CLI exposes a
+    # ``--max-workers`` flag that overrides this default.
+    "grading_max_workers": 1,
 }
 
 
@@ -109,6 +120,8 @@ class DaemonConfig:
     grader_model: str = DEFAULTS["grader_model"]
     default_principal_id: Optional[str] = DEFAULTS["default_principal_id"]
     shadow_runs_dir: Path = field(default_factory=lambda: Path(DEFAULTS["shadow_runs_dir"]))
+    # PR atlas-shadow-receipt-parallelism-v1: see DEFAULTS docstring above.
+    grading_max_workers: int = DEFAULTS["grading_max_workers"]
 
 
 def load_config(
@@ -168,6 +181,37 @@ def load_config(
     if not shadow_runs_dir.is_absolute():
         shadow_runs_dir = (cfg_path.parent / shadow_runs_dir).resolve()
 
+    # PR atlas-shadow-receipt-parallelism-v1: resolve grading_max_workers.
+    # Precedence: ATLAS_SHADOW_GRADING_MAX_WORKERS env var (operator
+    # override at process start) > ``ingest_daemon.grading_max_workers``
+    # in YAML > DEFAULTS value (1). Negative / zero / non-integer values
+    # clamp to 1 with a stderr warning rather than raising — keeps the
+    # daemon resilient to typos and never accidentally turns parallelism
+    # off in a way that loses work.
+    grading_max_workers_raw = os.environ.get(
+        "ATLAS_SHADOW_GRADING_MAX_WORKERS"
+    )
+    if grading_max_workers_raw is None:
+        grading_max_workers_raw = merged.get("grading_max_workers")
+    try:
+        grading_max_workers = int(grading_max_workers_raw)
+    except (TypeError, ValueError):
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[ingest-daemon] WARN: invalid grading_max_workers "
+            f"{grading_max_workers_raw!r}; defaulting to 1\n"
+        )
+        grading_max_workers = 1
+    if grading_max_workers < 1:
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[ingest-daemon] WARN: grading_max_workers must be >= 1 "
+            f"(got {grading_max_workers}); clamping to 1\n"
+        )
+        grading_max_workers = 1
+
     return DaemonConfig(
         continuous_shadow_org_id=str(org_id),
         core_repo_path=Path(core_repo_path).expanduser(),
@@ -195,4 +239,5 @@ def load_config(
         grader_model=grader_model,
         default_principal_id=default_principal_id,
         shadow_runs_dir=shadow_runs_dir,
+        grading_max_workers=grading_max_workers,
     )

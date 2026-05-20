@@ -1970,3 +1970,100 @@ def test_aggregate_run_totals_back_compat_when_cache_counts_missing():
     assert totals["total_atlas_cache_misses"] == 0
     assert totals["total_atlas_cache_disabled"] == 0
     assert totals["per_packet_pct"]["legacy"]["atlas_cache_hits"] == 0
+
+
+# ===========================================================================
+# PR atlas-shadow-receipt-parallelism-v1 — --max-workers flag plumbing
+# ===========================================================================
+
+
+def test_grade_one_packet_forwards_max_workers_to_orchestrator():
+    """``grade_one_packet`` must propagate ``max_workers`` to
+    ``run_pr_grading`` unchanged. The CLI flag → batch loop → packet
+    grader → orchestrator chain is what makes parallelism opt-in at
+    the batch level without leaking into the live PR-grading webhook
+    path (which doesn't pass this kwarg)."""
+    captured_kwargs = {}
+
+    def _fake_run_pr_grading(cfg, event, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "summaries": [],
+            "status": "ok",
+            "code_revision_id": "fake-rev",
+            "base_sha": event.base_sha,
+            "head_sha": event.head_sha,
+            "pr_number": event.pr_number,
+            "repo_full_name": event.repo_full_name,
+        }
+
+    cfg = SimpleNamespace()
+    gb.grade_one_packet(
+        cfg,
+        repo_full_name="tandemstream/core",
+        commit_sha="abc1234",
+        qna_log_path="products/foo/docs/work/p-1/02-qna-log.md",
+        github_token="ignored",
+        core_repo_path=Path("/fake/repo"),
+        max_workers=4,
+        _run_pr_grading=_fake_run_pr_grading,
+        _read_file_at_commit=lambda **kw: "stubbed-content",
+    )
+    assert captured_kwargs["max_workers"] == 4
+
+
+def test_grade_one_packet_defaults_max_workers_to_none():
+    """When the CLI doesn't pass --max-workers, grade_one_packet must
+    forward ``max_workers=None`` so the orchestrator falls back to
+    cfg.grading_max_workers. Explicit-None preserves the documented
+    resolution order and lets cfg-only operators get parallelism by
+    setting the YAML field alone (no CLI flag needed)."""
+    captured_kwargs = {}
+
+    def _fake_run_pr_grading(cfg, event, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "summaries": [], "status": "ok",
+            "code_revision_id": "fake-rev",
+            "base_sha": event.base_sha, "head_sha": event.head_sha,
+            "pr_number": event.pr_number,
+            "repo_full_name": event.repo_full_name,
+        }
+
+    cfg = SimpleNamespace()
+    gb.grade_one_packet(
+        cfg,
+        repo_full_name="tandemstream/core",
+        commit_sha="abc1234",
+        qna_log_path="products/foo/docs/work/p-1/02-qna-log.md",
+        github_token="ignored",
+        core_repo_path=Path("/fake/repo"),
+        _run_pr_grading=_fake_run_pr_grading,
+        _read_file_at_commit=lambda **kw: "stubbed-content",
+    )
+    assert captured_kwargs["max_workers"] is None
+
+
+def test_grade_packet_batch_argparser_accepts_max_workers():
+    """The subcommand parser must expose ``--max-workers`` as an int
+    with default None. argparse default-of-None is load-bearing because
+    cmd_grade_packet_batch reads ``getattr(args, 'max_workers', None)``."""
+    import argparse
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    gb.build_subparser(sub)
+    # Without --max-workers → None.
+    args = parser.parse_args([
+        "grade-packet-batch",
+        "--core-repo-path", "/tmp/core",
+        "--output-dir", "/tmp/out",
+    ])
+    assert args.max_workers is None
+    # With --max-workers 7 → int 7.
+    args2 = parser.parse_args([
+        "grade-packet-batch",
+        "--core-repo-path", "/tmp/core",
+        "--output-dir", "/tmp/out",
+        "--max-workers", "7",
+    ])
+    assert args2.max_workers == 7

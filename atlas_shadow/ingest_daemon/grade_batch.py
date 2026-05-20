@@ -368,6 +368,7 @@ def grade_one_packet(
     github_token: str,
     core_repo_path: Path,
     atlas_query_cache: Any = None,
+    max_workers: Optional[int] = None,
     _run_pr_grading: Callable = gs.run_pr_grading,
     _read_file_at_commit: Callable = _read_file_via_git_show,
 ) -> dict[str, Any]:
@@ -411,6 +412,7 @@ def grade_one_packet(
         event,
         github_token=github_token,
         atlas_query_cache=atlas_query_cache,
+        max_workers=max_workers,
         _fetch_pr_files=_fetch_for_this_packet,
         _fetch_file_at_ref=_read_file_local,
         _post_pending=_noop_post_pending,
@@ -1299,6 +1301,30 @@ def cmd_grade_packet_batch(cfg, args) -> int:
             flush=True,
         )
 
+    # PR atlas-shadow-receipt-parallelism-v1: resolve effective worker
+    # count for the inner receipt loop. ``--max-workers`` overrides
+    # the cfg default; otherwise we honor ``batch_cfg.grading_max_workers``
+    # (which already reflects ATLAS_SHADOW_GRADING_MAX_WORKERS via the
+    # config loader). ``None`` means "use cfg" — pass it through
+    # untouched so grade_one_packet -> run_pr_grading can apply the
+    # documented resolution order.
+    cli_max_workers = getattr(args, "max_workers", None)
+    effective_max_workers: Optional[int]
+    if cli_max_workers is not None:
+        effective_max_workers = cli_max_workers
+    else:
+        effective_max_workers = None  # delegate to cfg
+    if not args.quiet:
+        resolved_workers = (
+            effective_max_workers
+            if effective_max_workers is not None
+            else getattr(batch_cfg, "grading_max_workers", 1)
+        )
+        print(
+            f"[batch] receipt-grading workers: {resolved_workers}",
+            flush=True,
+        )
+
     for idx, qna_log in enumerate(qna_logs, start=1):
         slug = _packet_slug_from_qna_path(qna_log)
         packet_commit_sha = packet_commit_shas.get(qna_log, commit_sha)
@@ -1317,6 +1343,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 github_token=github_token,
                 core_repo_path=core_repo_path,
                 atlas_query_cache=atlas_query_cache,
+                max_workers=effective_max_workers,
             )
         except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
             partial_failures += 1
@@ -1545,5 +1572,21 @@ def build_subparser(subparsers) -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress per-packet progress lines.",
+    )
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help=(
+            "Per-packet receipt-grading concurrency for this batch. "
+            "When unset, falls back to "
+            "`ingest_daemon.grading_max_workers` in shadow-config.yaml "
+            "(default 1 = serial). `ATLAS_SHADOW_GRADING_MAX_WORKERS` "
+            "in the process env overrides the YAML default. This flag "
+            "overrides both for the current invocation. Each worker "
+            "owns one atlas-query subprocess + one Anthropic API call "
+            "per receipt; recommended range 2-8 (PR atlas-shadow-receipt-"
+            "parallelism-v1)."
+        ),
     )
     return p
