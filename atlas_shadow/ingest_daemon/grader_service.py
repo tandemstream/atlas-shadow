@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
 import sys
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -603,6 +604,7 @@ def _grade_one_receipt(
     code_revision_id: Optional[str],
     repo_full_name: str,
     run_commit: Optional[str] = None,
+    revision_pin_mode: str = "event-base",
     _runner_run_one: Optional[Callable] = None,
     _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
     _grader_grade: Optional[Callable] = None,
@@ -620,6 +622,12 @@ def _grade_one_receipt(
     the daemon distinguish "Atlas missed" from
     "run-commit-line-drift." Pass ``None`` to skip the second snapshot
     (e.g. callers without a grading commit available).
+
+    When ``revision_pin_mode == "receipt-source"``, code-path receipts query
+    Atlas at the ``code_revision_id`` recorded for ``receipt.source_commit``
+    and use that same commit for the run snapshot. This is the
+    apples-to-apples baseline mode. The live PR gate keeps the default
+    ``event-base`` behavior.
     """
     translation = translate_receipt_to_query(receipt)
 
@@ -659,6 +667,12 @@ def _grade_one_receipt(
     # row rather than missing fields.
     atlas_diagnostics: dict[str, Any] = _atlas_raw_result_diagnostics(None)
     tool_label = ""
+    # The Atlas revision actually queried for this receipt. Live PR grading
+    # keeps the event/base revision. Offline baselines can override these on
+    # the code path to the receipt's own source_commit revision.
+    effective_code_revision_id = code_revision_id
+    effective_run_commit = run_commit
+    effective_atlas_commit_sha = run_commit
 
     # PR #17: pre-atlas skip check. Routes non-retrieval receipts
     # (external_tool_docs / user_context / absence_search), receipts
@@ -682,6 +696,8 @@ def _grade_one_receipt(
             command_snapshot=command_snapshot,
             score_status=pre_skip[0],
             clean_excluded_reason=pre_skip[1],
+            atlas_code_revision_id=None,
+            atlas_commit_sha=None,
         )
 
     if isinstance(translation, DocQuery):
@@ -711,6 +727,48 @@ def _grade_one_receipt(
         from atlas_shadow import runner as runner_mod  # lazy import (heavy)
         from atlas_shadow.parser import Receipt as RunnerReceipt
 
+        if revision_pin_mode == "receipt-source":
+            if not receipt.source_commit:
+                return _build_pre_atlas_skip_row(
+                    receipt=receipt,
+                    source_snapshot=source_snapshot,
+                    command_snapshot=command_snapshot,
+                    score_status="skipped_revision_not_indexed",
+                    clean_excluded_reason="source_commit_missing",
+                    atlas_code_revision_id=None,
+                    atlas_commit_sha=None,
+                )
+            resolved_source_commit = _resolve_commit_for_ledger(
+                cfg.core_repo_path,
+                receipt.source_commit,
+            )
+            revision_row = ledger_mod.find_by_commit_sha(
+                cfg.db_path,
+                resolved_source_commit,
+            )
+            effective_code_revision_id = (
+                str(revision_row.get("code_revision_id"))
+                if revision_row and revision_row.get("code_revision_id")
+                else None
+            )
+            effective_run_commit = resolved_source_commit
+            effective_atlas_commit_sha = resolved_source_commit
+            if effective_code_revision_id is None:
+                return _build_pre_atlas_skip_row(
+                    receipt=receipt,
+                    source_snapshot=source_snapshot,
+                    command_snapshot=command_snapshot,
+                    score_status="skipped_revision_not_indexed",
+                    clean_excluded_reason="revision_not_indexed",
+                    atlas_code_revision_id=None,
+                    atlas_commit_sha=resolved_source_commit,
+                )
+        elif revision_pin_mode != "event-base":
+            raise ValueError(
+                f"unknown revision_pin_mode={revision_pin_mode!r}; "
+                "expected 'event-base' or 'receipt-source'"
+            )
+
         runner_receipt = RunnerReceipt(
             question_id=receipt.question_id,
             question=translation.question,
@@ -730,7 +788,7 @@ def _grade_one_receipt(
             tool=translation.tool,
             principal_id=cfg.default_principal_id,
             domain_pack="code",
-            code_revision_id=code_revision_id,
+            code_revision_id=effective_code_revision_id,
         )
         atlas_response = shadow_response.atlas_response
         atlas_answer_text = atlas_response.answer_text or ""
@@ -751,7 +809,7 @@ def _grade_one_receipt(
         run_snapshot = code_snapshot_mod.resolve_code_receipt_run_snapshot(
             receipt,
             repo_path=cfg.core_repo_path,
-            run_commit=run_commit,
+            run_commit=effective_run_commit,
         )
         tool_label = translation.tool
 
@@ -825,6 +883,8 @@ def _grade_one_receipt(
             lane=lane,
             score_status=score_status,
             clean_excluded_reason=clean_reason,
+            atlas_code_revision_id=effective_code_revision_id,
+            atlas_commit_sha=effective_atlas_commit_sha,
         )
 
     snap_status = (
@@ -881,6 +941,8 @@ def _grade_one_receipt(
         lane=lane,
         score_status=score_status,
         clean_excluded_reason=clean_reason,
+        atlas_code_revision_id=effective_code_revision_id,
+        atlas_commit_sha=effective_atlas_commit_sha,
         # PR #20: surface command_snapshot diagnostics even when the
         # row went through atlas (e.g. command_text was UNSUPPORTED or
         # ERROR — useful diagnostic so consumers can see "command lane
@@ -976,6 +1038,33 @@ def _atlas_raw_result_diagnostics(raw_result: Any) -> dict[str, Any]:
         ),
         "reranker_top_k_count": len(top_k) if isinstance(top_k, list) else None,
     }
+
+
+def _resolve_commit_for_ledger(repo_path: Path, commit_ref: str) -> str:
+    """Resolve a receipt's commit ref to a full SHA for ledger lookups.
+
+    Historical receipts often store short SHAs such as ``408858a``. Git
+    accepts those for ``git show``, but the shadow ingest ledger stores
+    full 40-character SHAs. If resolution fails, return the original ref
+    so the row is cleanly reported as revision-not-indexed.
+    """
+    ref = (commit_ref or "").strip()
+    if not ref:
+        return ref
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", f"{ref}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ref
+    if proc.returncode != 0:
+        return ref
+    resolved = proc.stdout.strip()
+    return resolved or ref
 
 
 # ─── PR #17: pre-atlas skip classification ─────────────────────────────
@@ -1142,6 +1231,8 @@ def _build_pre_atlas_skip_row(
     score_status: str,
     clean_excluded_reason: str,
     command_snapshot: Optional[Any] = None,
+    atlas_code_revision_id: Optional[str] = None,
+    atlas_commit_sha: Optional[str] = None,
 ) -> "pr_comment_mod.ReceiptGradingRow":
     """Construct a ``ReceiptGradingRow`` for a receipt that's being
     skipped before any atlas dispatch (PR #17).
@@ -1215,6 +1306,8 @@ def _build_pre_atlas_skip_row(
         lane="non_retrieval",
         score_status=score_status,
         clean_excluded_reason=clean_excluded_reason,
+        atlas_code_revision_id=atlas_code_revision_id,
+        atlas_commit_sha=atlas_commit_sha,
         # PR #20: command_snapshot diagnostics — populated when the
         # skip was driven by the command lane.
         command_snapshot_status=cs_status,
@@ -1387,6 +1480,7 @@ def run_pr_grading(
     event,
     *,
     github_token: str,
+    revision_pin_mode: str = "event-base",
     _fetch_pr_files: Callable = _fetch_pr_files,
     _fetch_file_at_ref: Callable = _fetch_file_at_ref,
     _post_pending: Callable = gh_check_mod.post_pending_status,
@@ -1407,6 +1501,14 @@ def run_pr_grading(
     Commit statuses display in the same PR ``Checks`` UI tab and
     integrate with branch protection ``Settings -> Branches -> Required
     status checks`` via the ``atlas-shadow-grading`` context.
+
+    ``revision_pin_mode``:
+      - ``event-base`` (default): every receipt queries the event base SHA's
+        code_revision_id. This preserves live PR-gate behavior.
+      - ``receipt-source``: code receipts query the code_revision_id for the
+        receipt's own ``source_commit``. This is the canonical offline
+        baseline mode because Planner and Atlas evidence are scored against
+        the same snapshot.
     """
     outcome: dict[str, Any] = {
         "pr_number": event.pr_number,
@@ -1579,6 +1681,7 @@ def run_pr_grading(
                         # (propagated through event.base_sha by the
                         # synthetic PrEvent in grade_batch).
                         run_commit=event.base_sha,
+                        revision_pin_mode=revision_pin_mode,
                     )
                 except Exception as exc:
                     rows.append(
@@ -1654,6 +1757,8 @@ def run_pr_grading(
                 # PR #20: command-snapshot lane skip count.
                 "skipped_command_snapshot_count":
                     summary.skipped_command_snapshot_count,
+                "skipped_revision_not_indexed_count":
+                    summary.skipped_revision_not_indexed_count,
                 # Per-evidence-type breakdown (PR-evidence-breakdown).
                 # Carried per-packet so the run aggregator can sum
                 # across packets AND so per-packet drilldowns show
@@ -1881,6 +1986,9 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "lane": row.lane,
         "score_status": row.score_status,
         "clean_excluded_reason": row.clean_excluded_reason,
+        # Receipt-SHA pinning: actual Atlas revision/commit used for this row.
+        "atlas_code_revision_id": row.atlas_code_revision_id,
+        "atlas_commit_sha": row.atlas_commit_sha,
         # PR #17: receipt authoring intent (e.g. ``source_excerpt`` /
         # ``external_tool_docs`` / ``user_context`` / ``absence_search``).
         "evidence_type": row.evidence_type,

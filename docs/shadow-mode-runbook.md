@@ -732,6 +732,17 @@ Render every packet report plus the run-level layered summary:
   --oracle-dir docs/pilots
 ```
 
+Offline baselines should be generated with the batch grader's default
+`--revision-pin-mode receipt-source`. That mode resolves every code
+receipt's `source_commit` to the matching Atlas `code_revision_id` before
+querying Atlas, so Planner Evidence and Atlas Evidence use the same
+source snapshot. Live PR grading still uses `event-base` semantics.
+
+If a historical `source_commit` has not been ingested, the receipt is
+excluded as `score_status=skipped_revision_not_indexed` /
+`clean_excluded_reason=revision_not_indexed`. Replay-ingest that commit
+before rerunning the baseline if the row should be measured.
+
 The batch command writes:
 
 - `shadow-runs/<baseline>/_layered/<packet>/layered-shadow-report.md`

@@ -755,6 +755,158 @@ def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
     assert row.source_snapshot_status == "git_source_missing"
 
 
+def test_grade_one_receipt_source_pin_uses_receipt_commit_revision(
+    daemon_config, db_path, tmp_path
+):
+    """Offline baselines must query Atlas at the receipt's source commit,
+    not the batch/run commit. This is the apples-to-apples Planner-vs-Atlas
+    measurement path.
+    """
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow import runner as runner_mod
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "pkg" / "thing.py"
+    src.parent.mkdir()
+    src.write_text("one\nneedle\nthree\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "receipt"], cwd=repo, check=True, timeout=10)
+    receipt_commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    canonical = doc_resolver_mod._excerpt_canonical("needle")
+    expected_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="Where is the needle?",
+        source_path="pkg/thing.py",
+        source_lines="2-2",
+        source_commit=receipt_commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt="needle",
+        oracle_claim="needle is on line 2",
+        command_text="unsupported command shape",
+    )
+    ledger_mod.insert_terminal_attempt(
+        db_path,
+        commit_sha=receipt_commit,
+        status="succeeded",
+        started_at="2026-05-20T00:00:00+00:00",
+        attempt_number=1,
+        code_revision_id="receipt-revision",
+    )
+    captured = {}
+
+    def runner_stub(*args, **kwargs):
+        captured["code_revision_id"] = kwargs["code_revision_id"]
+        return runner_mod.ShadowResponse(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            fixture_id="pr-packet",
+            atlas_response=runner_mod.AtlasResponse(
+                tool_used=kwargs.get("tool", "find_code"),
+                answer_text="needle",
+                raw_result={},
+                evidence_keys=[],
+                atlas_latency_ms=1,
+                request_id="r",
+                commit=receipt_commit,
+            ),
+            wall_time_ms=1,
+            captured_at="2026-05-20T00:00:00+00:00",
+            org_id=kwargs["org_id"],
+            tool=kwargs.get("tool", "find_code"),
+        )
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="event-base-revision",
+        repo_full_name="tandemstream/core",
+        run_commit=HEAD_SHA,
+        revision_pin_mode="receipt-source",
+        _runner_run_one=runner_stub,
+        _grader_grade=_fake_grader(grade="full_match", confidence=1.0),
+        _classify_skip=lambda *_args, **_kwargs: None,
+    )
+
+    assert captured["code_revision_id"] == "receipt-revision"
+    assert row.atlas_code_revision_id == "receipt-revision"
+    assert row.atlas_commit_sha == receipt_commit
+    assert row.run_snapshot_status == "run_commit_hash_match"
+    assert row.score_status == "counted"
+
+
+def test_grade_one_receipt_source_pin_skips_unindexed_receipt_sha(
+    daemon_config, tmp_path
+):
+    """Missing historical revisions are explicit non-measurements, not
+    Atlas failures and not silent fallbacks to latest/event-base.
+    """
+    import subprocess as sp
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import doc_resolver as doc_resolver_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.email", "t@t.test"], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "config", "user.name", "T"], cwd=repo, check=True, timeout=10)
+    src = repo / "pkg" / "thing.py"
+    src.parent.mkdir()
+    src.write_text("one\nneedle\nthree\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, timeout=10)
+    sp.run(["git", "commit", "-q", "-m", "receipt"], cwd=repo, check=True, timeout=10)
+    receipt_commit = sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True, timeout=10,
+    ).stdout.strip()
+
+    canonical = doc_resolver_mod._excerpt_canonical("needle")
+    expected_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    receipt = grader_service_mod.PacketReceipt(
+        question_id="q1",
+        question="Where is the needle?",
+        source_path="pkg/thing.py",
+        source_lines="2-2",
+        source_commit=receipt_commit,
+        excerpt_sha256=expected_sha,
+        oracle_excerpt="needle",
+        oracle_claim="needle is on line 2",
+        command_text="unsupported command shape",
+    )
+
+    def runner_should_not_fire(*args, **kwargs):
+        raise AssertionError("must not fall back to event-base revision")
+
+    cfg = replace(daemon_config, core_repo_path=repo)
+    row = grader_service_mod._grade_one_receipt(
+        cfg=cfg,
+        receipt=receipt,
+        code_revision_id="event-base-revision",
+        repo_full_name="tandemstream/core",
+        run_commit=HEAD_SHA,
+        revision_pin_mode="receipt-source",
+        _runner_run_one=runner_should_not_fire,
+        _grader_grade=_fake_grader(grade="full_match", confidence=1.0),
+        _classify_skip=lambda *_args, **_kwargs: None,
+    )
+
+    assert row.score_status == "skipped_revision_not_indexed"
+    assert row.clean_excluded_reason == "revision_not_indexed"
+    assert row.atlas_commit_sha == receipt_commit
+    assert row.atlas_code_revision_id is None
+
+
 def test_run_pr_grading_stub(daemon_config, db_path, state_file, tmp_path, monkeypatch):
     """End-to-end orchestrator run with all I/O stubbed.
 

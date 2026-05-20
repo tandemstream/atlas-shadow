@@ -153,26 +153,28 @@ The pilot exposed an important issue: a receipt can be valid at its
 pinned source commit while the Atlas corpus is graded at a later run
 commit where those lines moved.
 
-Phase 2 must pick one policy per run:
+The batch grader now separates the two use cases explicitly:
 
-- `run_commit`: evidence rows are expected to resolve against the
-  current indexed corpus. Line drift counts against Atlas unless the
-  oracle source is repaired.
-- `receipt_commit`: grade each evidence row against the corpus revision
-  matching its source commit. This is cleaner but requires every receipt
-  commit to be indexed.
-- `latest_packet_change`: grade each packet at the latest commit touching
-  its Q&A file. This is a compromise but still needs indexed historical
-  revisions.
+- `event-base`: live PR-gate mode. Every receipt queries the synthetic
+  PR base revision selected by the batch/event. This preserves pre-merge
+  gate semantics.
+- `receipt-source`: offline baseline mode. Each code evidence row looks
+  up `source_commit` in the ingest ledger and queries that exact
+  `code_revision_id`. Planner Evidence and Atlas Evidence are therefore
+  scored against the same source snapshot.
 
-Recommendation after the Phase-1 pilot: layered reports should target
-`receipt_commit` once historical coverage is cheap enough. Receipts are
-authored against specific source states, and the layered score should
+`receipt-source` is the default for `grade-packet-batch` because receipts
+are authored against specific source states, and the layered score should
 not mix "Atlas missed this evidence" with "the repository moved since
-the receipt was authored."
+the receipt was authored." If a receipt's historical commit has not been
+ingested, the row is reported as
+`score_status=skipped_revision_not_indexed` /
+`clean_excluded_reason=revision_not_indexed` rather than counted as an
+Atlas miss.
 
-Until then, a `run_commit` layered report is still useful, but it must
-surface `run_commit_line_drift` as both:
+A `run_commit` / `event-base` layered report is still useful for live
+gating and current-state health checks, but it must surface
+`run_commit_line_drift` as both:
 
 - a Planner Evidence failure when the planner's evidence is no longer
   valid for the current benchmark; and
