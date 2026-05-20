@@ -72,6 +72,7 @@ class LayeredSpec:
     forbidden_claims: tuple[dict[str, Any], ...]
     uncertainty_notes: tuple[dict[str, Any], ...]
     synthesis_criteria: tuple[SynthesisCriterion, ...]
+    synthesis_status: str = "hand_authored"
     cost: dict[str, Any] = field(default_factory=dict)
 
 
@@ -95,6 +96,7 @@ class LayeredReport:
     cost: dict[str, Any]
     rows: list[dict[str, Any]]
     synthesis_oracle: dict[str, Any]
+    synthesis_warnings: list[dict[str, Any]]
 
     @property
     def planner_evidence_pct(self) -> Optional[float]:
@@ -165,6 +167,7 @@ def load_spec(path: Path) -> LayeredSpec:
         forbidden_claims=tuple(synth.get("forbidden_claims", []) or []),
         uncertainty_notes=tuple(synth.get("uncertainty_notes", []) or []),
         synthesis_criteria=tuple(criteria),
+        synthesis_status=str(synth.get("status") or "hand_authored"),
         cost=dict(raw.get("cost") or {}),
     )
 
@@ -316,7 +319,9 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
                 }
                 for c in spec.synthesis_criteria
             ],
+            "status": spec.synthesis_status,
         },
+        synthesis_warnings=_synthesis_support_warnings(spec),
     )
 
 
@@ -502,6 +507,7 @@ def to_json(report: LayeredReport) -> dict[str, Any]:
         "cost": report.cost,
         "rows": report.rows,
         "synthesis_oracle": report.synthesis_oracle,
+        "synthesis_warnings": report.synthesis_warnings,
     }
 
 
@@ -563,6 +569,7 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
                     "pct": r.atlas_synthesis_pct,
                 },
                 "failure_counts": r.failure_counts,
+                "synthesis_warnings": r.synthesis_warnings,
             }
             for r in sorted(reports, key=lambda item: item.packet_id)
         ],
@@ -714,6 +721,25 @@ def render_markdown(report: LayeredReport) -> str:
             f"{_points(item['atlas_points'], item['points_possible'])} | {item.get('notes', '')} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Synthesis Support Warnings",
+            "",
+            "| Required Point | Warning | Supporting Rows |",
+            "|---|---|---|",
+        ]
+    )
+    if report.synthesis_warnings:
+        for warning in report.synthesis_warnings:
+            qids = ", ".join(warning.get("qids") or []) or "-"
+            lines.append(
+                f"| {warning.get('required_point_id')} | "
+                f"{warning.get('warning')} | {qids} |"
+            )
+    else:
+        lines.append("| - | - | - |")
+
     lines.extend(["", "## Failure Counts", "", "| Layer | Failure Type | Count |", "|---|---|---:|"])
     if not report.failure_counts:
         lines.append("| - | - | 0 |")
@@ -786,6 +812,62 @@ def _runtime_rows_by_qid(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
             if qid:
                 rows[str(qid)] = dict(row)
     return rows
+
+
+def _synthesis_support_warnings(spec: LayeredSpec) -> list[dict[str, Any]]:
+    """Warn when synthesis required points lack verified evidence support.
+
+    Phase-1 layered sidecars are hand-authored. The warning is deliberately
+    non-blocking, but it catches the common trap where a rubric keeps requiring
+    a point after the evidence layer has correctly retyped its receipts as
+    unresolved, context-only, or command-only. Those points may still be useful
+    for synthesis, but they should not be mistaken for clean Atlas-evidence
+    misses.
+    """
+
+    if spec.synthesis_status == "draft":
+        return []
+
+    required_ids = [
+        str(item.get("id"))
+        for item in spec.required_points
+        if item.get("id") is not None
+    ]
+    warnings: list[dict[str, Any]] = []
+    for point_id in required_ids:
+        supporting = [
+            row for row in spec.evidence_rows
+            if point_id in row.required_point_ids
+        ]
+        if not supporting:
+            warnings.append({
+                "required_point_id": point_id,
+                "warning": "no_supporting_rows",
+                "qids": [],
+            })
+            continue
+
+        verified_evidence = [
+            row for row in supporting
+            if row.oracle_bucket == "evidence" and row.oracle_status == "verified"
+        ]
+        if verified_evidence:
+            continue
+
+        if any(row.oracle_status != "verified" for row in supporting):
+            warning = "depends_on_unresolved_evidence"
+        elif any(row.oracle_bucket == "context" for row in supporting):
+            warning = "context_only_support"
+        elif any(row.oracle_bucket == "command" for row in supporting):
+            warning = "command_only_support"
+        else:
+            warning = "no_verified_evidence_support"
+        warnings.append({
+            "required_point_id": point_id,
+            "warning": warning,
+            "qids": [row.qid for row in supporting],
+        })
+    return warnings
 
 
 def _atlas_failure_type(runtime: dict[str, Any]) -> str:
