@@ -603,6 +603,7 @@ def _grade_one_receipt(
     code_revision_id: Optional[str],
     repo_full_name: str,
     run_commit: Optional[str] = None,
+    atlas_query_cache: Any = None,
     _runner_run_one: Optional[Callable] = None,
     _doc_resolver: Callable = doc_resolver_mod.resolve_doc_receipt,
     _grader_grade: Optional[Callable] = None,
@@ -632,6 +633,10 @@ def _grade_one_receipt(
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None
+    # PR atlas-shadow-query-cache-v1: ``None`` until the runner is
+    # called (doc_resolver / pre-atlas-skip paths stay ``None``;
+    # only the code path through runner.run_one sets this).
+    atlas_cache_status: Optional[str] = None
     # PR #17: receipt-side snapshot resolves for ALL receipts (doc +
     # code) so the unavailable-source-ref skip can apply to both.
     # Resolver short-circuits internally on receipts without
@@ -731,12 +736,16 @@ def _grade_one_receipt(
             principal_id=cfg.default_principal_id,
             domain_pack="code",
             code_revision_id=code_revision_id,
+            atlas_query_cache=atlas_query_cache,
         )
         atlas_response = shadow_response.atlas_response
         atlas_answer_text = atlas_response.answer_text or ""
         atlas_returncode = atlas_response.returncode
         atlas_exception = atlas_response.exception
         atlas_stderr_head = (atlas_response.stderr or "")[:1000] or None
+        # PR atlas-shadow-query-cache-v1: capture per-row cache status
+        # from the runner. ``"hit"`` / ``"miss"`` / ``"disabled"``.
+        atlas_cache_status = shadow_response.atlas_cache_status
         # PR #16: extract compact retrieval diagnostics from the raw
         # workspace_atlas_query JSON. Doc-resolver path keeps the
         # ``_atlas_raw_result_diagnostics(None)`` default initialized
@@ -825,6 +834,7 @@ def _grade_one_receipt(
             lane=lane,
             score_status=score_status,
             clean_excluded_reason=clean_reason,
+            atlas_cache_status=atlas_cache_status,
         )
 
     snap_status = (
@@ -881,6 +891,7 @@ def _grade_one_receipt(
         lane=lane,
         score_status=score_status,
         clean_excluded_reason=clean_reason,
+        atlas_cache_status=atlas_cache_status,
         # PR #20: surface command_snapshot diagnostics even when the
         # row went through atlas (e.g. command_text was UNSUPPORTED or
         # ERROR — useful diagnostic so consumers can see "command lane
@@ -1387,6 +1398,7 @@ def run_pr_grading(
     event,
     *,
     github_token: str,
+    atlas_query_cache: Any = None,
     _fetch_pr_files: Callable = _fetch_pr_files,
     _fetch_file_at_ref: Callable = _fetch_file_at_ref,
     _post_pending: Callable = gh_check_mod.post_pending_status,
@@ -1579,6 +1591,13 @@ def run_pr_grading(
                         # (propagated through event.base_sha by the
                         # synthetic PrEvent in grade_batch).
                         run_commit=event.base_sha,
+                        # PR atlas-shadow-query-cache-v1: forwarded to
+                        # runner.run_one. None on the live PR-grading
+                        # webhook path (caller doesn't pass a cache);
+                        # populated only when batch mode constructs
+                        # one. Keeps production gates free of cached
+                        # results.
+                        atlas_query_cache=atlas_query_cache,
                     )
                 except Exception as exc:
                     rows.append(
@@ -1664,6 +1683,13 @@ def run_pr_grading(
                 # explicit_source_fast_path / fuzzy_find_code /
                 # scan_search / non_retrieval) the row was scored on.
                 "by_lane": summary.by_lane,
+                # PR atlas-shadow-query-cache-v1: per-packet cache
+                # observability counts. Aggregator sums across
+                # packets to produce manifest-level totals.
+                "atlas_cache_hit_count": summary.atlas_cache_hit_count,
+                "atlas_cache_miss_count": summary.atlas_cache_miss_count,
+                "atlas_cache_disabled_count":
+                    summary.atlas_cache_disabled_count,
                 "artifact_path": str(artifact_path),
             })
             # Hold the live summary in a parallel list for the
@@ -1890,4 +1916,6 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "command_snapshot_sha256": row.command_snapshot_sha256,
         "command_snapshot_head": row.command_snapshot_head,
         "command_snapshot_exit_code": row.command_snapshot_exit_code,
+        # PR atlas-shadow-query-cache-v1: per-row cache observability.
+        "atlas_cache_status": row.atlas_cache_status,
     }

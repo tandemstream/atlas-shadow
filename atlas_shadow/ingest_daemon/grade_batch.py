@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import atlas_query_cache as atlas_query_cache_mod
 from . import grader_service as gs
 from . import overall_summary as os_mod
 from .receiver import PrEvent
@@ -366,6 +367,7 @@ def grade_one_packet(
     qna_log_path: str,
     github_token: str,
     core_repo_path: Path,
+    atlas_query_cache: Any = None,
     _run_pr_grading: Callable = gs.run_pr_grading,
     _read_file_at_commit: Callable = _read_file_via_git_show,
 ) -> dict[str, Any]:
@@ -408,6 +410,7 @@ def grade_one_packet(
         cfg,
         event,
         github_token=github_token,
+        atlas_query_cache=atlas_query_cache,
         _fetch_pr_files=_fetch_for_this_packet,
         _fetch_file_at_ref=_read_file_local,
         _post_pending=_noop_post_pending,
@@ -573,6 +576,31 @@ def _summary_skipped_command_snapshot_count(summary) -> int:
     if isinstance(summary, dict):
         return int(summary.get("skipped_command_snapshot_count", 0) or 0)
     return getattr(summary, "skipped_command_snapshot_count", 0) or 0
+
+
+# ─── PR atlas-shadow-query-cache-v1: cache observability counts ──────
+
+
+def _summary_atlas_cache_hit_count(summary) -> int:
+    """Cache-hit count, back-compat zero for legacy summaries."""
+    if isinstance(summary, dict):
+        return int(summary.get("atlas_cache_hit_count", 0) or 0)
+    return getattr(summary, "atlas_cache_hit_count", 0) or 0
+
+
+def _summary_atlas_cache_miss_count(summary) -> int:
+    """Cache-miss count, back-compat zero for legacy summaries."""
+    if isinstance(summary, dict):
+        return int(summary.get("atlas_cache_miss_count", 0) or 0)
+    return getattr(summary, "atlas_cache_miss_count", 0) or 0
+
+
+def _summary_atlas_cache_disabled_count(summary) -> int:
+    """Cache-disabled count (subprocess fired without checking cache).
+    Back-compat zero."""
+    if isinstance(summary, dict):
+        return int(summary.get("atlas_cache_disabled_count", 0) or 0)
+    return getattr(summary, "atlas_cache_disabled_count", 0) or 0
 
 
 # ─── Per-evidence-type rollup (PR-evidence-breakdown) ────────────────
@@ -811,6 +839,12 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     total_skipped_doc_corpus_excluded = 0
     # PR #20: command-snapshot lane total.
     total_skipped_command_snapshot = 0
+    # PR atlas-shadow-query-cache-v1: cache observability totals.
+    # Together they answer "did this run get faster because Atlas
+    # improved, or because the cache hid the work?"
+    total_atlas_cache_hits = 0
+    total_atlas_cache_misses = 0
+    total_atlas_cache_disabled = 0
     # Per-evidence-type rollup (run level). Per-packet breakdowns are
     # stored under per_packet_pct[slug]["by_evidence_type"] below.
     total_by_evidence_type = _empty_evidence_breakdown()
@@ -830,6 +864,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_unavailable = 0
         packet_corpus_excluded = 0
         packet_command_snapshot = 0
+        packet_atlas_cache_hits = 0
+        packet_atlas_cache_misses = 0
+        packet_atlas_cache_disabled = 0
         packet_by_evidence_type = _empty_evidence_breakdown()
         packet_by_lane = _empty_lane_breakdown()
         for summary in outcome.get("summaries", []):
@@ -843,6 +880,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             packet_unavailable += _summary_skipped_unavailable_source_ref_count(summary)
             packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
             packet_command_snapshot += _summary_skipped_command_snapshot_count(summary)
+            packet_atlas_cache_hits += _summary_atlas_cache_hit_count(summary)
+            packet_atlas_cache_misses += _summary_atlas_cache_miss_count(summary)
+            packet_atlas_cache_disabled += _summary_atlas_cache_disabled_count(summary)
             summary_breakdown = _summary_by_evidence_type(summary)
             _accumulate_evidence_breakdown(packet_by_evidence_type, summary_breakdown)
             _accumulate_evidence_breakdown(total_by_evidence_type, summary_breakdown)
@@ -859,6 +899,9 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         total_skipped_unavailable_source_ref += packet_unavailable
         total_skipped_doc_corpus_excluded += packet_corpus_excluded
         total_skipped_command_snapshot += packet_command_snapshot
+        total_atlas_cache_hits += packet_atlas_cache_hits
+        total_atlas_cache_misses += packet_atlas_cache_misses
+        total_atlas_cache_disabled += packet_atlas_cache_disabled
         packet_clean_total = packet_receipts - packet_excluded
         packet_clean_pct = (
             round(packet_correct * 100 / packet_clean_total, 1)
@@ -882,6 +925,11 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             "skipped_doc_corpus_excluded": packet_corpus_excluded,
             # PR #20: command_snapshot lane per-packet count.
             "skipped_command_snapshot": packet_command_snapshot,
+            # PR atlas-shadow-query-cache-v1: cache observability
+            # per packet.
+            "atlas_cache_hits": packet_atlas_cache_hits,
+            "atlas_cache_misses": packet_atlas_cache_misses,
+            "atlas_cache_disabled": packet_atlas_cache_disabled,
             # Per-evidence-type breakdown for this packet — same
             # bucket shape as total_by_evidence_type, scoped to this
             # packet's rows only.
@@ -927,6 +975,13 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         "total_skipped_doc_corpus_excluded": total_skipped_doc_corpus_excluded,
         # PR #20: command-snapshot lane total.
         "total_skipped_command_snapshot": total_skipped_command_snapshot,
+        # PR atlas-shadow-query-cache-v1: per-run cache observability.
+        # The three counters together answer "did this run get faster
+        # because Atlas improved, or because the cache hid the work?"
+        # Sum to (total_receipts - receipts_that_never_called_atlas).
+        "total_atlas_cache_hits": total_atlas_cache_hits,
+        "total_atlas_cache_misses": total_atlas_cache_misses,
+        "total_atlas_cache_disabled": total_atlas_cache_disabled,
         # Per-evidence-type breakdown across the whole run. Same bucket
         # shape as the per-packet by_evidence_type. Surfaces "where is
         # Atlas actually being measured?" at the run level so the
@@ -1227,6 +1282,23 @@ def cmd_grade_packet_batch(cfg, args) -> int:
     fatal_setup = 0
     partial_failures = 0
 
+    # PR atlas-shadow-query-cache-v1: build the cache once for the
+    # whole batch. ``build_query_cache_if_enabled`` returns ``None``
+    # when ``ATLAS_SHADOW_QUERY_CACHE=off`` (or cfg disables it), in
+    # which case every receipt's row carries ``atlas_cache_status="disabled"``.
+    # The cache is BATCH-only: the live webhook PR-grading path
+    # constructs no cache, so production gates never observe a
+    # cached result.
+    atlas_query_cache = atlas_query_cache_mod.build_query_cache_if_enabled(
+        batch_cfg
+    )
+    if atlas_query_cache is not None and not args.quiet:
+        print(
+            f"[batch] atlas-query cache enabled at "
+            f"{atlas_query_cache.db_path}",
+            flush=True,
+        )
+
     for idx, qna_log in enumerate(qna_logs, start=1):
         slug = _packet_slug_from_qna_path(qna_log)
         packet_commit_sha = packet_commit_shas.get(qna_log, commit_sha)
@@ -1244,6 +1316,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 qna_log_path=qna_log,
                 github_token=github_token,
                 core_repo_path=core_repo_path,
+                atlas_query_cache=atlas_query_cache,
             )
         except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
             partial_failures += 1

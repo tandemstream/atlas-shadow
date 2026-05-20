@@ -518,6 +518,16 @@ def _format_json(
                 # Per-lane breakdown (run level). Same back-compat
                 # contract as total_by_evidence_type.
                 "total_by_lane": r.get("total_by_lane"),
+                # PR atlas-shadow-query-cache-v1: cache observability
+                # totals per run. Three counters answer "did this
+                # run get faster because Atlas improved, or because
+                # the cache hid the work?" Legacy manifests get
+                # zero (the fields didn't exist pre-cache).
+                "total_atlas_cache_hits": r.get("total_atlas_cache_hits", 0),
+                "total_atlas_cache_misses": r.get("total_atlas_cache_misses", 0),
+                "total_atlas_cache_disabled": r.get(
+                    "total_atlas_cache_disabled", 0
+                ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }

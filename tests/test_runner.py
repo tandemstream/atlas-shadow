@@ -243,3 +243,226 @@ def test_run_batch_collects_all_responses(tmp_path):
     assert len(out) == 3
     assert [r.question_id for r in out] == ["Q01", "Q02", "Q03"]
     assert len(calls) == 3
+
+
+# ─── Atlas-query cache integration ────────────────────────────────────
+
+
+def _make_atlas_leaf(tmp_path):
+    atlas_leaf = tmp_path / "products" / "tandem" / "packages" / "python" / "atlas"
+    atlas_leaf.mkdir(parents=True)
+    return atlas_leaf
+
+
+def _stub_invoke(*, response=None):
+    """Build a fake _invoke that records argv calls + returns a stub
+    AtlasResponse. Default response is a successful one suitable for
+    caching."""
+    calls = []
+    default = runner_mod.AtlasResponse(
+        tool_used="find_code",
+        answer_text="cached-or-fresh",
+        raw_result={"sample": "payload"},
+        evidence_keys=["k"],
+        atlas_latency_ms=42,
+        request_id="r",
+        commit="c",
+    )
+
+    def _invoke(argv, *, cwd, timeout):
+        calls.append({"argv": argv, "cwd": cwd, "timeout": timeout})
+        return response or default
+
+    return _invoke, calls
+
+
+def _receipt():
+    return parser_mod.Receipt(
+        question_id="Q01",
+        question="what does foo do?",
+        oracle_excerpt="e",
+        oracle_claim="c",
+        source_path="core/foo.py",
+        source_lines="10-20",
+        commit_sha="408858a",
+    )
+
+
+def test_run_one_without_cache_returns_disabled_status(tmp_path):
+    """No cache passed → cache_status='disabled', subprocess called
+    normally. Live PR-grading webhook path follows this codepath."""
+    _make_atlas_leaf(tmp_path)
+    _invoke, calls = _stub_invoke()
+
+    resp = runner_mod.run_one(
+        _receipt(),
+        fixture_id="fx",
+        org_id="org-1",
+        core_repo_path=tmp_path,
+        principal_id="user-1",
+        domain_pack="code",
+        code_revision_id="rev-1",
+        _invoke=_invoke,
+    )
+    assert resp.atlas_cache_status == "disabled"
+    assert len(calls) == 1
+
+
+def test_run_one_with_cache_hit_skips_subprocess(tmp_path):
+    """Cache hit → no subprocess call, atlas_response reconstructed
+    from the cached JSON. This is the path that makes regen-loops
+    cheap."""
+    from atlas_shadow.ingest_daemon.atlas_query_cache import (
+        AtlasQueryCache,
+        CacheKey,
+    )
+
+    _make_atlas_leaf(tmp_path)
+    cache = AtlasQueryCache(tmp_path / "cache.sqlite")
+    receipt = _receipt()
+    # Pre-populate the cache with what the runner would store.
+    cache.set(
+        CacheKey(
+            query_text=receipt.question,
+            tool="find_code",
+            source_path=receipt.source_path,
+            source_lines=receipt.source_lines,
+            source_commit=receipt.commit_sha,
+            code_revision_id="rev-1",
+            org_id="org-1",
+            principal_id="user-1",
+            domain_pack="code",
+        ),
+        response_json=__import__("json").dumps({
+            "tool_used": "find_code",
+            "answer_text": "from-cache",
+            "raw_result": {"src": "cache"},
+            "evidence_keys": ["e1"],
+            "atlas_latency_ms": 999,
+            "request_id": "cached-req",
+            "commit": "408858a",
+            "stderr": "",
+            "returncode": 0,
+            "exception": None,
+        }),
+        response_latency_ms=999,
+    )
+
+    _invoke, calls = _stub_invoke()
+    resp = runner_mod.run_one(
+        receipt,
+        fixture_id="fx",
+        org_id="org-1",
+        core_repo_path=tmp_path,
+        tool="find_code",
+        principal_id="user-1",
+        domain_pack="code",
+        code_revision_id="rev-1",
+        atlas_query_cache=cache,
+        _invoke=_invoke,
+    )
+    assert resp.atlas_cache_status == "hit"
+    assert resp.atlas_response.answer_text == "from-cache"
+    assert resp.atlas_response.request_id == "cached-req"
+    assert len(calls) == 0, "subprocess must NOT be called on cache hit"
+
+
+def test_run_one_with_cache_miss_calls_then_stores(tmp_path):
+    """Cache miss → subprocess called, result stored. Second call with
+    same inputs is a hit. This is the canonical "first run misses,
+    second run hits" behavior the operator validates."""
+    from atlas_shadow.ingest_daemon.atlas_query_cache import AtlasQueryCache
+
+    _make_atlas_leaf(tmp_path)
+    cache = AtlasQueryCache(tmp_path / "cache.sqlite")
+    _invoke, calls = _stub_invoke()
+    receipt = _receipt()
+
+    resp1 = runner_mod.run_one(
+        receipt, fixture_id="fx", org_id="org-1",
+        core_repo_path=tmp_path, tool="find_code",
+        principal_id="user-1", domain_pack="code",
+        code_revision_id="rev-1",
+        atlas_query_cache=cache, _invoke=_invoke,
+    )
+    assert resp1.atlas_cache_status == "miss"
+    assert len(calls) == 1
+
+    # Second call: same inputs → cache hit, no new subprocess.
+    resp2 = runner_mod.run_one(
+        receipt, fixture_id="fx", org_id="org-1",
+        core_repo_path=tmp_path, tool="find_code",
+        principal_id="user-1", domain_pack="code",
+        code_revision_id="rev-1",
+        atlas_query_cache=cache, _invoke=_invoke,
+    )
+    assert resp2.atlas_cache_status == "hit"
+    assert len(calls) == 1, "second call must come from cache"
+    # Round-trip: cached response equals the original.
+    assert resp2.atlas_response.answer_text == resp1.atlas_response.answer_text
+    assert resp2.atlas_response.tool_used == resp1.atlas_response.tool_used
+
+
+def test_run_one_does_not_cache_failed_responses(tmp_path):
+    """A subprocess that returned nonzero / raised an exception must
+    NOT be cached — caching a transient failure would mask
+    intermittent infrastructure issues on subsequent runs."""
+    from atlas_shadow.ingest_daemon.atlas_query_cache import AtlasQueryCache
+
+    _make_atlas_leaf(tmp_path)
+    cache = AtlasQueryCache(tmp_path / "cache.sqlite")
+    failure_response = runner_mod.AtlasResponse(
+        tool_used="", answer_text="", raw_result=None,
+        evidence_keys=[], atlas_latency_ms=5, request_id="", commit="",
+        stderr="boom", returncode=1, exception="RuntimeError: subprocess died",
+    )
+    _invoke, calls = _stub_invoke(response=failure_response)
+
+    resp = runner_mod.run_one(
+        _receipt(), fixture_id="fx", org_id="org-1",
+        core_repo_path=tmp_path, tool="find_code",
+        principal_id="user-1", domain_pack="code",
+        code_revision_id="rev-1",
+        atlas_query_cache=cache, _invoke=_invoke,
+    )
+    assert resp.atlas_cache_status == "miss"
+    # Cache should be empty — the failed response was not stored.
+    assert cache.stats()["entries"] == 0
+
+
+def test_run_one_cache_key_includes_source_anchors(tmp_path):
+    """Critical correctness: two receipts with identical query text
+    but different source_path / source_lines must produce different
+    cache keys. PR #426 fast-path retrieval depends on those anchors,
+    so they must invalidate the cache."""
+    from atlas_shadow.ingest_daemon.atlas_query_cache import AtlasQueryCache
+
+    _make_atlas_leaf(tmp_path)
+    cache = AtlasQueryCache(tmp_path / "cache.sqlite")
+    _invoke, calls = _stub_invoke()
+
+    a = parser_mod.Receipt(
+        question_id="Q01", question="same question",
+        oracle_excerpt="e", oracle_claim="c",
+        source_path="core/a.py", source_lines="1-10",
+        commit_sha="408858a",
+    )
+    b = parser_mod.Receipt(
+        question_id="Q02", question="same question",
+        oracle_excerpt="e", oracle_claim="c",
+        source_path="core/b.py", source_lines="1-10",
+        commit_sha="408858a",
+    )
+    runner_mod.run_one(
+        a, fixture_id="fx", org_id="org-1",
+        core_repo_path=tmp_path, tool="find_code",
+        atlas_query_cache=cache, _invoke=_invoke,
+    )
+    runner_mod.run_one(
+        b, fixture_id="fx", org_id="org-1",
+        core_repo_path=tmp_path, tool="find_code",
+        atlas_query_cache=cache, _invoke=_invoke,
+    )
+    # Two distinct cache entries → both required separate subprocess calls.
+    assert len(calls) == 2
+    assert cache.stats()["entries"] == 2
