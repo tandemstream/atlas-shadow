@@ -35,6 +35,7 @@ from . import ingest as ingest_mod
 from . import parser as parser_mod
 from . import runner as runner_mod
 from .ingest_daemon import compare_runs as compare_runs_mod
+from .ingest_daemon import counted_misses as counted_misses_mod
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -340,6 +341,43 @@ def shadow_compare_runs(
         f"clean: {_fmt_pct(comparison.before_clean_pct)} → "
         f"{_fmt_pct(comparison.after_clean_pct)} "
         f"(Δ {comparison.clean_pct_delta_pp})"
+    )
+
+
+@main.command("shadow-counted-misses")
+@click.option(
+    "--run-dir",
+    "run_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Path to a shadow-runs/<run>/ directory with manifest.json + artifacts/.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help=(
+        "Directory to write counted-misses.{md,json}. Defaults to "
+        "<run-dir>/_counted_misses/."
+    ),
+)
+def shadow_counted_misses(run_dir: Path, output_dir: Optional[Path]) -> None:
+    """Write the clean-denominator miss worklist for one run.
+
+    The report contains only rows with ``score_status=counted`` and a
+    non-pass grade. This is the high-signal queue for Atlas tuning after
+    stale receipts, command snapshots, and non-retrieval evidence have
+    been excluded from the clean denominator.
+    """
+    if output_dir is None:
+        output_dir = run_dir / "_counted_misses"
+    report = counted_misses_mod.build_report(run_dir)
+    md_path, json_path = counted_misses_mod.write_reports(report, output_dir)
+    click.echo(f"[atlas-shadow] wrote {md_path} and {json_path}", err=True)
+    click.echo(
+        f"counted_misses={report.total_misses} "
+        f"by_lane={json.dumps(report.by_lane, sort_keys=True)}"
     )
 
 

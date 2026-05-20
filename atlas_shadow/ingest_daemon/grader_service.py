@@ -1284,6 +1284,14 @@ def _derive_score_status(
         grader said ``no_match``. Atlas isn't being measured on a real
         receipt — the receipt itself drifted at authoring time.
 
+      - ``("skipped_receipt_stale", "receipt_hash_mismatch")``: the
+        cited path/lines render at the receipt's pinned commit, but the
+        rendered bytes do not match the receipt's own excerpt hash
+        (``source_snapshot_status == "git_source_hash_mismatch"``).
+        This is the same clean-denominator class as source-missing
+        receipt drift: the receipt anchor is internally inconsistent,
+        so Atlas retrieval should not be penalized.
+
       - ``("skipped_run_commit_line_drift", "run_commit_line_drift")``
         (PR #15): the receipt-commit snapshot matched (receipt is
         internally consistent at authoring time), but the run-commit
@@ -1352,6 +1360,8 @@ def _derive_score_status(
     )
     if source_snapshot_status == "git_source_missing" and not resolver_resolved:
         return ("skipped_receipt_stale", "receipt_stale")
+    if source_snapshot_status == "git_source_hash_mismatch" and not resolver_resolved:
+        return ("skipped_receipt_stale", "receipt_hash_mismatch")
     # Run-commit drift: receipt matched at authoring, but at the
     # grading commit the same path/lines either render different bytes
     # (``run_commit_hash_mismatch``) or the file/path is gone entirely
