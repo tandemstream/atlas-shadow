@@ -28,6 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
+from . import counted_misses as counted_misses_mod
+
 
 REGRESSION_THRESHOLD_PP = 10  # >=10pp drop from prior run flags as regression
 IMPROVEMENT_THRESHOLD_PP = 10  # >=10pp gain from prior run flags as improvement
@@ -402,6 +404,55 @@ def _format_md(
             )
             lines.append("")
 
+    # Latest run — counted misses by fix layer. Surfaces the next
+    # tuning queue right on the dashboard so an operator doesn't have
+    # to know about the standalone ``shadow-counted-misses`` CLI.
+    # Only rendered when the latest run actually has a counted-misses
+    # report (i.e., per-receipt artifacts exist — modern instrumented
+    # baselines). Legacy runs and runs with zero counted misses both
+    # suppress the section.
+    if runs:
+        latest = runs[-1]
+        latest_cm = latest.get("_counted_misses")
+        if isinstance(latest_cm, dict) and int(latest_cm.get("total_misses", 0)) > 0:
+            lines.append("## Latest run — counted misses by fix layer")
+            lines.append("")
+            total = int(latest_cm.get("total_misses", 0))
+            by_layer = latest_cm.get("by_fix_layer") or {}
+            by_lane_cm = latest_cm.get("by_lane") or {}
+            lines.append(f"**{total} counted misses** across "
+                         f"{sum(by_lane_cm.values())} rows in "
+                         f"{len(by_lane_cm)} lanes.")
+            lines.append("")
+            lines.append("| Fix layer | Misses |")
+            lines.append("|---|---:|")
+            # Sort by miss count descending so the largest queue is at top.
+            for layer, count in sorted(
+                by_layer.items(), key=lambda kv: (-int(kv[1] or 0), kv[0])
+            ):
+                lines.append(f"| `{layer}` | {count} |")
+            lines.append("")
+            # Relative link works because overall-summary.md lives at
+            # <shadow_runs_root>/overall-summary.md and counted-misses.md
+            # lives at <shadow_runs_root>/<run-dir>/_counted_misses/.
+            latest_dir = latest.get("_dir") or latest.get("run_name")
+            if latest_dir:
+                cm_md_link = f"{latest_dir}/_counted_misses/counted-misses.md"
+                lines.append(
+                    f"_Per-row detail: [{cm_md_link}]({cm_md_link})._"
+                )
+            lines.append(
+                "_Fix layer is a triage label, not a grader verdict. "
+                "`receipt_anchor_mismatch` / `receipt_snapshot_mismatch` "
+                "→ receipt re-authoring. `explicit_span_*` → narrow span "
+                "in receipt or expansion in Atlas. `fuzzy_retrieval` → "
+                "real ranking work. `receipt_or_command_routing` → "
+                "consider `command_text` or `evidence_type` change. "
+                "`doc_resolver` / `empty_atlas_response` → drill into "
+                "the row to decide._"
+            )
+            lines.append("")
+
     lines.append("## Run history")
     lines.append("")
     # PR #14: dashboard now shows raw + clean pct side by side. Legacy
@@ -518,6 +569,24 @@ def _format_json(
                 # Per-lane breakdown (run level). Same back-compat
                 # contract as total_by_evidence_type.
                 "total_by_lane": r.get("total_by_lane"),
+                # Counted-misses summary (run level). ``None`` on legacy
+                # runs that don't have per-receipt artifacts to read.
+                # Carries ``total_misses`` + ``by_lane`` + ``by_fix_layer``
+                # so consumers can chart the tuning queue across runs
+                # without re-reading per-row artifacts.
+                "counted_misses": (
+                    {
+                        "total_misses": r["_counted_misses"].get(
+                            "total_misses", 0
+                        ),
+                        "by_lane": r["_counted_misses"].get("by_lane") or {},
+                        "by_fix_layer": (
+                            r["_counted_misses"].get("by_fix_layer") or {}
+                        ),
+                    }
+                    if isinstance(r.get("_counted_misses"), dict)
+                    else None
+                ),
                 "grader_backend": r.get("grader_backend"),
                 "grader_model": r.get("grader_model"),
             }
@@ -531,16 +600,72 @@ def _format_json(
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+_COUNTED_MISSES_DIR_NAME = "_counted_misses"
+
+
+def _ensure_counted_misses_report(run_dir: Path) -> Optional[dict[str, Any]]:
+    """Build (or refresh) ``<run_dir>/_counted_misses/counted-misses.{md,json}``
+    if the run has artifacts to read. Returns the parsed JSON payload, or
+    ``None`` when the run lacks artifacts (legacy / pre-instrumentation
+    baselines).
+
+    Failure modes are non-fatal: any exception during build_report /
+    write_reports is logged to stderr and ``None`` is returned. The
+    dashboard regen prefers degraded rendering over a crash because
+    counted-misses depends on per-receipt artifacts that older
+    baselines never wrote — and a corrupted artifact in one run
+    shouldn't prevent the rest of the dashboard from updating.
+    """
+    artifacts_dir = run_dir / "artifacts"
+    if not artifacts_dir.is_dir():
+        # Legacy / aggregate-only baselines didn't write per-receipt
+        # artifacts. counted_misses.build_report would just produce an
+        # empty report; skipping is faster and avoids creating empty
+        # _counted_misses/ directories under historical runs.
+        return None
+    cm_dir = run_dir / _COUNTED_MISSES_DIR_NAME
+    try:
+        report = counted_misses_mod.build_report(run_dir)
+        _, json_path = counted_misses_mod.write_reports(report, cm_dir)
+        return json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        import sys
+        print(
+            f"[overall_summary] WARN: counted_misses regen failed for "
+            f"{run_dir.name!r}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def regenerate(shadow_runs_root: Path) -> tuple[Path, Path]:
     """Rebuild ``overall-summary.md`` and ``overall-summary.json``
     from every ``<shadow_runs_root>/baseline-*/manifest.json``.
 
+    Also refreshes each run's ``_counted_misses/counted-misses.{md,json}``
+    via :func:`_ensure_counted_misses_report` so the operator always
+    has a current per-run failure worklist alongside the dashboard.
+
     Returns the two paths written. Caller can log them.
 
     Atomic: each file is written via tempfile → fsync → rename so a
-    mid-write crash leaves the prior content intact.
+    mid-write crash leaves the prior content intact. Counted-misses
+    sub-reports are written via the (non-atomic) counted_misses
+    module — those are derived data and a crash mid-write leaves a
+    stale-but-readable previous version.
     """
     runs = load_run_manifests(shadow_runs_root)
+    # Refresh each run's counted-misses sub-report. Stash the parsed
+    # payload on the run dict (under a leading underscore so it doesn't
+    # collide with manifest keys) so the MD/JSON formatters can render
+    # the by-fix-layer breakdown without re-reading disk.
+    for run in runs:
+        dir_name = run.get("_dir") or run.get("run_name")
+        if not dir_name:
+            continue
+        cm_payload = _ensure_counted_misses_report(shadow_runs_root / dir_name)
+        if cm_payload is not None:
+            run["_counted_misses"] = cm_payload
     regressions, improvements = _compute_callouts(runs)
     md_path = shadow_runs_root / OVERALL_MD_NAME
     json_path = shadow_runs_root / OVERALL_JSON_NAME

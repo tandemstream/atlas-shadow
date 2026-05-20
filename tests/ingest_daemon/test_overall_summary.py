@@ -802,3 +802,206 @@ def test_format_md_skips_lane_section_when_all_zero(tmp_path: Path):
     runs = os_mod.load_run_manifests(tmp_path)
     out = os_mod._format_md(runs, [], [])
     assert "Latest run — by retrieval lane" not in out
+
+
+# ─── Counted-misses dashboard integration ────────────────────────────
+
+
+def _write_run_with_artifact_row(
+    root: Path,
+    run_name: str,
+    *,
+    row: dict,
+    started_at: str = "2026-05-19T00:00:00Z",
+) -> Path:
+    """Materialize a baseline dir with one artifact carrying one row.
+
+    Used to exercise the counted_misses auto-regen path — the report
+    builder reads ``<run>/artifacts/*.json`` and pulls per-receipt
+    rows out of them.
+    """
+    run_dir = root / run_name
+    (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "run_name": run_name,
+        "commit_sha": "abc1234",
+        "code_revision_id": "rev",
+        "started_at": started_at,
+        "finished_at": "2026-05-19T01:00:00Z",
+        "total_packets": 1,
+        "total_receipts": 1,
+        "total_correct": 0,
+        "overall_pct": 0.0,
+        "grader_backend": "claude_cli",
+        "grader_model": "sonnet",
+        "per_packet_pct": {"p1": {"receipts": 1, "correct": 0, "pct": 0.0}},
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    artifact = {
+        "packet_id": "p1",
+        "schema_version": "1.0",
+        "rows": [row],
+    }
+    (run_dir / "artifacts" / "pr-0-Z-p1.json").write_text(json.dumps(artifact))
+    return run_dir
+
+
+def _counted_miss_row(**overrides) -> dict:
+    """A row shaped like a counted clean-denominator miss.
+
+    Default lane = explicit_source_fast_path, hash_mismatch on both
+    snapshots → fix_layer = receipt_anchor_mismatch.
+    """
+    base = {
+        "question_id": "q1",
+        "question": "what does this function do?",
+        "grade": "no_match",
+        "tool": "find_code",
+        "score_status": "counted",
+        "lane": "explicit_source_fast_path",
+        "evidence_type": "source_excerpt",
+        "source_snapshot_status": "git_source_hash_mismatch",
+        "run_snapshot_status": "run_commit_hash_mismatch",
+        "atlas_citation_locations": ["foo.py:10-10"],
+        "atlas_citation_count": 1,
+        "atlas_answer_len": 120,
+        "rationale": "atlas returned single comment line, oracle wants function body",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ensure_counted_misses_report_returns_none_for_legacy_run(
+    tmp_path: Path,
+):
+    """A baseline without an ``artifacts/`` dir (legacy aggregate-only
+    run) returns None and does NOT create an empty _counted_misses/."""
+    _write_run(tmp_path, "baseline-legacy")  # no artifacts/
+    result = os_mod._ensure_counted_misses_report(tmp_path / "baseline-legacy")
+    assert result is None
+    assert not (tmp_path / "baseline-legacy" / "_counted_misses").exists()
+
+
+def test_ensure_counted_misses_report_builds_for_modern_run(tmp_path: Path):
+    """A baseline WITH artifacts/ gets _counted_misses/counted-misses.md
+    + .json generated, and the parsed JSON payload is returned."""
+    _write_run_with_artifact_row(
+        tmp_path, "baseline-modern", row=_counted_miss_row(),
+    )
+    payload = os_mod._ensure_counted_misses_report(tmp_path / "baseline-modern")
+    assert payload is not None
+    assert payload["total_misses"] == 1
+    assert payload["by_lane"] == {"explicit_source_fast_path": 1}
+    assert payload["by_fix_layer"] == {"receipt_anchor_mismatch": 1}
+    cm_dir = tmp_path / "baseline-modern" / "_counted_misses"
+    assert (cm_dir / "counted-misses.md").is_file()
+    assert (cm_dir / "counted-misses.json").is_file()
+
+
+def test_ensure_counted_misses_report_swallows_errors(tmp_path: Path, capsys):
+    """A corrupt artifact file shouldn't crash the dashboard regen.
+    ``_ensure_counted_misses_report`` logs a warning and returns None."""
+    run_dir = tmp_path / "baseline-corrupt"
+    (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    # Write the manifest so load_run_manifests would accept the dir
+    # but break the artifact JSON so build_report raises.
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "run_name": "baseline-corrupt",
+        "started_at": "2026-05-19T00:00:00Z",
+    }))
+    (run_dir / "artifacts" / "pr-0-Z-bad.json").write_text("not valid json {{{")
+    result = os_mod._ensure_counted_misses_report(run_dir)
+    assert result is None
+    err = capsys.readouterr().err
+    assert "counted_misses regen failed" in err
+    assert "baseline-corrupt" in err
+
+
+def test_format_md_includes_counted_misses_section_when_misses_present(
+    tmp_path: Path,
+):
+    """The dashboard MD gains a 'Latest run — counted misses by fix
+    layer' section when the latest run has counted misses."""
+    _write_run_with_artifact_row(
+        tmp_path, "baseline-with-misses", row=_counted_miss_row(),
+    )
+    md_path, _ = os_mod.regenerate(tmp_path)
+    out = md_path.read_text()
+    assert "## Latest run — counted misses by fix layer" in out
+    assert "**1 counted misses**" in out
+    assert "| `receipt_anchor_mismatch` | 1 |" in out
+    # Link to the per-row detail file.
+    assert (
+        "baseline-with-misses/_counted_misses/counted-misses.md" in out
+    )
+
+
+def test_format_md_skips_counted_misses_section_for_legacy_runs(tmp_path: Path):
+    """If the latest run has no artifacts/, the dashboard skips the
+    counted-misses section (rather than rendering an empty one)."""
+    _write_run(tmp_path, "baseline-legacy")  # no artifacts/
+    md_path, _ = os_mod.regenerate(tmp_path)
+    assert "Latest run — counted misses" not in md_path.read_text()
+
+
+def test_format_md_skips_counted_misses_section_when_zero_misses(
+    tmp_path: Path,
+):
+    """A run with artifacts/ but no counted misses (everything passed
+    or got correctly skipped) suppresses the section — empty tables
+    just add noise."""
+    _write_run_with_artifact_row(
+        tmp_path, "baseline-clean",
+        row=_counted_miss_row(grade="full_match"),  # passes → not a miss
+    )
+    md_path, _ = os_mod.regenerate(tmp_path)
+    assert "Latest run — counted misses" not in md_path.read_text()
+
+
+def test_format_json_exposes_counted_misses_per_run(tmp_path: Path):
+    """overall-summary.json carries the counted_misses summary
+    (total_misses + by_lane + by_fix_layer) per run."""
+    _write_run_with_artifact_row(
+        tmp_path, "baseline-with-misses", row=_counted_miss_row(),
+    )
+    _, json_path = os_mod.regenerate(tmp_path)
+    payload = json.loads(json_path.read_text())
+    run = payload["runs"][0]
+    assert run["counted_misses"] is not None
+    assert run["counted_misses"]["total_misses"] == 1
+    assert run["counted_misses"]["by_lane"] == {"explicit_source_fast_path": 1}
+    assert run["counted_misses"]["by_fix_layer"] == {
+        "receipt_anchor_mismatch": 1,
+    }
+
+
+def test_format_json_counted_misses_none_for_legacy_runs(tmp_path: Path):
+    """Legacy runs (no artifacts/) get counted_misses=null in the JSON
+    so consumers can distinguish 'unavailable' from 'zero'."""
+    _write_run(tmp_path, "baseline-legacy")
+    _, json_path = os_mod.regenerate(tmp_path)
+    payload = json.loads(json_path.read_text())
+    assert payload["runs"][0]["counted_misses"] is None
+
+
+def test_regenerate_creates_counted_misses_dir_for_each_modern_run(
+    tmp_path: Path,
+):
+    """End-to-end: regenerate() walks every baseline-*/ with
+    artifacts/ and creates _counted_misses/ on disk. Legacy runs are
+    left alone (no empty subdir created)."""
+    _write_run_with_artifact_row(
+        tmp_path, "baseline-modern", row=_counted_miss_row(),
+        started_at="2026-05-19T00:00:00Z",
+    )
+    _write_run(tmp_path, "baseline-legacy")
+    os_mod.regenerate(tmp_path)
+    # Modern run got the dir + files.
+    assert (
+        tmp_path / "baseline-modern" / "_counted_misses" / "counted-misses.md"
+    ).is_file()
+    assert (
+        tmp_path / "baseline-modern" / "_counted_misses" / "counted-misses.json"
+    ).is_file()
+    # Legacy run was skipped entirely.
+    assert not (tmp_path / "baseline-legacy" / "_counted_misses").exists()
