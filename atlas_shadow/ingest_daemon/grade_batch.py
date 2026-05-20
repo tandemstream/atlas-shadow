@@ -56,6 +56,7 @@ from typing import Any, Callable, Optional
 
 from . import atlas_query_cache as atlas_query_cache_mod
 from . import grader_service as gs
+from . import legacy_receipt_corrections as legacy_corrections_mod
 from . import overall_summary as os_mod
 from .receiver import PrEvent
 
@@ -370,6 +371,7 @@ def grade_one_packet(
     atlas_query_cache: Any = None,
     max_workers: Optional[int] = None,
     revision_pin_mode: str = "receipt-source",
+    legacy_receipt_corrections: Any = None,
     _run_pr_grading: Callable = gs.run_pr_grading,
     _read_file_at_commit: Callable = _read_file_via_git_show,
 ) -> dict[str, Any]:
@@ -415,6 +417,7 @@ def grade_one_packet(
         atlas_query_cache=atlas_query_cache,
         max_workers=max_workers,
         revision_pin_mode=revision_pin_mode,
+        legacy_receipt_corrections=legacy_receipt_corrections,
         _fetch_pr_files=_fetch_for_this_packet,
         _fetch_file_at_ref=_read_file_local,
         _post_pending=_noop_post_pending,
@@ -612,6 +615,13 @@ def _summary_skipped_revision_not_indexed_count(summary) -> int:
     if isinstance(summary, dict):
         return int(summary.get("skipped_revision_not_indexed_count", 0) or 0)
     return getattr(summary, "skipped_revision_not_indexed_count", 0) or 0
+
+
+def _summary_skipped_legacy_receipt_defect_count(summary) -> int:
+    """Explicit frozen-corpus correction sidecar skips."""
+    if isinstance(summary, dict):
+        return int(summary.get("skipped_legacy_receipt_defect_count", 0) or 0)
+    return getattr(summary, "skipped_legacy_receipt_defect_count", 0) or 0
 
 
 # ─── Per-evidence-type rollup (PR-evidence-breakdown) ────────────────
@@ -851,6 +861,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
     # PR #20: command-snapshot lane total.
     total_skipped_command_snapshot = 0
     total_skipped_revision_not_indexed = 0
+    total_skipped_legacy_receipt_defect = 0
     # PR atlas-shadow-query-cache-v1: cache observability totals.
     # Together they answer "did this run get faster because Atlas
     # improved, or because the cache hid the work?"
@@ -877,6 +888,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         packet_corpus_excluded = 0
         packet_command_snapshot = 0
         packet_revision_not_indexed = 0
+        packet_legacy_receipt_defect = 0
         packet_atlas_cache_hits = 0
         packet_atlas_cache_misses = 0
         packet_atlas_cache_disabled = 0
@@ -894,6 +906,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             packet_corpus_excluded += _summary_skipped_doc_corpus_excluded_count(summary)
             packet_command_snapshot += _summary_skipped_command_snapshot_count(summary)
             packet_revision_not_indexed += _summary_skipped_revision_not_indexed_count(summary)
+            packet_legacy_receipt_defect += _summary_skipped_legacy_receipt_defect_count(summary)
             packet_atlas_cache_hits += _summary_atlas_cache_hit_count(summary)
             packet_atlas_cache_misses += _summary_atlas_cache_miss_count(summary)
             packet_atlas_cache_disabled += _summary_atlas_cache_disabled_count(summary)
@@ -914,6 +927,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         total_skipped_doc_corpus_excluded += packet_corpus_excluded
         total_skipped_command_snapshot += packet_command_snapshot
         total_skipped_revision_not_indexed += packet_revision_not_indexed
+        total_skipped_legacy_receipt_defect += packet_legacy_receipt_defect
         total_atlas_cache_hits += packet_atlas_cache_hits
         total_atlas_cache_misses += packet_atlas_cache_misses
         total_atlas_cache_disabled += packet_atlas_cache_disabled
@@ -941,6 +955,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
             # PR #20: command_snapshot lane per-packet count.
             "skipped_command_snapshot": packet_command_snapshot,
             "skipped_revision_not_indexed": packet_revision_not_indexed,
+            "skipped_legacy_receipt_defect": packet_legacy_receipt_defect,
             # PR atlas-shadow-query-cache-v1: cache observability
             # per packet.
             "atlas_cache_hits": packet_atlas_cache_hits,
@@ -992,6 +1007,7 @@ def _aggregate_run_totals(packet_outcomes: list[dict[str, Any]]) -> dict[str, An
         # PR #20: command-snapshot lane total.
         "total_skipped_command_snapshot": total_skipped_command_snapshot,
         "total_skipped_revision_not_indexed": total_skipped_revision_not_indexed,
+        "total_skipped_legacy_receipt_defect": total_skipped_legacy_receipt_defect,
         # PR atlas-shadow-query-cache-v1: per-run cache observability.
         # The three counters together answer "did this run get faster
         # because Atlas improved, or because the cache hid the work?"
@@ -1092,6 +1108,7 @@ def write_per_run_summary_md(
     # PR #20: command-snapshot lane skip total.
     total_skipped_command_snapshot: int = 0,
     total_skipped_revision_not_indexed: int = 0,
+    total_skipped_legacy_receipt_defect: int = 0,
 ) -> Path:
     """Write a human-readable per-run summary table to
     ``output_dir/summary.md``. Per-packet rows.
@@ -1121,6 +1138,7 @@ def write_per_run_summary_md(
             # PR #20: command-snapshot lane.
             (total_skipped_command_snapshot, "command-snapshot"),
             (total_skipped_revision_not_indexed, "revision-not-indexed"),
+            (total_skipped_legacy_receipt_defect, "legacy-receipt-defect"),
         ]
         non_zero = [f"{n} {label}" for n, label in components if n > 0]
         breakdown = ", ".join(non_zero) if non_zero else "no breakdown"
@@ -1324,6 +1342,14 @@ def cmd_grade_packet_batch(cfg, args) -> int:
             flush=True,
         )
 
+    # Frozen-corpus correction sidecar. This is deliberately batch-only: live
+    # PR grading should never silently apply historical receipt repairs.
+    legacy_receipt_corrections = (
+        legacy_corrections_mod.load_legacy_receipt_corrections()
+    )
+    if legacy_receipt_corrections and not args.quiet:
+        print("[batch] legacy receipt corrections enabled", flush=True)
+
     # PR atlas-shadow-receipt-parallelism-v1: resolve effective worker
     # count for the inner receipt loop. ``--max-workers`` overrides
     # the cfg default; otherwise we honor ``batch_cfg.grading_max_workers``
@@ -1368,6 +1394,7 @@ def cmd_grade_packet_batch(cfg, args) -> int:
                 atlas_query_cache=atlas_query_cache,
                 max_workers=effective_max_workers,
                 revision_pin_mode=revision_pin_mode,
+                legacy_receipt_corrections=legacy_receipt_corrections,
             )
         except Exception as exc:  # noqa: BLE001 — one bad packet shouldn't abort
             partial_failures += 1
@@ -1498,6 +1525,9 @@ def cmd_grade_packet_batch(cfg, args) -> int:
         ),
         total_skipped_revision_not_indexed=totals.get(
             "total_skipped_revision_not_indexed", 0
+        ),
+        total_skipped_legacy_receipt_defect=totals.get(
+            "total_skipped_legacy_receipt_defect", 0
         ),
     )
 

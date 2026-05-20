@@ -4,8 +4,8 @@ title: Atlas Evidence Expansion v1 layered-grading pilot
 
 cost:
   claim_count: 29
-  verified_claim_count: 21
-  unresolved_claim_count: 8
+  verified_claim_count: 20
+  unresolved_claim_count: 9
   tool_calls: null
   model_calls: null
   notes: >
@@ -201,12 +201,18 @@ evidence_oracle:
     - qid: q21
       claim_type: current_behavior
       evidence_type: source_excerpt
-      oracle_status: verified
-      planner_evidence_status: pass
+      oracle_status: unresolved
+      oracle_failure_type: legacy_receipt_anchor_mismatch
+      planner_evidence_status: fail
+      planner_failure_type: legacy_receipt_anchor_mismatch
       oracle_bucket: evidence
       synthesis_role: required_point
       required_point_ids: [S2]
-      notes: Envelope does not carry rich citations directly.
+      notes: >
+        Legacy receipt defect: the structured anchor points at Envelope
+        dataclass lines that do not contain the evidence["citations"] fields
+        asserted by the claim. The relevant answer.py anchor was only present
+        in free-form notes, so this row is not a verified evidence oracle.
     - qid: q22
       claim_type: absence_claim
       evidence_type: absence_search

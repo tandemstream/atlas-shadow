@@ -1533,6 +1533,37 @@ def test_aggregate_run_totals_clean_score_drops_excluded_rows():
     assert totals["per_packet_pct"]["p3"]["clean_pct"] == round(8 * 100 / 18, 1)
 
 
+def test_aggregate_run_totals_counts_legacy_receipt_defect_skip():
+    outcomes = [
+        {
+            "packet_slug": "legacy",
+            "status": "ok",
+            "summaries": [{
+                "packet_id": "legacy",
+                "passed": True,
+                "pass_pct": 50,
+                "pass_count": 1,
+                "total": 2,
+                "clean_pass_pct": 100,
+                "clean_total": 1,
+                "excluded_count": 1,
+                "skipped_legacy_receipt_defect_count": 1,
+                "artifact_path": None,
+            }],
+        }
+    ]
+    totals = gb._aggregate_run_totals(outcomes)
+
+    assert totals["total_excluded"] == 1
+    assert totals["total_skipped_legacy_receipt_defect"] == 1
+    assert totals["clean_total"] == 1
+    assert totals["clean_overall_pct"] == 100.0
+    assert (
+        totals["per_packet_pct"]["legacy"]["skipped_legacy_receipt_defect"]
+        == 1
+    )
+
+
 def test_aggregate_run_totals_legacy_summaries_still_work():
     """Pre-PR-14 summaries (no excluded_count field) should aggregate
     cleanly — excluded defaults to zero, clean_overall_pct equals

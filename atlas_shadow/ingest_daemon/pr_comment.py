@@ -301,6 +301,20 @@ class GradingSummary:
             if r.score_status == "skipped_revision_not_indexed"
         )
 
+    @property
+    def skipped_legacy_receipt_defect_count(self) -> int:
+        """Rows excluded by an explicit legacy-corpus correction sidecar.
+
+        This bucket is deliberately narrow: it is for retired historical
+        packet receipts that cannot be repaired in-place on core main and have
+        a documented authored-anchor/corpus-shape defect. New packet rows
+        should be fixed at the source Q&A file instead.
+        """
+        return sum(
+            1 for r in self.rows
+            if r.score_status == "skipped_legacy_receipt_defect"
+        )
+
     # PR atlas-shadow-query-cache-v1: cache observability counts.
     # Three counters that together answer "did this run get faster
     # because Atlas improved, or because the cache hid the work?"
