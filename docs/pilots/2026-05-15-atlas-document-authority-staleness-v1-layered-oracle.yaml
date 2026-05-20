@@ -1,7 +1,7 @@
 schema_version: 1
 packet_id: 2026-05-15-atlas-document-authority-staleness-v1
 title: 2026 05 15 Atlas Document Authority Staleness V1
-migration_status: auto_drafted
+migration_status: hand_authored_synthesis
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-15-atlas-document-authority-staleness-v1.json
@@ -122,17 +122,52 @@ evidence_oracle:
     notes: task status is reserved for status rows and task identifiers
     planner_failure_type: current_benchmark_line_drift
 synthesis_oracle:
-  status: draft
-  ideal_conclusion: Historical migration draft for 2026-05-15-atlas-document-authority-staleness-v1.
-    A packet owner should replace this with the intended planning conclusion before synthesis scores
-    are used.
+  status: hand_authored
+  ideal_conclusion: >
+    The packet should conclude that document authority must distinguish
+    canonical runtime docs, stale packet/work docs, and code references, so
+    Atlas answers do not treat historical work notes as current product truth.
   required_points:
   - id: S1
-    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+    text: The answer must identify canonical runtime/product docs as higher authority than docs/work artifacts.
+  - id: S2
+    text: The answer must explain how stale document evidence should be surfaced as uncertainty or context.
+  - id: S3
+    text: The answer must preserve code-reference lookup defaults and task/status vocabulary distinctions.
   forbidden_claims:
   - id: F1
-    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+    text: Do not treat docs/work evidence as current canonical documentation.
+  - id: F2
+    text: Do not collapse task status rows and task identifiers into the same authority class.
   uncertainty_notes:
   - id: U1
-    text: 'Auto-drafted bucket counts: evidence=8, context=2, command=0.'
-  criteria: []
+    text: Some document authority questions are policy-heavy and should be scored with confidence caveats.
+  criteria:
+  - id: conclusion
+    label: Authority/staleness conclusion
+    points_possible: 1
+    planner_points: 1
+    atlas_points: 1
+    notes: Both should prioritize canonical current docs over historical workpacket notes.
+  - id: authority_ordering
+    label: Authority ordering explained
+    points_possible: 3
+    planner_points: 2
+    atlas_points: 3
+    planner_miss_class: current_benchmark_line_drift
+    notes: Must separate runtime/product docs, code references, and docs/work notes.
+  - id: stale_context
+    label: Stale context handled
+    points_possible: 3
+    planner_points: 2
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_present_answer_missed
+    notes: Stale docs should become uncertainty/context, not correctness misses.
+  - id: terminology_guard
+    label: Terminology guardrails
+    points_possible: 2
+    planner_points: 1
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    notes: Task status and task identifiers remain separate.

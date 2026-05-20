@@ -157,6 +157,7 @@ synthesis_oracle:
       points_possible: 5
       planner_points: 5
       atlas_points: 4
+      atlas_miss_class: evidence_missing
       notes: Atlas may miss context-only external/user evidence.
     - id: forbidden_claims
       label: Forbidden claims avoided
@@ -169,4 +170,5 @@ synthesis_oracle:
       points_possible: 1
       planner_points: 1
       atlas_points: 0.5
+      atlas_miss_class: evidence_present_answer_missed
       notes: External tool-doc assumption should be caveated.

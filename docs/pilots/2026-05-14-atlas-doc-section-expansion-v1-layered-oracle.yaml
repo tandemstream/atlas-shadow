@@ -1,7 +1,7 @@
 schema_version: 1
 packet_id: 2026-05-14-atlas-doc-section-expansion-v1
 title: 2026 05 14 Atlas Doc Section Expansion V1
-migration_status: auto_drafted
+migration_status: hand_authored_synthesis
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-doc-section-expansion-v1.json
@@ -264,16 +264,55 @@ evidence_oracle:
     notes: "retrieval chunk projection does NOT expose `chunk_index` \u2014 expander must look it\
       \ up by `chunk_id`"
 synthesis_oracle:
-  status: draft
-  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-doc-section-expansion-v1. A packet
-    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  status: hand_authored
+  ideal_conclusion: >
+    The packet should conclude that section expansion needs an explicit document
+    section model and chunk-to-section projection, while acknowledging that
+    some workpacket docs are intentionally excluded from the shadow doc corpus.
   required_points:
   - id: S1
-    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+    text: The answer must explain that section expansion depends on heading path/level/title metadata.
+  - id: S2
+    text: The answer must distinguish current chunk projection fields from missing section metadata.
+  - id: S3
+    text: The answer must call out the artifact/chunk tables used to recover text ranges.
+  - id: S4
+    text: The answer must separate docs/work exclusion policy from true doc_resolver misses.
   forbidden_claims:
   - id: F1
-    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+    text: Do not claim heading_path/heading_level are already present if verified absence rows say otherwise.
+  - id: F2
+    text: Do not treat docs/work postmortem receipts as Atlas retrieval failures.
   uncertainty_notes:
   - id: U1
-    text: 'Auto-drafted bucket counts: evidence=18, context=4, command=1.'
-  criteria: []
+    text: Excluded docs/work evidence should be confidence/context only until policy changes.
+  criteria:
+  - id: conclusion
+    label: Section-expansion conclusion
+    points_possible: 1
+    planner_points: 1
+    atlas_points: 1
+    notes: Both should say section expansion is viable but needs explicit metadata plumbing.
+  - id: metadata_gap
+    label: Metadata gap described
+    points_possible: 4
+    planner_points: 3
+    atlas_points: 3
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_missing
+    notes: Must cover heading path/level/title absence and current projection limitations.
+  - id: storage_path
+    label: Storage/query path described
+    points_possible: 3
+    planner_points: 2
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_present_answer_missed
+    notes: Must identify artifact_chunks/document reads rather than vague doc retrieval.
+  - id: caveats
+    label: Corpus-policy caveats
+    points_possible: 2
+    planner_points: 2
+    atlas_points: 1
+    atlas_miss_class: grader_too_harsh
+    notes: docs/work exclusions are policy/context, not retrieval misses.

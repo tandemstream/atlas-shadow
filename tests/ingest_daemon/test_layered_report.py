@@ -77,11 +77,14 @@ synthesis_oracle:
       points_possible: 1
       planner_points: 1
       atlas_points: 0.5
+      atlas_miss_class: grader_too_harsh
     - id: required
       label: Required point covered
       points_possible: 2
       planner_points: 1
       atlas_points: 1
+      planner_miss_class: evidence_present_answer_missed
+      atlas_miss_class: evidence_missing
 """,
         encoding="utf-8",
     )
@@ -123,6 +126,8 @@ def test_layered_report_builds_layered_scores(tmp_path):
     assert report.synthesis_points_possible == 3
     assert report.failure_counts["planner_evidence"]["stale_or_false_claim"] == 1
     assert report.failure_counts["oracle"]["unresolved_source_ref"] == 1
+    assert report.failure_counts["synthesis"]["planner:evidence_present_answer_missed"] == 1
+    assert report.failure_counts["synthesis"]["atlas:evidence_missing"] == 1
 
 
 def test_layered_report_excludes_runtime_skipped_rows_from_atlas_denominator(tmp_path):
@@ -235,6 +240,31 @@ def test_write_run_summary_renders_aggregate_and_packets(tmp_path):
     assert payload["totals"]["planner_evidence_pct"] == 50.0
 
 
+def test_write_synthesis_audit_requires_classified_misses(tmp_path):
+    packet = _packet_json(
+        tmp_path,
+        [
+            {
+                "question_id": "q1",
+                "grade": "full_match",
+                "score_status": "counted",
+                "lane": "explicit_source_fast_path",
+            },
+        ],
+    )
+    report = lr.build_report(spec_path=_spec_yaml(tmp_path), packet_json_path=packet)
+
+    md_path, json_path = lr.write_synthesis_audit([report], tmp_path / "audit")
+
+    md = md_path.read_text(encoding="utf-8")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "Synthesis Audit" in md
+    assert payload["total_misses"] == 3
+    assert payload["class_counts"]["evidence_missing"] == 1
+    assert payload["class_counts"]["evidence_present_answer_missed"] == 1
+    assert payload["class_counts"]["grader_too_harsh"] == 1
+
+
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
     run_dir = tmp_path / "run"
     packet_dir = run_dir / "packets"
@@ -275,4 +305,5 @@ def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path
     assert result.exit_code == 0, result.output
     assert (run_dir / "_layered" / "packet-x" / "layered-shadow-report.json").exists()
     assert (run_dir / "_layered" / "layered-summary.md").exists()
+    assert (run_dir / "_layered" / "synthesis-audit.md").exists()
     assert "layered_packets=1" in result.output

@@ -495,7 +495,15 @@ def shadow_layered_batch(
             "missing layered oracle specs:\n" + "\n".join(missing_specs)
         )
     md_path, json_path = layered_report_mod.write_run_summary(reports, output_dir)
+    audit_md_path, audit_json_path = layered_report_mod.write_synthesis_audit(
+        reports,
+        output_dir,
+    )
     click.echo(f"[atlas-shadow] wrote {md_path} and {json_path}", err=True)
+    click.echo(
+        f"[atlas-shadow] wrote {audit_md_path} and {audit_json_path}",
+        err=True,
+    )
     click.echo(f"layered_packets={len(reports)}")
 
 

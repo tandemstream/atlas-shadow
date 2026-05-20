@@ -58,6 +58,8 @@ class SynthesisCriterion:
     planner_points: float
     atlas_points: float
     notes: str = ""
+    planner_miss_class: Optional[str] = None
+    atlas_miss_class: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,8 @@ def load_spec(path: Path) -> LayeredSpec:
                 planner_points=float(item.get("planner_points", 0)),
                 atlas_points=float(item.get("atlas_points", 0)),
                 notes=str(item.get("notes", "")),
+                planner_miss_class=_optional_str(item.get("planner_miss_class")),
+                atlas_miss_class=_optional_str(item.get("atlas_miss_class")),
             )
         )
 
@@ -261,9 +265,13 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
     atlas_points = sum(c.atlas_points for c in spec.synthesis_criteria)
     for criterion in spec.synthesis_criteria:
         if criterion.planner_points < criterion.points_possible:
-            failures["synthesis"][f"planner:{criterion.id}"] += 1
+            failures["synthesis"][
+                f"planner:{criterion.planner_miss_class or 'unclassified'}"
+            ] += 1
         if criterion.atlas_points < criterion.points_possible:
-            failures["synthesis"][f"atlas:{criterion.id}"] += 1
+            failures["synthesis"][
+                f"atlas:{criterion.atlas_miss_class or 'unclassified'}"
+            ] += 1
 
     return LayeredReport(
         packet_id=spec.packet_id,
@@ -303,6 +311,8 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
                     "planner_points": c.planner_points,
                     "atlas_points": c.atlas_points,
                     "notes": c.notes,
+                    "planner_miss_class": c.planner_miss_class,
+                    "atlas_miss_class": c.atlas_miss_class,
                 }
                 for c in spec.synthesis_criteria
             ],
@@ -332,6 +342,129 @@ def write_run_summary(reports: list[LayeredReport], output_dir: Path) -> tuple[P
         encoding="utf-8",
     )
     return md_path, json_path
+
+
+def write_synthesis_audit(
+    reports: list[LayeredReport],
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    """Write a run-level audit of every synthesis miss.
+
+    The audit is intentionally derived from the hand-authored synthesis
+    criteria. If a criterion loses points, it must carry a miss class; otherwise
+    the audit marks it ``unclassified`` so the packet owner can fix the rubric
+    before treating the synthesis score as actionable.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    class_counts: Counter[str] = Counter()
+    for report in sorted(reports, key=lambda item: item.packet_id):
+        for criterion in report.synthesis_oracle.get("criteria", []):
+            possible = float(criterion.get("points_possible") or 0)
+            if possible <= 0:
+                continue
+            for actor in ("planner", "atlas"):
+                points = float(criterion.get(f"{actor}_points") or 0)
+                if points >= possible:
+                    continue
+                miss_class = str(
+                    criterion.get(f"{actor}_miss_class")
+                    or "unclassified"
+                )
+                row = {
+                    "packet_id": report.packet_id,
+                    "actor": actor,
+                    "criterion_id": criterion.get("id"),
+                    "criterion_label": criterion.get("label"),
+                    "points": points,
+                    "points_possible": possible,
+                    "miss_class": miss_class,
+                    "notes": criterion.get("notes") or "",
+                    "manual_review": miss_class == "answer_shape_without_evidence",
+                }
+                rows.append(row)
+                class_counts[miss_class] += 1
+
+    payload = {
+        "total_misses": len(rows),
+        "class_counts": dict(sorted(class_counts.items())),
+        "manual_review": [
+            row for row in rows if row.get("manual_review")
+        ],
+        "rows": rows,
+    }
+    json_path = output_dir / "synthesis-audit.json"
+    md_path = output_dir / "synthesis-audit.md"
+    json_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(render_synthesis_audit_markdown(payload), encoding="utf-8")
+    return md_path, json_path
+
+
+def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Synthesis Audit",
+        "",
+        f"- **Total synthesis misses:** {payload.get('total_misses', 0)}",
+        "",
+        "## Miss Classes",
+        "",
+        "| Class | Count |",
+        "|---|---:|",
+    ]
+    counts = payload.get("class_counts") or {}
+    if counts:
+        for miss_class, count in sorted(counts.items()):
+            lines.append(f"| `{miss_class}` | {count} |")
+    else:
+        lines.append("| - | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Manual Review",
+            "",
+            "| Packet | Actor | Criterion | Class | Notes |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    manual_rows = payload.get("manual_review") or []
+    if manual_rows:
+        for row in manual_rows:
+            lines.append(
+                f"| `{row.get('packet_id')}` | {row.get('actor')} | "
+                f"{row.get('criterion_id')} | `{row.get('miss_class')}` | "
+                f"{row.get('notes') or ''} |"
+            )
+    else:
+        lines.append("| - | - | - | - | None |")
+
+    lines.extend(
+        [
+            "",
+            "## All Misses",
+            "",
+            "| Packet | Actor | Criterion | Points | Class | Notes |",
+            "|---|---|---|---:|---|---|",
+        ]
+    )
+    rows = payload.get("rows") or []
+    if rows:
+        for row in rows:
+            points = _points(
+                float(row.get("points") or 0),
+                float(row.get("points_possible") or 0),
+            )
+            lines.append(
+                f"| `{row.get('packet_id')}` | {row.get('actor')} | "
+                f"{row.get('criterion_id')} | {points} | "
+                f"`{row.get('miss_class')}` | {row.get('notes') or ''} |"
+            )
+    else:
+        lines.append("| - | - | - | - | - | No synthesis misses |")
+    return "\n".join(lines) + "\n"
 
 
 def to_json(report: LayeredReport) -> dict[str, Any]:

@@ -323,16 +323,22 @@ synthesis_oracle:
       points_possible: 6
       planner_points: 5
       atlas_points: 4
+      planner_miss_class: evidence_present_answer_missed
+      atlas_miss_class: evidence_missing
       notes: Atlas synthesis is expected to miss some removed/context-only evidence.
     - id: forbidden_claims
       label: Forbidden claims avoided
       points_possible: 3
       planner_points: 2
       atlas_points: 2
+      planner_miss_class: rubric_too_vague
+      atlas_miss_class: rubric_too_vague
       notes: The packet historically blurred playground context and current Atlas evidence.
     - id: uncertainty
       label: Uncertainty handled
       points_possible: 2
       planner_points: 1
       atlas_points: 1
+      planner_miss_class: evidence_present_answer_missed
+      atlas_miss_class: evidence_missing
       notes: Cost and removed-source uncertainty need explicit caveats.

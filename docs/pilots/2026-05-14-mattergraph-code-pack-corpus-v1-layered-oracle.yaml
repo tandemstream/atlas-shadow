@@ -1,7 +1,7 @@
 schema_version: 1
 packet_id: 2026-05-14-mattergraph-code-pack-corpus-v1
 title: 2026 05 14 Mattergraph Code Pack Corpus V1
-migration_status: auto_drafted
+migration_status: hand_authored_synthesis
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-mattergraph-code-pack-corpus-v1.json
@@ -95,16 +95,52 @@ evidence_oracle:
     - S1
     notes: v3 query gold includes required claims Atlas currently misses this verified evidence row.
 synthesis_oracle:
-  status: draft
-  ideal_conclusion: Historical migration draft for 2026-05-14-mattergraph-code-pack-corpus-v1. A packet
-    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  status: hand_authored
+  ideal_conclusion: >
+    The packet should conclude that Mattergraph code-pack grading needs a
+    compact but representative code corpus with explicit required-claim gold,
+    and that provider-free smoke tests validate the harness without measuring
+    model retrieval quality.
   required_points:
   - id: S1
-    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+    text: The answer must describe the code-pack corpus as a curated retrieval benchmark, not only a smoke fixture.
+  - id: S2
+    text: The answer must mention required_claims as the gold signal for v3-style grading.
+  - id: S3
+    text: The answer must distinguish user-context corpus metrics from repo-verifiable evidence.
   forbidden_claims:
   - id: F1
-    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+    text: Do not claim provider-free smoke success proves Atlas retrieval quality.
+  - id: F2
+    text: Do not count user_context corpus metrics as Atlas evidence.
   uncertainty_notes:
   - id: U1
-    text: 'Auto-drafted bucket counts: evidence=5, context=3, command=0.'
-  criteria: []
+    text: Corpus representativeness remains qualitative until more packets contribute examples.
+  criteria:
+  - id: conclusion
+    label: Corpus benchmark conclusion
+    points_possible: 1
+    planner_points: 1
+    atlas_points: 1
+    notes: The intended conclusion is a curated code-pack benchmark with smoke-test guardrails.
+  - id: required_claims
+    label: Required-claims gold explained
+    points_possible: 4
+    planner_points: 4
+    atlas_points: 2
+    atlas_miss_class: evidence_missing
+    notes: q8 is the load-bearing evidence row for required_claims v3 entries.
+  - id: smoke_vs_retrieval
+    label: Smoke tests separated from retrieval
+    points_possible: 2
+    planner_points: 1
+    atlas_points: 1
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_present_answer_missed
+    notes: Provider-free smoke validates harness mechanics, not retrieval quality.
+  - id: context_caveat
+    label: User-context caveat
+    points_possible: 2
+    planner_points: 2
+    atlas_points: 2
+    notes: Corpus loop metrics are useful context but not Atlas evidence.

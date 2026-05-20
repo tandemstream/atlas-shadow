@@ -1,7 +1,7 @@
 schema_version: 1
 packet_id: 2026-05-14-atlas-canonical-evidence-v1
 title: 2026 05 14 Atlas Canonical Evidence V1
-migration_status: auto_drafted
+migration_status: hand_authored_synthesis
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-canonical-evidence-v1.json
@@ -236,16 +236,57 @@ evidence_oracle:
       \ ac.artifact_id`, filter via `a.doc_id` / `a.source_channel`"
     planner_failure_type: current_benchmark_line_drift
 synthesis_oracle:
-  status: draft
-  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-canonical-evidence-v1. A packet
-    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  status: hand_authored
+  ideal_conclusion: >
+    The packet should conclude that canonical evidence requires preserving
+    evidence provenance through retrieval, expansion, sweep, and synthesis
+    rather than treating final prose as the only artifact.
   required_points:
   - id: S1
-    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+    text: The answer must identify canonical evidence as retrieved chunks, expanded blocks, and sweep hits.
+  - id: S2
+    text: The answer must explain that synthesis prompt construction preserves those evidence sections.
+  - id: S3
+    text: The answer must call out limits of query-side identifier extraction and unresolved backlog-style evidence.
+  - id: S4
+    text: The answer must distinguish DB-backed artifact/chunk reads from whole-file line scanning.
   forbidden_claims:
   - id: F1
-    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+    text: Do not claim unresolved/context-only rows are verified Atlas evidence.
+  - id: F2
+    text: Do not claim the system can prove canonical evidence by final answer prose alone.
   uncertainty_notes:
   - id: U1
-    text: 'Auto-drafted bucket counts: evidence=8, context=11, command=1.'
-  criteria: []
+    text: Several historical receipts are unresolved and should lower confidence, not Atlas correctness.
+  - id: U2
+    text: Planner evidence failures caused by line drift should be separated from retrieval failures.
+  criteria:
+  - id: conclusion
+    label: Canonical-evidence conclusion
+    points_possible: 1
+    planner_points: 1
+    atlas_points: 1
+    notes: Both should frame canonical evidence as provenance-preserving substrate.
+  - id: evidence_surfaces
+    label: Evidence surfaces named
+    points_possible: 4
+    planner_points: 2
+    atlas_points: 3
+    planner_miss_class: current_benchmark_line_drift
+    atlas_miss_class: evidence_missing
+    notes: Must cover retrieved chunks, expanded blocks, sweep hits, and DB-backed artifact reads.
+  - id: synthesis_path
+    label: Synthesis path preserved
+    points_possible: 2
+    planner_points: 1
+    atlas_points: 2
+    planner_miss_class: evidence_present_answer_missed
+    notes: Prompt construction and separator sections are the load-bearing synthesis points.
+  - id: caveats
+    label: Drift and unresolved caveats
+    points_possible: 2
+    planner_points: 1
+    atlas_points: 1
+    planner_miss_class: evidence_present_answer_missed
+    atlas_miss_class: evidence_present_answer_missed
+    notes: Both answers must avoid over-claiming unresolved historical rows.
