@@ -115,3 +115,96 @@ def test_load_config_reconciler_overrides(tmp_path):
     assert cfg.reconciler_enabled is False
     assert cfg.reconciler_interval_seconds == 60
     assert cfg.reconciler_ls_remote_timeout_seconds == 15
+
+
+# ===========================================================================
+# PR atlas-shadow-receipt-parallelism-v1 — grading_max_workers config
+# ===========================================================================
+
+
+def test_load_config_grading_max_workers_default_is_one(tmp_path):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+        },
+    )
+    cfg = config_mod.load_config(p)
+    # Default = 1 = serial (preserves pre-PR behavior; operator opts in).
+    assert cfg.grading_max_workers == 1
+
+
+def test_load_config_grading_max_workers_yaml_override(tmp_path):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+            "ingest_daemon": {"grading_max_workers": 6},
+        },
+    )
+    cfg = config_mod.load_config(p)
+    assert cfg.grading_max_workers == 6
+
+
+def test_load_config_grading_max_workers_env_overrides_yaml(
+    tmp_path, monkeypatch
+):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+            "ingest_daemon": {"grading_max_workers": 6},
+        },
+    )
+    monkeypatch.setenv("ATLAS_SHADOW_GRADING_MAX_WORKERS", "3")
+    cfg = config_mod.load_config(p)
+    # Env wins over YAML.
+    assert cfg.grading_max_workers == 3
+
+
+def test_load_config_grading_max_workers_clamps_to_one_when_zero_or_negative(
+    tmp_path, monkeypatch
+):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+            "ingest_daemon": {"grading_max_workers": 0},
+        },
+    )
+    monkeypatch.delenv("ATLAS_SHADOW_GRADING_MAX_WORKERS", raising=False)
+    cfg = config_mod.load_config(p)
+    assert cfg.grading_max_workers == 1
+
+    neg_dir = tmp_path / "neg"
+    neg_dir.mkdir(parents=True, exist_ok=True)
+    p2 = _write_config(
+        neg_dir,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+            "ingest_daemon": {"grading_max_workers": -4},
+        },
+    )
+    cfg2 = config_mod.load_config(p2)
+    assert cfg2.grading_max_workers == 1
+
+
+def test_load_config_grading_max_workers_invalid_string_falls_back_to_one(
+    tmp_path, monkeypatch
+):
+    p = _write_config(
+        tmp_path,
+        {
+            "continuous_shadow_org_id": "abc",
+            "core_repo_path": str(tmp_path / "core"),
+        },
+    )
+    monkeypatch.setenv("ATLAS_SHADOW_GRADING_MAX_WORKERS", "definitely-not-an-int")
+    cfg = config_mod.load_config(p)
+    # Bad env value → log a warning + default to 1; never raises.
+    assert cfg.grading_max_workers == 1

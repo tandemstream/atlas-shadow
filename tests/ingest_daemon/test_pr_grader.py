@@ -3733,3 +3733,402 @@ def test_serialize_row_includes_atlas_cache_status():
     )
     out = gs._serialize_row(row)
     assert out["atlas_cache_status"] == "hit"
+
+
+# ===========================================================================
+# PR atlas-shadow-receipt-parallelism-v1 — ThreadPoolExecutor receipt loop
+# ===========================================================================
+#
+# These tests exercise ``run_pr_grading``'s per-packet receipt fanout. They
+# stub the GitHub HTTP calls + the qna log body so the orchestrator's
+# inner loop is the only thing under test; the ``_grade_one`` injection
+# seam takes a synthetic "graded row" so we can prove order preservation
+# + exception isolation independent of the real grader/runner.
+
+
+def _parallelism_qna_log(num_receipts: int) -> str:
+    """Build a qna log body with N synthesizable receipts the parser can
+    accept. Each receipt has a distinct question_id (q1..qN) so order
+    can be asserted on the output rows."""
+    head = (
+        "# Q&A log — parallelism test packet\n\n"
+        "**grading_threshold_pct:** 0\n\n"
+        "---\n\n"
+        "## §1 Test phase\n\n"
+    )
+    blocks = []
+    for i in range(1, num_receipts + 1):
+        blocks.append(
+            f"### q{i}: receipt {i}\n\n"
+            f"- **Claim supported:** \"Synthesized receipt {i} for "
+            f"parallelism test.\"\n"
+            f"- **Status:** `ok`\n"
+            f"- **Evidence type:** `source_excerpt`\n"
+            f"- **Source ref:**\n"
+            f"  - repo: `tandemstream/core`\n"
+            f"  - commit: `" + BASE_SHA + "`\n"
+            f"  - tree_state: `clean`\n"
+            f"  - path: `src/p{i}.py`\n"
+            f"  - lines: `1-3`\n"
+            f"  - excerpt_sha256: `" + ("0" * 64) + "`\n"
+            f"- **Excerpt:**\n"
+            f"  ```\n"
+            f"  body for q{i}\n"
+            f"  ```\n\n"
+        )
+    return head + "".join(blocks)
+
+
+def _seed_ledger_and_build_http(daemon_config, db_path, qna_log_body):
+    """Shared setup helper: seed the ledger so code_revision_id resolves,
+    and return a stub HTTP responder for the orchestrator's GH calls."""
+    ledger_mod.insert_terminal_attempt(
+        db_path,
+        commit_sha=BASE_SHA,
+        status="succeeded",
+        started_at="2026-05-20T00:00:00+00:00",
+        attempt_number=1,
+        code_revision_id="22222222-2222-2222-2222-222222222222",
+        latency_ms=1000,
+    )
+    import base64
+    qna_log_b64 = base64.b64encode(qna_log_body.encode("utf-8")).decode()
+    return _StubHttp(responses={
+        "/pulls/99/files": {
+            "methods": ["GET"],
+            "body": [
+                {"filename": "products/tandem/packages/python/atlas/docs/work/2026-05-20-parallel-v1/02-qna-log.md",
+                 "status": "added"},
+            ],
+        },
+        "/contents/products/tandem/packages/python/atlas/docs/work/2026-05-20-parallel-v1/02-qna-log.md": {
+            "methods": ["GET"],
+            "body": {"encoding": "base64", "content": qna_log_b64},
+        },
+        f"/statuses/{HEAD_SHA}": {
+            "methods": ["POST"],
+            "body": {"id": 555, "state": "success"},
+        },
+        "/issues/99/comments": {
+            "methods": ["GET", "POST"],
+            "body": [],
+        },
+    })
+
+
+def _orchestrator_kwargs(http):
+    """Shared wire-up: route every GH callable through the stub HTTP."""
+    from atlas_shadow.ingest_daemon import gh_check as gh_check_mod
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    return {
+        "_fetch_pr_files": lambda **kw: grader_service_mod._fetch_pr_files(_http=http, **kw),
+        "_fetch_file_at_ref": lambda **kw: grader_service_mod._fetch_file_at_ref(_http=http, **kw),
+        "_post_pending": lambda **kw: gh_check_mod.post_pending_status(_http=http, **kw),
+        "_post_final": lambda **kw: gh_check_mod.post_final_status(_http=http, **kw),
+        "_post_comment": lambda **kw: pr_comment_mod.post_or_update_pr_comment(_http=http, **kw),
+    }
+
+
+def test_run_pr_grading_parallel_preserves_receipt_order(
+    daemon_config, db_path, tmp_path
+):
+    """When max_workers>1, output rows MUST land in qna-log source order
+    even when futures complete out of order. We force out-of-order
+    completion by introducing per-receipt delays that decrease with
+    question index — q1 sleeps longest, qN sleeps least, so under
+    parallel execution qN finishes first. The assertion is that rows
+    still come back ordered q1..qN."""
+    import time
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    NUM_RECEIPTS = 6
+    qna_body = _parallelism_qna_log(NUM_RECEIPTS)
+    http = _seed_ledger_and_build_http(daemon_config, db_path, qna_body)
+    cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "shadow-runs")
+
+    event = _StubEvent(
+        action="opened",
+        repo_full_name="tandemstream/core",
+        pr_number=99,
+        base_sha=BASE_SHA, base_ref="main",
+        head_sha=HEAD_SHA, head_ref="feature/parallel",
+    )
+
+    # ``_grade_one`` stub: sleep proportional to (NUM_RECEIPTS - idx) so
+    # later receipts finish first, then return a deterministic row.
+    def staggered_grade_one(*, cfg, receipt, **_kw):
+        qid = receipt.question_id  # "q1", "q2", ...
+        idx = int(qid[1:])
+        # Workers > receipts → all start ~simultaneously. Lower idx →
+        # longer sleep → finishes LAST. Sleep is small (10-60ms) so
+        # the whole test stays under a second.
+        time.sleep(0.01 * (NUM_RECEIPTS - idx + 1))
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=qid,
+            question=receipt.question,
+            grade="full_match",
+            confidence=0.9,
+            rationale=f"parallel-stub-{qid}",
+            tool="find_code",
+            score_status="counted",
+        )
+
+    outcome = grader_service_mod.run_pr_grading(
+        cfg,
+        event,
+        github_token="fake-token",
+        max_workers=NUM_RECEIPTS,
+        _grade_one=staggered_grade_one,
+        **_orchestrator_kwargs(http),
+    )
+
+    assert outcome["status"] == "ok"
+    # Read back the artifact rows + assert ordering.
+    artifact_path = Path(outcome["summaries"][0]["artifact_path"])
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    rows = payload["rows"]
+    assert len(rows) == NUM_RECEIPTS
+    question_ids_in_order = [r["question_id"] for r in rows]
+    assert question_ids_in_order == [f"q{i}" for i in range(1, NUM_RECEIPTS + 1)]
+
+
+def test_run_pr_grading_parallel_isolates_exceptions_per_receipt(
+    daemon_config, db_path, tmp_path
+):
+    """A failing receipt under parallel execution produces an
+    error row (same shape as serial), and the other receipts still
+    grade successfully. Proves the per-future exception handling
+    inside the executor matches the pre-PR serial behavior."""
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    NUM_RECEIPTS = 4
+    qna_body = _parallelism_qna_log(NUM_RECEIPTS)
+    http = _seed_ledger_and_build_http(daemon_config, db_path, qna_body)
+    cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "shadow-runs")
+
+    event = _StubEvent(
+        action="opened",
+        repo_full_name="tandemstream/core",
+        pr_number=99,
+        base_sha=BASE_SHA, base_ref="main",
+        head_sha=HEAD_SHA, head_ref="feature/parallel",
+    )
+
+    # q2 raises; the rest grade fine.
+    def selective_failing_grade_one(*, cfg, receipt, **_kw):
+        if receipt.question_id == "q2":
+            raise RuntimeError("synthetic-grader-failure-for-q2")
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            grade="full_match",
+            confidence=0.9,
+            rationale="ok",
+            tool="find_code",
+            score_status="counted",
+        )
+
+    outcome = grader_service_mod.run_pr_grading(
+        cfg,
+        event,
+        github_token="fake-token",
+        max_workers=NUM_RECEIPTS,
+        _grade_one=selective_failing_grade_one,
+        **_orchestrator_kwargs(http),
+    )
+
+    assert outcome["status"] == "ok"
+    artifact_path = Path(outcome["summaries"][0]["artifact_path"])
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    rows = payload["rows"]
+    assert len(rows) == NUM_RECEIPTS
+
+    # Order still preserved.
+    assert [r["question_id"] for r in rows] == ["q1", "q2", "q3", "q4"]
+    # q2 is the only no_match (the failure path); the rest full_match.
+    grades_by_qid = {r["question_id"]: r["grade"] for r in rows}
+    assert grades_by_qid == {
+        "q1": "full_match",
+        "q2": "no_match",
+        "q3": "full_match",
+        "q4": "full_match",
+    }
+    # And q2's row carries the exception fingerprint in warnings.
+    q2 = next(r for r in rows if r["question_id"] == "q2")
+    assert any("exception:RuntimeError" in w for w in q2["warnings"])
+    assert "synthetic-grader-failure-for-q2" in q2["rationale"]
+
+
+def test_run_pr_grading_serial_path_when_max_workers_one(
+    daemon_config, db_path, tmp_path
+):
+    """max_workers=1 takes the serial branch (verified by the call order
+    of the stub — futures aren't used so calls observe receipt order
+    directly). This is the default behavior we ship; if it regresses
+    the live PR-grading semantics change silently."""
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    qna_body = _parallelism_qna_log(3)
+    http = _seed_ledger_and_build_http(daemon_config, db_path, qna_body)
+    cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "shadow-runs")
+    # Tighten the cfg to default = 1.
+    cfg = replace(cfg, grading_max_workers=1)
+
+    event = _StubEvent(
+        action="opened",
+        repo_full_name="tandemstream/core",
+        pr_number=99,
+        base_sha=BASE_SHA, base_ref="main",
+        head_sha=HEAD_SHA, head_ref="feature/serial",
+    )
+
+    call_order: list[str] = []
+
+    def tracking_grade_one(*, cfg, receipt, **_kw):
+        call_order.append(receipt.question_id)
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            grade="full_match",
+            confidence=0.9,
+            rationale="ok",
+            tool="find_code",
+            score_status="counted",
+        )
+
+    # max_workers=None → fall back to cfg.grading_max_workers (1).
+    outcome = grader_service_mod.run_pr_grading(
+        cfg,
+        event,
+        github_token="fake-token",
+        _grade_one=tracking_grade_one,
+        **_orchestrator_kwargs(http),
+    )
+
+    assert outcome["status"] == "ok"
+    # Serial path → calls observed in source order.
+    assert call_order == ["q1", "q2", "q3"]
+
+
+def test_run_pr_grading_max_workers_clamps_to_receipt_count(
+    daemon_config, db_path, tmp_path
+):
+    """If max_workers > receipt count, we still produce the right
+    output (no wasted threads, no errors). This guards against future
+    refactors that might mis-size the ThreadPoolExecutor."""
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    qna_body = _parallelism_qna_log(2)
+    http = _seed_ledger_and_build_http(daemon_config, db_path, qna_body)
+    cfg = replace(daemon_config, shadow_runs_dir=tmp_path / "shadow-runs")
+
+    event = _StubEvent(
+        action="opened",
+        repo_full_name="tandemstream/core",
+        pr_number=99,
+        base_sha=BASE_SHA, base_ref="main",
+        head_sha=HEAD_SHA, head_ref="feature/parallel",
+    )
+
+    def trivial_grade_one(*, cfg, receipt, **_kw):
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            grade="full_match",
+            confidence=0.9,
+            rationale="ok",
+            tool="find_code",
+            score_status="counted",
+        )
+
+    # Request 100 workers for 2 receipts — should clamp internally.
+    outcome = grader_service_mod.run_pr_grading(
+        cfg,
+        event,
+        github_token="fake-token",
+        max_workers=100,
+        _grade_one=trivial_grade_one,
+        **_orchestrator_kwargs(http),
+    )
+
+    assert outcome["status"] == "ok"
+    artifact_path = Path(outcome["summaries"][0]["artifact_path"])
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert [r["question_id"] for r in payload["rows"]] == ["q1", "q2"]
+
+
+def test_run_pr_grading_max_workers_param_overrides_cfg(
+    daemon_config, db_path, tmp_path
+):
+    """When caller passes max_workers explicitly (the grade-packet-batch
+    --max-workers path), it overrides cfg.grading_max_workers."""
+    import threading
+    from dataclasses import replace
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+
+    NUM_RECEIPTS = 5
+    qna_body = _parallelism_qna_log(NUM_RECEIPTS)
+    http = _seed_ledger_and_build_http(daemon_config, db_path, qna_body)
+    # cfg defaults to 1 — overridden by explicit max_workers=5 below.
+    cfg = replace(
+        daemon_config,
+        shadow_runs_dir=tmp_path / "shadow-runs",
+        grading_max_workers=1,
+    )
+
+    event = _StubEvent(
+        action="opened",
+        repo_full_name="tandemstream/core",
+        pr_number=99,
+        base_sha=BASE_SHA, base_ref="main",
+        head_sha=HEAD_SHA, head_ref="feature/override",
+    )
+
+    observed_threads: set[int] = set()
+    lock = threading.Lock()
+    # Barrier ensures all N tasks are RUNNING concurrently before any
+    # returns. Without this, fast hardware may complete each task
+    # before the executor dispatches the next, letting one thread
+    # serve them all — which would make the "max_workers overrode
+    # cfg" assertion flaky. The barrier is a hard contract: if
+    # max_workers=1 had won we'd never see N concurrent calls and
+    # the barrier would time out, raising BrokenBarrierError.
+    import threading as _threading_mod
+    barrier = _threading_mod.Barrier(NUM_RECEIPTS, timeout=5.0)
+
+    def thread_capturing_grade_one(*, cfg, receipt, **_kw):
+        barrier.wait()
+        with lock:
+            observed_threads.add(threading.get_ident())
+        return pr_comment_mod.ReceiptGradingRow(
+            question_id=receipt.question_id,
+            question=receipt.question,
+            grade="full_match",
+            confidence=0.9,
+            rationale="ok",
+            tool="find_code",
+            score_status="counted",
+        )
+
+    outcome = grader_service_mod.run_pr_grading(
+        cfg,
+        event,
+        github_token="fake-token",
+        max_workers=NUM_RECEIPTS,  # explicit override of cfg.grading_max_workers=1
+        _grade_one=thread_capturing_grade_one,
+        **_orchestrator_kwargs(http),
+    )
+
+    assert outcome["status"] == "ok"
+    # If the override took effect, NUM_RECEIPTS distinct threads ran
+    # _grade_one (the barrier guaranteed concurrency). If cfg's 1 had
+    # won, the barrier would have hung and each receipt's row would
+    # be an error row from the BrokenBarrierError. So a clean run
+    # with multiple threads is the success signal.
+    assert len(observed_threads) > 1, (
+        f"max_workers param did not override cfg; only saw {observed_threads}"
+    )

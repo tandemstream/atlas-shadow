@@ -26,6 +26,7 @@ to keep its direct psycopg dependency contained.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import re
 import sys
@@ -1399,6 +1400,7 @@ def run_pr_grading(
     *,
     github_token: str,
     atlas_query_cache: Any = None,
+    max_workers: Optional[int] = None,
     _fetch_pr_files: Callable = _fetch_pr_files,
     _fetch_file_at_ref: Callable = _fetch_file_at_ref,
     _post_pending: Callable = gh_check_mod.post_pending_status,
@@ -1419,7 +1421,26 @@ def run_pr_grading(
     Commit statuses display in the same PR ``Checks`` UI tab and
     integrate with branch protection ``Settings -> Branches -> Required
     status checks`` via the ``atlas-shadow-grading`` context.
+
+    PR atlas-shadow-receipt-parallelism-v1: ``max_workers`` controls
+    the per-packet receipt-grading concurrency. ``None`` (default)
+    falls back to ``cfg.grading_max_workers`` (defaults to 1 = serial,
+    matching pre-PR behavior). Values >1 fan ``_grade_one`` calls out
+    through a ``ThreadPoolExecutor``; row order is preserved by
+    submitting indexed futures and reassembling in receipt order.
+    Per-receipt exceptions still produce the existing error-row shape
+    so per-row downstream consumers see the same data either way.
     """
+    # PR atlas-shadow-receipt-parallelism-v1: resolve effective worker
+    # count. Explicit caller value wins (used by grade-packet-batch's
+    # ``--max-workers`` flag); otherwise honor the cfg default. Clamp
+    # to >=1 defensively — the config loader already clamps but tests
+    # may construct DaemonConfig directly with a bad value.
+    effective_max_workers = max_workers
+    if effective_max_workers is None:
+        effective_max_workers = getattr(cfg, "grading_max_workers", 1) or 1
+    if effective_max_workers < 1:
+        effective_max_workers = 1
     outcome: dict[str, Any] = {
         "pr_number": event.pr_number,
         "base_sha": event.base_sha,
@@ -1577,8 +1598,23 @@ def run_pr_grading(
             threshold = threshold_opt if threshold_opt is not None else 50
             packet_id = Path(qna_log_path).parent.name
 
-            rows: list[pr_comment_mod.ReceiptGradingRow] = []
-            for receipt in receipts:
+            # PR atlas-shadow-receipt-parallelism-v1: factor the per-
+            # receipt work into a closure so both the serial (worker=1)
+            # and ThreadPoolExecutor paths share the SAME exception
+            # handling and row-construction code. Receipt indices feed
+            # back into a sparse list so order matches the qna-log
+            # source regardless of completion order. The closure
+            # captures `cfg`, `code_revision_id`, `event.repo_full_name`,
+            # `event.base_sha`, and `atlas_query_cache` — all are
+            # read-only references; no shared mutable state crosses
+            # threads. ``_grade_one`` itself is a pure function whose
+            # dependencies (runner.run_one's subprocess, Anthropic SDK
+            # HTTP, git read-only commands, atlas_query_cache's WAL
+            # SQLite) are independently thread-safe.
+            def _grade_with_fallback(
+                idx_receipt: tuple[int, Any],
+            ) -> tuple[int, pr_comment_mod.ReceiptGradingRow]:
+                idx, receipt = idx_receipt
                 try:
                     row = _grade_one(
                         cfg=cfg,
@@ -1599,25 +1635,98 @@ def run_pr_grading(
                         # results.
                         atlas_query_cache=atlas_query_cache,
                     )
-                except Exception as exc:
-                    rows.append(
-                        pr_comment_mod.ReceiptGradingRow(
-                            question_id=receipt.question_id,
-                            question=receipt.question,
-                            grade="no_match",
-                            confidence=0.0,
-                            rationale=f"grading_error: {type(exc).__name__}: {exc}",
-                            tool="error",
-                            warnings=[f"exception:{type(exc).__name__}"],
-                            # PR #17: preserve the receipt's authoring
-                            # intent on the grading-error row too —
-                            # downstream classifiers may want to chart
-                            # error rates by evidence_type.
-                            evidence_type=receipt.evidence_type,
-                        )
+                except Exception as exc:  # noqa: BLE001 — preserve old behavior
+                    row = pr_comment_mod.ReceiptGradingRow(
+                        question_id=receipt.question_id,
+                        question=receipt.question,
+                        grade="no_match",
+                        confidence=0.0,
+                        rationale=f"grading_error: {type(exc).__name__}: {exc}",
+                        tool="error",
+                        warnings=[f"exception:{type(exc).__name__}"],
+                        # PR #17: preserve the receipt's authoring
+                        # intent on the grading-error row too —
+                        # downstream classifiers may want to chart
+                        # error rates by evidence_type.
+                        evidence_type=receipt.evidence_type,
                     )
-                    continue
-                rows.append(row)
+                return (idx, row)
+
+            indexed_receipts = list(enumerate(receipts))
+            if effective_max_workers <= 1 or len(indexed_receipts) <= 1:
+                # Serial path. Preserves the pre-PR loop exactly when
+                # the operator hasn't opted into parallelism, AND
+                # short-circuits the executor overhead for trivial
+                # packets (0 or 1 receipts).
+                indexed_rows: list[
+                    tuple[int, pr_comment_mod.ReceiptGradingRow]
+                ] = [_grade_with_fallback(item) for item in indexed_receipts]
+            else:
+                # Parallel path. ``ThreadPoolExecutor`` is right for
+                # this workload: each ``_grade_one`` blocks on a
+                # subprocess (atlas-query) + 1 HTTP call (Anthropic
+                # grader), both of which release the GIL. Cap workers
+                # at receipt count so we don't spawn idle threads for
+                # tiny packets. Exceptions inside the worker are
+                # caught by ``_grade_with_fallback`` and surface as
+                # error rows — futures themselves should not raise.
+                # We still defensively catch ``future.result()`` to
+                # avoid a single rogue future poisoning the whole
+                # packet (the closure already handles ``Exception``,
+                # but ``BaseException`` subclasses like SystemExit
+                # would otherwise bubble; degrade to the same shape).
+                worker_count = min(effective_max_workers, len(indexed_receipts))
+                indexed_rows = []
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="grade-receipt",
+                ) as executor:
+                    future_to_idx = {
+                        executor.submit(_grade_with_fallback, item): item[0]
+                        for item in indexed_receipts
+                    }
+                    for future in concurrent.futures.as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            indexed_rows.append(future.result())
+                        except BaseException as exc:  # noqa: BLE001
+                            # Defensive: closure already handles
+                            # ``Exception``, so this is for
+                            # ``BaseException`` (SystemExit / Ctrl-C
+                            # / KeyboardInterrupt). Synthesize an
+                            # error row so the packet still produces
+                            # a deterministic output instead of
+                            # losing the receipt silently.
+                            receipt = indexed_receipts[idx][1]
+                            indexed_rows.append(
+                                (
+                                    idx,
+                                    pr_comment_mod.ReceiptGradingRow(
+                                        question_id=receipt.question_id,
+                                        question=receipt.question,
+                                        grade="no_match",
+                                        confidence=0.0,
+                                        rationale=(
+                                            f"grading_error: "
+                                            f"{type(exc).__name__}: {exc}"
+                                        ),
+                                        tool="error",
+                                        warnings=[
+                                            f"exception:{type(exc).__name__}"
+                                        ],
+                                        evidence_type=receipt.evidence_type,
+                                    ),
+                                )
+                            )
+
+            # Reassemble in receipt order. ``sorted`` by index is
+            # cheap (len <= 50ish per packet today). Downstream
+            # consumers — comment renderer, dashboards, layered-oracle
+            # report — expect rows in qna-log source order.
+            indexed_rows.sort(key=lambda pair: pair[0])
+            rows: list[pr_comment_mod.ReceiptGradingRow] = [
+                row for _, row in indexed_rows
+            ]
 
             summary = pr_comment_mod.GradingSummary(
                 packet_id=packet_id,
