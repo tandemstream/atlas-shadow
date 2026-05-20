@@ -1,0 +1,172 @@
+schema_version: 1
+packet_id: 2026-05-13-lookup-subagent-pattern-v1
+title: Lookup subagent pattern layered-grading sanity pilot
+
+cost:
+  claim_count: 13
+  verified_claim_count: 11
+  unresolved_claim_count: 0
+  tool_calls: null
+  model_calls: null
+  notes: >
+    Sanity pilot for mixed doc/source/context/absence receipts. Actual
+    cost instrumentation is deferred to the generalized implementation.
+
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: doc_location
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: persona-shared.md exists at the expected template path.
+    - qid: q2
+      claim_type: doc_location
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: planner-prompt.md path and version anchor.
+    - qid: q3
+      claim_type: doc_location
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: codex-reviewer-prompt.md path and version anchor.
+    - qid: q4
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: review_courier.py consult command exists.
+    - qid: q5
+      claim_type: doc_structure
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: persona-shared subprocess liveness section exists.
+    - qid: q6
+      claim_type: convention
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: Atlas leaf-relative path convention is documented.
+    - qid: q7
+      claim_type: doc_structure
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: reviewer prompt insertion point exists.
+    - qid: q8
+      claim_type: external_context
+      evidence_type: external_tool_docs
+      oracle_bucket: context
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: uncertainty_note
+      notes: external Claude Code docs assumption; not Atlas retrieval evidence.
+    - qid: q9
+      claim_type: user_context
+      evidence_type: user_context
+      oracle_bucket: context
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: context_only
+      notes: user-provided dogfood-v2 empirical score context.
+    - qid: q10
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: Makefile exists and has conventions for a new target.
+    - qid: q11
+      claim_type: doc_structure
+      evidence_type: source_excerpt
+      oracle_bucket: evidence
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: implementation-plan-template sections exist.
+    - qid: q12
+      claim_type: command_result
+      evidence_type: source_excerpt
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: scripts directory conventions are deterministic command evidence.
+    - qid: q13
+      claim_type: absence_claim
+      evidence_type: absence_search
+      oracle_bucket: command
+      oracle_status: verified
+      planner_evidence_status: pass
+      synthesis_role: required_point
+      notes: docs/agents absence is deterministic command evidence.
+
+synthesis_oracle:
+  ideal_conclusion: >
+    The lookup-subagent pattern is implementable as an Atlas prompt/tooling
+    addition: existing persona templates, courier consult hooks, Makefile
+    conventions, and implementation-plan sections provide enough substrate,
+    while external tool-doc and user-score assumptions remain context rather
+    than Atlas retrieval evidence.
+  required_points:
+    - id: S1
+      text: Identify the existing persona-shared and persona prompt template locations.
+    - id: S2
+      text: Use review_courier.py consult as the existing operational hook.
+    - id: S3
+      text: Preserve Atlas leaf-relative path conventions.
+    - id: S4
+      text: Add QA/lookup tooling consistently with existing Makefile/scripts patterns.
+    - id: S5
+      text: Treat Claude Code tool docs and user benchmark scores as context, not repo evidence.
+  forbidden_claims:
+    - id: F1
+      text: docs/agents already exists.
+    - id: F2
+      text: External Claude Code docs are Atlas-retrievable repo evidence.
+  uncertainty_notes:
+    - id: U1
+      text: External subagent tool restrictions require live verification outside repo state.
+  criteria:
+    - id: conclusion
+      label: Correct conclusion
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      notes: Existing substrate supports the pattern.
+    - id: required_points
+      label: Required points covered
+      points_possible: 5
+      planner_points: 5
+      atlas_points: 4
+      notes: Atlas may miss context-only external/user evidence.
+    - id: forbidden_claims
+      label: Forbidden claims avoided
+      points_possible: 2
+      planner_points: 2
+      atlas_points: 2
+      notes: No evidence should claim docs/agents pre-exists.
+    - id: uncertainty
+      label: Uncertainty handled
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 0.5
+      notes: External tool-doc assumption should be caveated.

@@ -1,0 +1,279 @@
+schema_version: 1
+packet_id: 2026-05-14-atlas-doc-section-expansion-v1
+title: 2026 05 14 Atlas Doc Section Expansion V1
+migration_status: auto_drafted
+migration_source:
+  run_dir: shadow-runs/baseline-2026-05-20-post28-post473
+  packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-doc-section-expansion-v1.json
+  note: Generated from shadow artifact rows for historical migration. Review synthesis_oracle before
+    treating synthesis scores as authoritative.
+cost:
+  claim_count: 23
+  verified_claim_count: 20
+  unresolved_claim_count: 3
+  tool_calls: null
+  model_calls: null
+  notes: Auto-drafted historical sidecar; real cost tracking is future work.
+evidence_oracle:
+  rows:
+  - qid: q1
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: MarkdownChunker.chunk returns list[str], no heading metadata
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q2
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: Heading-boundary detection lives in `_split_sections` and tracks level
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q3
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`artifact_chunks` table has no metadata JSONB column'
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q4
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: Doc-side chunk insert lists columns explicitly; no metadata sink
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q5
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`rechunk_artifact` DELETEs old chunks for the SAME artifact_id'
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q6
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: evidence_expansion.py defines ExpansionCaps + ExpandedBlock with `strategy` field
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q7
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`_resolve_scan` gates expansion on ATLAS_EVIDENCE_EXPANSION env knob'
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q8
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: synthesize formats EXPANDED EVIDENCE block; additive for doc-section blocks
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q9
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: instruction-memory-v1.md "## Capture CLI" section is the Q13 answer span
+    oracle_failure_type: unavailable_source_ref
+  - qid: q10
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: 'instruction-memory-v1.md heading structure (12 ## + 11 ### + 2 #### at sha 87aa9fa)'
+    oracle_failure_type: unavailable_source_ref
+  - qid: q11
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: ChunkerBase.chunk signature constrains all chunkers to `list[str]`
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q12
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: dogfood_v2 doc-ingest constants pin org+corpus identifiers
+  - qid: q13
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: doc ingest writes corpus marker into `artifacts.metadata` JSONB
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q14
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`dogfood_v2_corpus_rechunk.py` re-runs ingest, then rechunks docs in place'
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q15
+    claim_type: doc_structure
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`artifacts.metadata` is JSONB and carries doc-ingest corpus marker'
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q16
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: ATLAS_SYNTH_TRACE instrumentation is opt-in and records per-prompt stats
+    planner_failure_type: current_benchmark_line_drift
+  - qid: q17
+    claim_type: absence_claim
+    evidence_type: absence_search
+    oracle_bucket: command
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: no existing references to `heading_path` / `heading_level` / `section_title` anywhere in
+      core or tests
+  - qid: q18
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "`ingest_artifact` returns None on duplicate `(org_id, doc_id)` \u2014 no fresh artifact\
+      \ created"
+  - qid: q19
+    claim_type: schema_fact
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: fail
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: '`artifacts` table has UNIQUE INDEX on `(org_id, doc_id) WHERE doc_id IS NOT NULL`'
+    planner_failure_type: receipt_hash_mismatch
+  - qid: q20
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "`dogfood_v2_smoketest_runner.py` argparse \u2014 no `--corpus-marker`, has `--all`"
+  - qid: q21
+    claim_type: user_context
+    evidence_type: user_context
+    oracle_bucket: context
+    oracle_status: verified
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "Q13 retrieved-chunk claim cannot be receipted from a committed source \u2014 marked assumption"
+  - qid: q22
+    claim_type: current_behavior
+    evidence_type: source_excerpt
+    oracle_bucket: context
+    oracle_status: unresolved
+    planner_evidence_status: not_scored
+    synthesis_role: context_only
+    required_point_ids: []
+    notes: "packet-4 postmortem \xA75.2 / \xA75.3 records median latency 11,400.5 ms and median prompt\
+      \ size 46,574.5 chars"
+    oracle_failure_type: doc_corpus_excluded
+  - qid: q23
+    claim_type: absence_claim
+    evidence_type: source_excerpt
+    oracle_bucket: evidence
+    oracle_status: verified
+    planner_evidence_status: pass
+    synthesis_role: required_point
+    required_point_ids:
+    - S1
+    notes: "retrieval chunk projection does NOT expose `chunk_index` \u2014 expander must look it\
+      \ up by `chunk_id`"
+synthesis_oracle:
+  status: draft
+  ideal_conclusion: Historical migration draft for 2026-05-14-atlas-doc-section-expansion-v1. A packet
+    owner should replace this with the intended planning conclusion before synthesis scores are used.
+  required_points:
+  - id: S1
+    text: Use verified evidence rows to support the packet's main planning or implementation conclusion.
+  forbidden_claims:
+  - id: F1
+    text: Do not treat unresolved or context-only rows as verified Atlas evidence.
+  uncertainty_notes:
+  - id: U1
+    text: 'Auto-drafted bucket counts: evidence=18, context=4, command=1.'
+  criteria: []
