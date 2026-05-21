@@ -99,6 +99,8 @@ class LayeredReport:
     synthesis_oracle: dict[str, Any]
     synthesis_warnings: list[dict[str, Any]]
     synthesis_score_source: str
+    synthesis_required_points_total: int
+    synthesis_supported_required_points: int
 
     @property
     def planner_evidence_pct(self) -> Optional[float]:
@@ -115,6 +117,13 @@ class LayeredReport:
     @property
     def atlas_synthesis_pct(self) -> Optional[float]:
         return _pct(self.atlas_synthesis_points, self.synthesis_points_possible)
+
+    @property
+    def synthesis_readiness_pct(self) -> Optional[float]:
+        return _pct(
+            self.synthesis_supported_required_points,
+            self.synthesis_required_points_total,
+        )
 
 
 def load_spec(path: Path) -> LayeredSpec:
@@ -281,6 +290,9 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
                 f"atlas:{criterion.atlas_miss_class or 'unclassified'}"
             ] += 1
 
+    synthesis_warnings = _synthesis_support_warnings(spec)
+    required_points_total = _required_points_total(spec)
+
     return LayeredReport(
         packet_id=spec.packet_id,
         title=spec.title,
@@ -327,8 +339,12 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
             "status": spec.synthesis_status,
             "score_source": spec.synthesis_score_source,
         },
-        synthesis_warnings=_synthesis_support_warnings(spec),
+        synthesis_warnings=synthesis_warnings,
         synthesis_score_source=spec.synthesis_score_source,
+        synthesis_required_points_total=required_points_total,
+        synthesis_supported_required_points=(
+            required_points_total - len(synthesis_warnings)
+        ),
     )
 
 
@@ -543,6 +559,11 @@ def to_json(report: LayeredReport) -> dict[str, Any]:
             "possible": report.synthesis_points_possible,
             "pct": report.atlas_synthesis_pct,
         },
+        "synthesis_readiness": {
+            "supported_required_points": report.synthesis_supported_required_points,
+            "required_points": report.synthesis_required_points_total,
+            "pct": report.synthesis_readiness_pct,
+        },
         "failure_counts": report.failure_counts,
         "cost": report.cost,
         "rows": report.rows,
@@ -572,6 +593,12 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
         "synthesis_support_warning_count": sum(
             len(r.synthesis_warnings) for r in reports
         ),
+        "synthesis_supported_required_points": sum(
+            r.synthesis_supported_required_points for r in reports
+        ),
+        "synthesis_required_points_total": sum(
+            r.synthesis_required_points_total for r in reports
+        ),
     }
     totals["planner_evidence_pct"] = _pct(
         totals["planner_evidence_pass"], totals["planner_evidence_total"]
@@ -584,6 +611,10 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
     )
     totals["atlas_synthesis_pct"] = _pct(
         totals["atlas_synthesis_points"], totals["synthesis_points_possible"]
+    )
+    totals["synthesis_readiness_pct"] = _pct(
+        totals["synthesis_supported_required_points"],
+        totals["synthesis_required_points_total"],
     )
     return {
         "totals": totals,
@@ -614,6 +645,11 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
                     "points": r.atlas_synthesis_points,
                     "possible": r.synthesis_points_possible,
                     "pct": r.atlas_synthesis_pct,
+                },
+                "synthesis_readiness": {
+                    "supported_required_points": r.synthesis_supported_required_points,
+                    "required_points": r.synthesis_required_points_total,
+                    "pct": r.synthesis_readiness_pct,
                 },
                 "failure_counts": r.failure_counts,
                 "synthesis_warnings": r.synthesis_warnings,
@@ -657,11 +693,15 @@ def render_run_summary_markdown(reports: list[LayeredReport]) -> str:
             "| Atlas Synthesis | "
             f"{_points(totals['atlas_synthesis_points'], totals['synthesis_points_possible'])} |"
         ),
+        (
+            "| Synthesis Readiness | "
+            f"{_ratio(totals['synthesis_supported_required_points'], totals['synthesis_required_points_total'])} |"
+        ),
         "",
         "## Per Packet",
         "",
-        "| Packet | Oracle Coverage | Confidence | Planner Evidence | Planner Synthesis | Atlas Evidence | Atlas Synthesis |",
-        "|---|---:|---|---:|---:|---:|---:|",
+        "| Packet | Oracle Coverage | Confidence | Planner Evidence | Planner Synthesis | Atlas Evidence | Atlas Synthesis | Synthesis Readiness |",
+        "|---|---:|---|---:|---:|---:|---:|---:|",
     ]
     for report in sorted(reports, key=lambda item: item.packet_id):
         lines.append(
@@ -672,7 +712,8 @@ def render_run_summary_markdown(reports: list[LayeredReport]) -> str:
             f"{_ratio(report.planner_evidence_pass, report.planner_evidence_total)} | "
             f"{_points(report.planner_synthesis_points, report.synthesis_points_possible)} | "
             f"{_ratio(report.atlas_evidence_pass, report.atlas_evidence_total)} | "
-            f"{_points(report.atlas_synthesis_points, report.synthesis_points_possible)} |"
+            f"{_points(report.atlas_synthesis_points, report.synthesis_points_possible)} | "
+            f"{_ratio(report.synthesis_supported_required_points, report.synthesis_required_points_total)} |"
         )
     lines.extend(["", "## Notes", ""])
     lines.append(
@@ -685,6 +726,11 @@ def render_run_summary_markdown(reports: list[LayeredReport]) -> str:
     lines.append(
         f"Synthesis support warnings: "
         f"{totals.get('synthesis_support_warning_count', 0)}."
+    )
+    lines.append(
+        "Synthesis readiness counts required points with verified evidence support. "
+        "It does not change authored synthesis scores; it tells you how much of "
+        "the rubric is safe to treat as an actionable scoring surface."
     )
     lines.append("")
     lines.append(
@@ -743,6 +789,10 @@ def render_markdown(report: LayeredReport) -> str:
         (
             f"| Atlas Synthesis | {_points(report.atlas_synthesis_points, report.synthesis_points_possible)} | "
             f"{report.benchmark_confidence} | {report.synthesis_score_source}; Atlas answer against synthesis oracle |"
+        ),
+        (
+            f"| Synthesis Readiness | {_ratio(report.synthesis_supported_required_points, report.synthesis_required_points_total)} | "
+            f"{report.benchmark_confidence} | Required points with verified evidence support |"
         ),
         f"| Cost | {_cost_summary(report.cost)} | - | Pilot cost fields from typed oracle spec |",
         "",
@@ -928,6 +978,12 @@ def _synthesis_support_warnings(spec: LayeredSpec) -> list[dict[str, Any]]:
             "qids": [row.qid for row in supporting],
         })
     return warnings
+
+
+def _required_points_total(spec: LayeredSpec) -> int:
+    if spec.synthesis_status == "draft":
+        return 0
+    return sum(1 for item in spec.required_points if item.get("id") is not None)
 
 
 def _atlas_failure_type(runtime: dict[str, Any]) -> str:
