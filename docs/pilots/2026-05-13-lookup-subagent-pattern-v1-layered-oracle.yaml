@@ -308,9 +308,14 @@ synthesis_oracle:
             Answer must state that `docs/agents/` does not yet exist
             (i.e., the directory is being introduced by this pattern,
             not described as pre-existing). Positive rewrite of F1.
+            Linked to S4 ("Add QA/lookup tooling consistently with
+            existing Makefile/scripts patterns") — docs/agents/ is the
+            tooling-pattern directory the packet introduces; the
+            supporting row q13 is tagged S4 in evidence_oracle.rows[]
+            for the same reason.
           points: 1
           supporting_qids: [q13]
-          required_point_id: S1
+          required_point_id: S4
           planner_status: covered
           atlas_status: covered
         - id: forbidden_claims.external_claude_docs_labeled_context
