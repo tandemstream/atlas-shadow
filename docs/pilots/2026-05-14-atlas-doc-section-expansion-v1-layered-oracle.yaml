@@ -2,6 +2,19 @@ schema_version: 1
 packet_id: 2026-05-14-atlas-doc-section-expansion-v1
 title: 2026 05 14 Atlas Doc Section Expansion V1
 migration_status: hand_authored_synthesis
+strict_subcriteria_pilot:
+  status: pilot_v1
+  applied_2026_05_20: true
+  note: >
+    Synthesis criteria decomposed into binary (1pt) named subcriteria, each
+    anchored to one or more supporting qids from `evidence_oracle.rows`.
+    Negative bars ("avoid over-claiming X") rewritten as positive required
+    behaviors. Fractional points eliminated except where parent points equal
+    the count of `*_status: covered` subcriteria. See PR description for
+    contract-design motivation. Parent-criterion fields
+    (`points_possible`, `planner_points`, `atlas_points`) remain populated
+    for backward-compat with `atlas_shadow/ingest_daemon/layered_report.py`;
+    once that reader learns the new shape, the parent fields can be derived.
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-doc-section-expansion-v1.json
@@ -209,7 +222,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "`ingest_artifact` returns None on duplicate `(org_id, doc_id)` \u2014 no fresh artifact\
+    notes: "`ingest_artifact` returns None on duplicate `(org_id, doc_id)` — no fresh artifact\
       \ created"
   - qid: q19
     claim_type: schema_fact
@@ -231,7 +244,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "`dogfood_v2_smoketest_runner.py` argparse \u2014 no `--corpus-marker`, has `--all`"
+    notes: "`dogfood_v2_smoketest_runner.py` argparse — no `--corpus-marker`, has `--all`"
   - qid: q21
     claim_type: user_context
     evidence_type: user_context
@@ -240,7 +253,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "Q13 retrieved-chunk claim cannot be receipted from a committed source \u2014 marked assumption"
+    notes: "Q13 retrieved-chunk claim cannot be receipted from a committed source — marked assumption"
   - qid: q22
     claim_type: current_behavior
     evidence_type: source_excerpt
@@ -261,7 +274,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "retrieval chunk projection does NOT expose `chunk_index` \u2014 expander must look it\
+    notes: "retrieval chunk projection does NOT expose `chunk_index` — expander must look it\
       \ up by `chunk_id`"
 synthesis_oracle:
   status: hand_authored
@@ -278,11 +291,25 @@ synthesis_oracle:
     text: The answer must call out the artifact/chunk tables used to recover text ranges.
   - id: S4
     text: The answer must separate docs/work exclusion policy from true doc_resolver misses.
+  - id: S5
+    text: The answer must distinguish verified evidence rows from `user_context` / `assumption` rows
+      (positive replacement for prior negative "do not over-claim" framing).
+  - id: S6
+    text: The answer must identify chunker-signature / projection constraints that prevent surfacing
+      heading metadata without code changes.
   forbidden_claims:
   - id: F1
-    text: Do not claim heading_path/heading_level are already present if verified absence rows say otherwise.
+    text: Do not claim heading_path/heading_level are already present if verified absence rows say
+      otherwise.
+    rewritten_as:
+      positive_subcriterion_id: metadata_gap.heading_path_absent
+      note: Inverted into a positive "answer must state X is absent" subcriterion, scoreable against
+        q1 + q17.
   - id: F2
     text: Do not treat docs/work postmortem receipts as Atlas retrieval failures.
+    rewritten_as:
+      positive_subcriterion_id: caveats.docs_work_exclusion_labeled_policy
+      note: Inverted into "answer must label the exclusion as policy," scoreable against q22.
   uncertainty_notes:
   - id: U1
     text: Excluded docs/work evidence should be confidence/context only until policy changes.
@@ -293,6 +320,17 @@ synthesis_oracle:
     planner_points: 1
     atlas_points: 1
     notes: Both should say section expansion is viable but needs explicit metadata plumbing.
+    subcriteria:
+    - id: conclusion.metadata_plumbing_needed
+      text: >
+        Answer must conclude that section expansion is viable but requires
+        explicit heading-metadata plumbing (chunker signature + chunk
+        projection + retrieval surface).
+      points: 1
+      supporting_qids: [q1, q2, q11]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
   - id: metadata_gap
     label: Metadata gap described
     points_possible: 4
@@ -300,7 +338,56 @@ synthesis_oracle:
     atlas_points: 3
     planner_miss_class: evidence_present_answer_missed
     atlas_miss_class: evidence_missing
-    notes: Must cover heading path/level/title absence and current projection limitations.
+    notes: >
+      Decomposed from monolithic "must cover heading path/level/title absence
+      and current projection limitations" into 4 binary subcriteria. The
+      missed-subcriterion call (`chunker_signature_constraint`) is the best
+      inference from the original `notes` text; should be re-validated when
+      the next baseline reads a real synthesis answer.
+    subcriteria:
+    - id: metadata_gap.heading_path_absent
+      text: >
+        Answer must state that current chunk metadata lacks heading_path /
+        heading_level / section_title (positive replacement for the F1
+        forbidden-claim phrasing).
+      points: 1
+      supporting_qids: [q1, q17]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
+    - id: metadata_gap.artifact_chunks_no_metadata_column
+      text: >
+        Answer must name that the `artifact_chunks` table has no metadata
+        JSONB column, AND that the doc-side chunk insert lists columns
+        explicitly with no metadata sink — both halves of the storage gap.
+      points: 1
+      supporting_qids: [q3, q4]
+      required_point_id: S2
+      planner_status: covered
+      atlas_status: covered
+    - id: metadata_gap.chunker_signature_constraint
+      text: >
+        Answer must call out that `ChunkerBase.chunk` returns `list[str]`,
+        so chunkers cannot surface section metadata without a signature
+        change — i.e. there's a code-level constraint upstream of the
+        storage gap.
+      points: 1
+      supporting_qids: [q11]
+      required_point_id: S6
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: missed
+      atlas_miss_class: evidence_missing
+    - id: metadata_gap.section_boundary_machinery_exists
+      text: >
+        Answer must acknowledge that heading-boundary detection (level
+        tracking) already exists in `_split_sections` — the machinery is
+        there even though the projection isn't.
+      points: 1
+      supporting_qids: [q2]
+      required_point_id: S2
+      planner_status: covered
+      atlas_status: covered
   - id: storage_path
     label: Storage/query path described
     points_possible: 3
@@ -308,11 +395,80 @@ synthesis_oracle:
     atlas_points: 2
     planner_miss_class: evidence_present_answer_missed
     atlas_miss_class: evidence_present_answer_missed
-    notes: Must identify artifact_chunks/document reads rather than vague doc retrieval.
+    notes: >
+      Decomposed from monolithic "must identify artifact_chunks/document
+      reads rather than vague doc retrieval" into 3 binary subcriteria. The
+      missed-subcriterion call (`retrieval_chunk_projection_lacks_chunk_index`)
+      is the most subtle of the three and the best inference from the
+      original `notes`; should be re-validated against a real answer.
+    subcriteria:
+    - id: storage_path.artifact_chunks_table_named
+      text: >
+        Answer must name the `artifact_chunks` table (and the
+        `rechunk_artifact` DELETE pattern that re-keys chunks under the
+        same artifact_id) as the storage path for text recovery.
+      points: 1
+      supporting_qids: [q3, q5]
+      required_point_id: S3
+      planner_status: covered
+      atlas_status: covered
+    - id: storage_path.artifacts_metadata_jsonb_named
+      text: >
+        Answer must identify that `artifacts.metadata` is JSONB and carries
+        the doc-ingest corpus marker, with `(org_id, doc_id)` uniqueness
+        constraints — distinguishing storage-table specifics from "vague
+        doc retrieval" language.
+      points: 1
+      supporting_qids: [q13, q15, q19]
+      required_point_id: S3
+      planner_status: covered
+      atlas_status: covered
+    - id: storage_path.retrieval_chunk_projection_lacks_chunk_index
+      text: >
+        Answer must explain that the retrieval chunk projection does NOT
+        expose `chunk_index`, so an expander has to look it up by
+        `chunk_id` — the projection-shape limitation that motivates
+        section expansion's need for additional projected fields.
+      points: 1
+      supporting_qids: [q23]
+      required_point_id: S6
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: missed
+      atlas_miss_class: evidence_present_answer_missed
   - id: caveats
-    label: Corpus-policy caveats
+    label: Policy + assumption labeling (positive)
     points_possible: 2
     planner_points: 2
-    atlas_points: 1
-    atlas_miss_class: grader_too_harsh
-    notes: docs/work exclusions are policy/context, not retrieval misses.
+    atlas_points: 2
+    notes: >
+      REWRITTEN. Original criterion: "Corpus-policy caveats / docs/work
+      exclusions are policy/context, not retrieval misses" — a negative bar
+      that the author flagged as `grader_too_harsh` for the atlas actor
+      (1/2). Reframed into two positive named behaviors below. atlas_points
+      restored from 1 to 2 because the original deduction was acknowledged
+      as a grader misjudgment; positive subcriteria make the same intent
+      scoreable without the misjudgment surface.
+    subcriteria:
+    - id: caveats.docs_work_exclusion_labeled_policy
+      text: >
+        Answer must label `docs/work/` exclusions as a corpus-policy
+        decision (citing the packet-4 postmortem source being excluded by
+        policy) rather than as a doc_resolver retrieval failure. Positive
+        replacement for the F2 forbidden-claim phrasing.
+      points: 1
+      supporting_qids: [q22]
+      required_point_id: S4
+      planner_status: covered
+      atlas_status: covered
+    - id: caveats.unresolved_user_context_marked_assumption
+      text: >
+        Answer must identify which evidence is `user_context` / `assumption`
+        (not committed source) and mark it as such — distinguishing from
+        verified evidence rows. Positive replacement for "do not
+        over-claim" framings.
+      points: 1
+      supporting_qids: [q9, q10, q21]
+      required_point_id: S5
+      planner_status: covered
+      atlas_status: covered
