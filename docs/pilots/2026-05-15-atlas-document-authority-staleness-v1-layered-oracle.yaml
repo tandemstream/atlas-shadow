@@ -2,6 +2,37 @@ schema_version: 1
 packet_id: 2026-05-15-atlas-document-authority-staleness-v1
 title: 2026 05 15 Atlas Document Authority Staleness V1
 migration_status: hand_authored_synthesis
+strict_subcriteria_pilot:
+  status: pilot_v1
+  applied_2026_05_21: true
+  note: >
+    Fourth packet converted to the strict-subcriteria shape (after PR
+    #38, #42, #44). Different task class from the prior three: doc
+    authority / stale context / policy judgment rather than code
+    retrieval mechanics.
+    READINESS REPAIR: pre-pilot had `required_point_id` tags only on
+    S1 (every required-point row references S1, none reference S2/S3).
+    Readiness was 1/3 = 33.3% with two `no_supporting_rows` warnings.
+    Repaired by extending existing rows' `required_point_ids` arrays
+    where the row's notes already substantiate the point — NO new
+    evidence invented:
+      q4  += S2   (q4's note: "CodePack report exposes adjacent-document
+                   tiers" = the staleness-as-tier mechanism)
+      q7  += S2   (q7's note: "evidence lookup ranks CodePack
+                   contamination tiers" = the contamination-as-staleness
+                   surfacing)
+      q9  += S3   (q9's note: "code-reference lookup defaults to runtime
+                   behavior" = exactly S3's "preserve code-reference
+                   lookup defaults")
+      q10 += S3   (q10's note: "task status is reserved for status rows
+                   and task identifiers" = exactly S3's "task/status
+                   vocabulary distinctions")
+    All other constraints from the prior pilots preserved: binary 1pt
+    subcriteria, qid-anchored OR `scoreable: context_only` (no instance
+    of the latter here), no fractional points, negative bars F1/F2
+    rewritten as positive subcriteria, parent point totals preserved
+    exactly.
+
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-15-atlas-document-authority-staleness-v1.json
@@ -56,6 +87,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
+    - S2
     notes: CodePack report exposes adjacent-document tiers
     planner_failure_type: receipt_hash_mismatch
   - qid: q5
@@ -88,6 +120,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
+    - S2
     notes: evidence lookup ranks CodePack contamination tiers
     planner_failure_type: receipt_hash_mismatch
   - qid: q8
@@ -109,6 +142,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
+    - S3
     notes: code-reference lookup defaults to runtime behavior
   - qid: q10
     claim_type: current_behavior
@@ -119,6 +153,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
+    - S3
     notes: task status is reserved for status rows and task identifiers
     planner_failure_type: current_benchmark_line_drift
 synthesis_oracle:
@@ -137,8 +172,16 @@ synthesis_oracle:
   forbidden_claims:
   - id: F1
     text: Do not treat docs/work evidence as current canonical documentation.
+    rewritten_as:
+      positive_subcriterion_id: authority_ordering.docs_work_historical
+      note: Inverted into "answer must name docs/work as lower-authority historical notes,"
+        scoreable against q3.
   - id: F2
     text: Do not collapse task status rows and task identifiers into the same authority class.
+    rewritten_as:
+      positive_subcriterion_id: terminology_guard.task_status_scope_preserved
+      note: Inverted into "answer must preserve task_status as a distinct vocabulary applying only
+        to status rows / task identifiers (not general claim text)," scoreable against q10.
   uncertainty_notes:
   - id: U1
     text: Some document authority questions are policy-heavy and should be scored with confidence caveats.
@@ -149,13 +192,67 @@ synthesis_oracle:
     planner_points: 1
     atlas_points: 1
     notes: Both should prioritize canonical current docs over historical workpacket notes.
+    subcriteria:
+    - id: conclusion.runtime_over_workpacket_authority
+      text: >
+        Answer must conclude that canonical runtime/product docs hold
+        higher authority than docs/work historical notes — i.e.,
+        Atlas answers should not surface workpacket-era artifacts as
+        current product truth.
+      points: 1
+      supporting_qids: [q1, q2, q3]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
   - id: authority_ordering
     label: Authority ordering explained
     points_possible: 3
     planner_points: 2
     atlas_points: 3
     planner_miss_class: current_benchmark_line_drift
-    notes: Must separate runtime/product docs, code references, and docs/work notes.
+    notes: >
+      Decomposed from monolithic 3pt criterion into 3 binary subcriteria,
+      one per authority class (runtime/product, code references,
+      docs/work historical). Planner 2/3 split preserves the original
+      `current_benchmark_line_drift` miss on the docs/work-historical
+      sub (q3's planner_failure_type is exactly that). Atlas 3/3
+      preserves the original strong showing on this criterion.
+    subcriteria:
+    - id: authority_ordering.runtime_product_docs_highest
+      text: >
+        Answer must name canonical runtime/product docs (the
+        "document rows become CodePack facts" surface + claim-scoped
+        document assessment) as the highest-authority class.
+      points: 1
+      supporting_qids: [q1, q2]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
+    - id: authority_ordering.code_references_middle
+      text: >
+        Answer must name code references (code-reference lookup
+        defaulting to runtime behavior) as a distinct authority
+        class — separate from both canonical docs and historical
+        workpacket notes.
+      points: 1
+      supporting_qids: [q9]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
+    - id: authority_ordering.docs_work_historical
+      text: >
+        Answer must name docs/work historical workpacket notes as
+        the lowest-authority class — explicitly distinct from current
+        runtime claims. Positive rewrite of F1 ("don't treat docs/work
+        as current canonical documentation"); the bar is naming the
+        distinction the claim policy makes (task status / runtime
+        behavior / design intent).
+      points: 1
+      supporting_qids: [q3]
+      required_point_id: S1
+      planner_status: missed
+      planner_miss_class: current_benchmark_line_drift
+      atlas_status: covered
   - id: stale_context
     label: Stale context handled
     points_possible: 3
@@ -163,11 +260,85 @@ synthesis_oracle:
     atlas_points: 2
     planner_miss_class: evidence_present_answer_missed
     atlas_miss_class: evidence_present_answer_missed
-    notes: Stale docs should become uncertainty/context, not correctness misses.
+    notes: >
+      Decomposed from monolithic 3pt criterion into 3 binary subcriteria.
+      The shared miss (both actors 2/3) lands on
+      `regression_tests_acknowledged` — the subtlest sub, and the only
+      one whose supporting qids are context-only (q6, q8); easier to
+      elide than the verified-evidence subs. Should be re-validated
+      against a real synthesis answer.
+    subcriteria:
+    - id: stale_context.stale_evidence_marked_uncertainty
+      text: >
+        Answer must explain that stale document evidence should be
+        surfaced as uncertainty/context (lower confidence), NOT
+        treated as a correctness miss against current state. Direct
+        bar for S2.
+      points: 1
+      supporting_qids: [q4]
+      required_point_id: S2
+      planner_status: covered
+      atlas_status: covered
+    - id: stale_context.contamination_tiers_named
+      text: >
+        Answer must name the CodePack contamination-tier mechanism
+        (q7's "evidence lookup ranks CodePack contamination tiers")
+        as the operational signal for staleness — i.e., the runtime
+        already knows how to demote stale docs without manual
+        intervention.
+      points: 1
+      supporting_qids: [q5, q7]
+      required_point_id: S2
+      planner_status: covered
+      atlas_status: covered
+    - id: stale_context.regression_tests_acknowledged
+      text: >
+        Answer must acknowledge that the regression test surface
+        (q6 runtime-behavior fact regression test + q8 evidence-
+        lookup ordering regression test) is the audit harness for
+        staleness handling — i.e., the staleness behavior has a
+        test surface, not just a docs surface. Context-only
+        supporting rows reflect that these tests are not currently
+        verified evidence (their source refs are unavailable).
+      points: 1
+      supporting_qids: [q6, q8]
+      required_point_id: S2
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: missed
+      atlas_miss_class: evidence_present_answer_missed
   - id: terminology_guard
     label: Terminology guardrails
     points_possible: 2
     planner_points: 1
     atlas_points: 2
     planner_miss_class: evidence_present_answer_missed
-    notes: Task status and task identifiers remain separate.
+    notes: >
+      Decomposed from monolithic 2pt criterion into 2 binary
+      subcriteria. Planner 1/2 split preserves the original miss on
+      `task_status_scope_preserved` (q10's planner_failure_type is
+      `current_benchmark_line_drift` — planner's line-drift on q10's
+      anchor is the natural attribution). Atlas 2/2 unchanged.
+    subcriteria:
+    - id: terminology_guard.task_status_scope_preserved
+      text: >
+        Answer must preserve "task_status" as a vocabulary applying
+        only to status rows / task identifiers — NOT collapsing it
+        into general claim text or design-intent rows. Positive
+        rewrite of F2.
+      points: 1
+      supporting_qids: [q10]
+      required_point_id: S3
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: covered
+    - id: terminology_guard.code_reference_default_to_runtime
+      text: >
+        Answer must preserve the default that code-reference lookups
+        return runtime behavior (not task status, not design intent)
+        — i.e., the lookup type drives the vocabulary scope.
+      points: 1
+      supporting_qids: [q9]
+      required_point_id: S3
+      planner_status: covered
+      atlas_status: covered
