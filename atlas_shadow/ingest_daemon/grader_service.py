@@ -906,6 +906,7 @@ def _grade_one_receipt(
             heading_path=heading_path,
             warnings=[*warnings, f"exception:{type(exc).__name__}"],
             atlas_answer_len=len(atlas_answer_text or ""),
+            atlas_answer_excerpt=_answer_excerpt(atlas_answer_text),
             atlas_returncode=atlas_returncode,
             atlas_exception=atlas_exception,
             atlas_stderr_head=atlas_stderr_head,
@@ -965,6 +966,7 @@ def _grade_one_receipt(
         heading_path=heading_path,
         warnings=warnings,
         atlas_answer_len=len(atlas_answer_text or ""),
+        atlas_answer_excerpt=_answer_excerpt(atlas_answer_text),
         atlas_returncode=atlas_returncode,
         atlas_exception=atlas_exception,
         atlas_stderr_head=atlas_stderr_head,
@@ -1091,6 +1093,15 @@ def _atlas_raw_result_diagnostics(raw_result: Any) -> dict[str, Any]:
         ),
         "reranker_top_k_count": len(top_k) if isinstance(top_k, list) else None,
     }
+
+
+def _answer_excerpt(answer_text: str, *, limit: int = 2000) -> Optional[str]:
+    text = (answer_text or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[...truncated...]"
 
 
 def _resolve_commit_for_ledger(repo_path: Path, commit_ref: str) -> str:
@@ -2132,6 +2143,7 @@ def _serialize_row(row: "pr_comment_mod.ReceiptGradingRow") -> dict[str, Any]:
         "heading_path": list(row.heading_path) if row.heading_path else None,
         "warnings": list(row.warnings or []),
         "atlas_answer_len": int(row.atlas_answer_len or 0),
+        "atlas_answer_excerpt": row.atlas_answer_excerpt,
         "atlas_returncode": row.atlas_returncode,
         "atlas_exception": row.atlas_exception,
         "atlas_stderr_head": row.atlas_stderr_head,
