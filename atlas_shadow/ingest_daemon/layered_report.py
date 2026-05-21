@@ -433,6 +433,7 @@ def write_synthesis_audit(
         ],
         "rows": miss_rows,
     }
+    payload["repair_queue"] = _synthesis_repair_queue(payload["support_warnings"])
     json_path = output_dir / "synthesis-audit.json"
     md_path = output_dir / "synthesis-audit.md"
     json_path.write_text(
@@ -498,6 +499,25 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
             lines.append(
                 f"| `{row.get('packet_id')}` | {row.get('required_point_id')} | "
                 f"`{row.get('warning')}` | {qids} |"
+            )
+    else:
+        lines.append("| - | - | - | None |")
+
+    lines.extend(
+        [
+            "",
+            "## Repair Queue",
+            "",
+            "| Packet | Required Point | Warning | Recommended Action |",
+            "|---|---|---|---|",
+        ]
+    )
+    repair_rows = payload.get("repair_queue") or []
+    if repair_rows:
+        for row in repair_rows:
+            lines.append(
+                f"| `{row.get('packet_id')}` | {row.get('required_point_id')} | "
+                f"`{row.get('warning')}` | {row.get('recommended_action')} |"
             )
     else:
         lines.append("| - | - | - | None |")
@@ -978,6 +998,53 @@ def _synthesis_support_warnings(spec: LayeredSpec) -> list[dict[str, Any]]:
             "qids": [row.qid for row in supporting],
         })
     return warnings
+
+
+def _synthesis_repair_queue(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    actions = {
+        "no_supporting_rows": (
+            "Attach the point to verified evidence with required_point_ids, "
+            "or remove it from scoreable synthesis."
+        ),
+        "depends_on_unresolved_evidence": (
+            "Repair the source reference or keep the point non-scoreable until "
+            "the backing evidence verifies."
+        ),
+        "context_only_support": (
+            "Move the point to context/uncertainty scoring, or add verified "
+            "repo evidence before counting it."
+        ),
+        "command_only_support": (
+            "Keep as deterministic command context, or add scoreable evidence "
+            "if Atlas should be accountable for it."
+        ),
+        "no_verified_evidence_support": (
+            "Add a verified scoreable evidence row, or make this an explicit "
+            "qualitative/context criterion."
+        ),
+    }
+    rows = []
+    for warning in warnings:
+        warning_type = str(warning.get("warning") or "")
+        rows.append(
+            {
+                "packet_id": warning.get("packet_id"),
+                "required_point_id": warning.get("required_point_id"),
+                "warning": warning_type,
+                "qids": warning.get("qids") or [],
+                "recommended_action": actions.get(
+                    warning_type,
+                    "Review the required point and align it with verified evidence.",
+                ),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("packet_id") or ""),
+            str(row.get("required_point_id") or ""),
+        ),
+    )
 
 
 def _required_points_total(spec: LayeredSpec) -> int:

@@ -274,6 +274,10 @@ def test_write_synthesis_audit_requires_classified_misses(tmp_path):
     assert payload["total_misses"] == 3
     assert payload["score_sources"] == {"authored_static": 1}
     assert payload["support_warnings"][0]["warning"] == "no_supporting_rows"
+    assert payload["repair_queue"][0]["recommended_action"].startswith(
+        "Attach the point to verified evidence"
+    )
+    assert "Repair Queue" in md
     assert payload["class_counts"]["evidence_missing"] == 1
     assert payload["class_counts"]["evidence_present_answer_missed"] == 1
     assert payload["class_counts"]["grader_too_harsh"] == 1
