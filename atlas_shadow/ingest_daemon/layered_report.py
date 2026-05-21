@@ -73,6 +73,7 @@ class LayeredSpec:
     uncertainty_notes: tuple[dict[str, Any], ...]
     synthesis_criteria: tuple[SynthesisCriterion, ...]
     synthesis_status: str = "hand_authored"
+    synthesis_score_source: str = "authored_static"
     cost: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,6 +98,7 @@ class LayeredReport:
     rows: list[dict[str, Any]]
     synthesis_oracle: dict[str, Any]
     synthesis_warnings: list[dict[str, Any]]
+    synthesis_score_source: str
 
     @property
     def planner_evidence_pct(self) -> Optional[float]:
@@ -168,6 +170,9 @@ def load_spec(path: Path) -> LayeredSpec:
         uncertainty_notes=tuple(synth.get("uncertainty_notes", []) or []),
         synthesis_criteria=tuple(criteria),
         synthesis_status=str(synth.get("status") or "hand_authored"),
+        synthesis_score_source=str(
+            synth.get("score_source") or "authored_static"
+        ),
         cost=dict(raw.get("cost") or {}),
     )
 
@@ -320,8 +325,10 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
                 for c in spec.synthesis_criteria
             ],
             "status": spec.synthesis_status,
+            "score_source": spec.synthesis_score_source,
         },
         synthesis_warnings=_synthesis_support_warnings(spec),
+        synthesis_score_source=spec.synthesis_score_source,
     )
 
 
@@ -364,6 +371,11 @@ def write_synthesis_audit(
     rows: list[dict[str, Any]] = []
     class_counts: Counter[str] = Counter()
     for report in sorted(reports, key=lambda item: item.packet_id):
+        for warning in report.synthesis_warnings:
+            rows.append({
+                "packet_id": report.packet_id,
+                **warning,
+            })
         for criterion in report.synthesis_oracle.get("criteria", []):
             possible = float(criterion.get("points_possible") or 0)
             if possible <= 0:
@@ -390,13 +402,20 @@ def write_synthesis_audit(
                 rows.append(row)
                 class_counts[miss_class] += 1
 
+    miss_rows = [row for row in rows if row.get("actor")]
     payload = {
-        "total_misses": len(rows),
+        "total_misses": len(miss_rows),
         "class_counts": dict(sorted(class_counts.items())),
+        "score_sources": dict(
+            sorted(Counter(r.synthesis_score_source for r in reports).items())
+        ),
         "manual_review": [
-            row for row in rows if row.get("manual_review")
+            row for row in miss_rows if row.get("manual_review")
         ],
-        "rows": rows,
+        "support_warnings": [
+            row for row in rows if row.get("warning")
+        ],
+        "rows": miss_rows,
     }
     json_path = output_dir / "synthesis-audit.json"
     md_path = output_dir / "synthesis-audit.md"
@@ -413,6 +432,7 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
         "# Synthesis Audit",
         "",
         f"- **Total synthesis misses:** {payload.get('total_misses', 0)}",
+        f"- **Score source:** {_score_source_summary(payload.get('score_sources') or {})}",
         "",
         "## Miss Classes",
         "",
@@ -445,6 +465,26 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("| - | - | - | - | None |")
+
+    lines.extend(
+        [
+            "",
+            "## Support Warnings",
+            "",
+            "| Packet | Required Point | Warning | Supporting Rows |",
+            "|---|---|---|---|",
+        ]
+    )
+    support_rows = payload.get("support_warnings") or []
+    if support_rows:
+        for row in support_rows:
+            qids = ", ".join(row.get("qids") or []) or "-"
+            lines.append(
+                f"| `{row.get('packet_id')}` | {row.get('required_point_id')} | "
+                f"`{row.get('warning')}` | {qids} |"
+            )
+    else:
+        lines.append("| - | - | - | None |")
 
     lines.extend(
         [
@@ -508,6 +548,7 @@ def to_json(report: LayeredReport) -> dict[str, Any]:
         "rows": report.rows,
         "synthesis_oracle": report.synthesis_oracle,
         "synthesis_warnings": report.synthesis_warnings,
+        "synthesis_score_source": report.synthesis_score_source,
     }
 
 
@@ -525,6 +566,12 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
         "planner_synthesis_points": sum(r.planner_synthesis_points for r in reports),
         "atlas_synthesis_points": sum(r.atlas_synthesis_points for r in reports),
         "synthesis_points_possible": sum(r.synthesis_points_possible for r in reports),
+        "synthesis_score_sources": dict(
+            sorted(Counter(r.synthesis_score_source for r in reports).items())
+        ),
+        "synthesis_support_warning_count": sum(
+            len(r.synthesis_warnings) for r in reports
+        ),
     }
     totals["planner_evidence_pct"] = _pct(
         totals["planner_evidence_pass"], totals["planner_evidence_total"]
@@ -570,6 +617,7 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
                 },
                 "failure_counts": r.failure_counts,
                 "synthesis_warnings": r.synthesis_warnings,
+                "synthesis_score_source": r.synthesis_score_source,
             }
             for r in sorted(reports, key=lambda item: item.packet_id)
         ],
@@ -628,6 +676,18 @@ def render_run_summary_markdown(reports: list[LayeredReport]) -> str:
         )
     lines.extend(["", "## Notes", ""])
     lines.append(
+        "Synthesis points are currently "
+        f"{_score_source_summary(totals.get('synthesis_score_sources') or {})}. "
+        "Treat `authored_static` synthesis scores as rubric-pilot measurements, "
+        "not runtime-computed model grades."
+    )
+    lines.append("")
+    lines.append(
+        f"Synthesis support warnings: "
+        f"{totals.get('synthesis_support_warning_count', 0)}."
+    )
+    lines.append("")
+    lines.append(
         "Historical sidecars with draft synthesis criteria show `0/0 (n/a)` for synthesis; "
         "that is intentional until a packet owner authors the synthesis oracle."
     )
@@ -674,7 +734,7 @@ def render_markdown(report: LayeredReport) -> str:
         ),
         (
             f"| Planner Synthesis | {_points(report.planner_synthesis_points, report.synthesis_points_possible)} | "
-            f"{report.benchmark_confidence} | Planner answer against synthesis oracle |"
+            f"{report.benchmark_confidence} | {report.synthesis_score_source}; planner answer against synthesis oracle |"
         ),
         (
             f"| Atlas Evidence | {_ratio(report.atlas_evidence_pass, report.atlas_evidence_total)} "
@@ -682,7 +742,7 @@ def render_markdown(report: LayeredReport) -> str:
         ),
         (
             f"| Atlas Synthesis | {_points(report.atlas_synthesis_points, report.synthesis_points_possible)} | "
-            f"{report.benchmark_confidence} | Atlas answer against synthesis oracle |"
+            f"{report.benchmark_confidence} | {report.synthesis_score_source}; Atlas answer against synthesis oracle |"
         ),
         f"| Cost | {_cost_summary(report.cost)} | - | Pilot cost fields from typed oracle spec |",
         "",
@@ -935,6 +995,15 @@ def _cost_summary(cost: dict[str, Any]) -> str:
         if key in cost:
             parts.append(f"{key}={cost[key]}")
     return ", ".join(parts) if parts else "recorded"
+
+
+def _score_source_summary(score_sources: dict[str, int]) -> str:
+    if not score_sources:
+        return "unknown"
+    return ", ".join(
+        f"{name} ({count})"
+        for name, count in sorted(score_sources.items())
+    )
 
 
 def _takeaway(report: LayeredReport) -> str:

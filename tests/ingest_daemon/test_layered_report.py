@@ -124,6 +124,7 @@ def test_layered_report_builds_layered_scores(tmp_path):
     assert report.planner_synthesis_points == 2
     assert report.atlas_synthesis_points == 1.5
     assert report.synthesis_points_possible == 3
+    assert report.synthesis_score_source == "authored_static"
     assert report.failure_counts["planner_evidence"]["stale_or_false_claim"] == 1
     assert report.failure_counts["oracle"]["unresolved_source_ref"] == 1
     assert report.failure_counts["synthesis"]["planner:evidence_present_answer_missed"] == 1
@@ -174,6 +175,7 @@ def test_layered_report_writes_markdown_and_json(tmp_path):
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["oracle"]["verified"] == 2
     assert payload["planner_synthesis"]["pct"] == 66.7
+    assert payload["synthesis_score_source"] == "authored_static"
 
 
 def test_shadow_layered_report_cli(tmp_path):
@@ -260,6 +262,8 @@ def test_write_synthesis_audit_requires_classified_misses(tmp_path):
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert "Synthesis Audit" in md
     assert payload["total_misses"] == 3
+    assert payload["score_sources"] == {"authored_static": 1}
+    assert payload["support_warnings"][0]["warning"] == "no_supporting_rows"
     assert payload["class_counts"]["evidence_missing"] == 1
     assert payload["class_counts"]["evidence_present_answer_missed"] == 1
     assert payload["class_counts"]["grader_too_harsh"] == 1
