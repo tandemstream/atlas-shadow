@@ -462,18 +462,41 @@ def shadow_layered_report(
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
     help="Directory to write reports. Defaults to <run-dir>/_layered/.",
 )
+@click.option(
+    "--packet-slice",
+    "packet_slice",
+    default=None,
+    help="Named packet slice to render from --slice-config.",
+)
+@click.option(
+    "--slice-config",
+    "slice_config",
+    default=Path("docs/pilots/gold-slices-v0.yaml"),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="YAML file defining named packet slices.",
+)
 def shadow_layered_batch(
     run_dir: Path,
     oracle_dir: Path,
     output_dir: Optional[Path],
+    packet_slice: Optional[str],
+    slice_config: Path,
 ) -> None:
     """Render layered reports for every packet in a run directory."""
     packet_dir = run_dir / "packets"
     packet_paths = sorted(packet_dir.glob("*.json"))
     if not packet_paths:
         raise click.ClickException(f"no packet JSON files found under {packet_dir}")
+    if packet_slice:
+        packet_paths = _filter_packet_paths_by_slice(
+            packet_paths,
+            packet_slice=packet_slice,
+            slice_config=slice_config,
+        )
     if output_dir is None:
-        output_dir = run_dir / "_layered"
+        output_dir = run_dir / (
+            f"_layered-{packet_slice}" if packet_slice else "_layered"
+        )
 
     reports = []
     missing_specs = []
@@ -504,7 +527,38 @@ def shadow_layered_batch(
         f"[atlas-shadow] wrote {audit_md_path} and {audit_json_path}",
         err=True,
     )
-    click.echo(f"layered_packets={len(reports)}")
+    suffix = f" packet_slice={packet_slice}" if packet_slice else ""
+    click.echo(f"layered_packets={len(reports)}{suffix}")
+
+
+def _filter_packet_paths_by_slice(
+    packet_paths: list[Path],
+    *,
+    packet_slice: str,
+    slice_config: Path,
+) -> list[Path]:
+    raw = yaml.safe_load(slice_config.read_text(encoding="utf-8")) or {}
+    slices = raw.get("slices") if isinstance(raw, dict) else None
+    if not isinstance(slices, dict):
+        raise click.ClickException(f"slice config has no 'slices' mapping: {slice_config}")
+    slice_def = slices.get(packet_slice)
+    if not isinstance(slice_def, dict):
+        available = ", ".join(sorted(str(k) for k in slices))
+        raise click.ClickException(
+            f"unknown packet slice {packet_slice!r}; available: {available}"
+        )
+    packet_names = slice_def.get("packets")
+    if not isinstance(packet_names, list) or not packet_names:
+        raise click.ClickException(f"packet slice {packet_slice!r} has no packets")
+    wanted = {str(name) for name in packet_names}
+    by_slug = {path.stem: path for path in packet_paths}
+    missing = sorted(wanted - set(by_slug))
+    if missing:
+        raise click.ClickException(
+            "packet slice references packets missing from run:\n"
+            + "\n".join(missing)
+        )
+    return [by_slug[str(name)] for name in packet_names]
 
 
 def _fmt_pct(v: Optional[float]) -> str:
