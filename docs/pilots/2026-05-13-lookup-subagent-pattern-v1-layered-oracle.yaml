@@ -1,6 +1,26 @@
 schema_version: 1
 packet_id: 2026-05-13-lookup-subagent-pattern-v1
 title: Lookup subagent pattern layered-grading sanity pilot
+strict_subcriteria_pilot:
+  status: pilot_v1
+  applied_2026_05_21: true
+  note: >
+    Second packet converted to the strict-subcriteria shape (after PR #38
+    which converted 2026-05-14-atlas-doc-section-expansion-v1).
+    Synthesis criteria decomposed into binary (1pt) named subcriteria, each
+    anchored to one or more supporting qids from `evidence_oracle.rows`
+    OR explicitly marked `scoreable: context_only` (no instance of the
+    latter in this pilot — every subcriterion is qid-anchored). Negative
+    bars (F1, F2) rewritten as positive required behaviors.
+    PARENT-POINT NOTE: the `uncertainty` criterion is expanded from
+    points_possible=1 to points_possible=2 to eliminate the original
+    0.5/1 fractional atlas score. Two binary subcriteria carry the split
+    (`external_restrictions_caveat` covered, `live_verification_caveat`
+    missed) — atlas effectively scores the same 50% on uncertainty as
+    before, but via two clean 1pt binary calls instead of a single
+    half-credit. Other criteria's parent points_possible are unchanged.
+    Total parent points_possible thus moves from 9 to 10; full delta
+    is reported in the originating PR's body.
 
 cost:
   claim_count: 13
@@ -140,8 +160,16 @@ synthesis_oracle:
   forbidden_claims:
     - id: F1
       text: docs/agents already exists.
+      rewritten_as:
+        positive_subcriterion_id: forbidden_claims.docs_agents_absence_acknowledged
+        note: Inverted into "answer must state docs/agents does not yet exist," scoreable against
+          q13 (deterministic absence_search).
     - id: F2
       text: External Claude Code docs are Atlas-retrievable repo evidence.
+      rewritten_as:
+        positive_subcriterion_id: forbidden_claims.external_claude_docs_labeled_context
+        note: Inverted into "answer must label Claude Code tool docs as external context," scoreable
+          against q8.
   uncertainty_notes:
     - id: U1
       text: External subagent tool restrictions require live verification outside repo state.
@@ -152,23 +180,169 @@ synthesis_oracle:
       planner_points: 1
       atlas_points: 1
       notes: Existing substrate supports the pattern.
+      subcriteria:
+        - id: conclusion.substrate_sufficient
+          text: >
+            Answer must conclude that the lookup-subagent pattern is
+            implementable using existing substrate — persona templates,
+            review_courier.py consult hook, Makefile conventions, and
+            implementation-plan-template sections — rather than requiring
+            new infrastructure.
+          points: 1
+          supporting_qids: [q1, q2, q3, q4, q10, q11]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+
     - id: required_points
       label: Required points covered
       points_possible: 5
       planner_points: 5
       atlas_points: 4
       atlas_miss_class: evidence_missing
-      notes: Atlas may miss context-only external/user evidence.
+      notes: >
+        Decomposed from monolithic 5pt criterion into 5 binary subcriteria,
+        each mapping a single S-id to its supporting qids. The atlas miss
+        is preserved on `treat_external_user_as_context` (the S5
+        subcriterion) — this matches the original author's note "Atlas may
+        miss context-only external/user evidence" and the prior synthesis
+        audit's pattern of Atlas struggling with the context-vs-evidence
+        distinction. Should be re-validated against a real synthesis
+        answer when a future baseline scores it.
+      subcriteria:
+        - id: required_points.persona_template_locations
+          text: >
+            Answer must identify the existing persona-shared.md and
+            individual persona prompt-template locations
+            (planner-prompt.md, codex-reviewer-prompt.md) as the reuse
+            substrate for new subagent prompts.
+          points: 1
+          supporting_qids: [q1, q2, q3]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+        - id: required_points.review_courier_consult_hook
+          text: >
+            Answer must name `review_courier.py consult` as the existing
+            operational hook for invoking subagents, rather than proposing
+            a new invocation surface.
+          points: 1
+          supporting_qids: [q4]
+          required_point_id: S2
+          planner_status: covered
+          atlas_status: covered
+        - id: required_points.atlas_leaf_path_convention
+          text: >
+            Answer must preserve the Atlas leaf-relative path convention
+            (paths quoted relative to the Atlas package leaf, not the repo
+            root) — including for any new subagent-related files.
+          points: 1
+          supporting_qids: [q6]
+          required_point_id: S3
+          planner_status: covered
+          atlas_status: covered
+        - id: required_points.makefile_scripts_conventions
+          text: >
+            Answer must propose QA/lookup tooling that follows the existing
+            Makefile target conventions and `scripts/` directory patterns
+            (deterministic command shape, qa_lookup.sh style).
+          points: 1
+          supporting_qids: [q10, q12]
+          required_point_id: S4
+          planner_status: covered
+          atlas_status: covered
+        - id: required_points.treat_external_user_as_context
+          text: >
+            Answer must explicitly label Claude Code tool documentation
+            (q8) and user-provided dogfood-v2 benchmark scores (q9) as
+            context-only assumptions, not as Atlas-retrievable repo
+            evidence. Positive replacement for the prior negative
+            "don't claim X is repo evidence" framing.
+          points: 1
+          supporting_qids: [q8, q9]
+          required_point_id: S5
+          planner_status: covered
+          atlas_status: missed
+          atlas_miss_class: evidence_missing
+
     - id: forbidden_claims
-      label: Forbidden claims avoided
+      label: Forbidden claims avoided (positive rewrite)
       points_possible: 2
       planner_points: 2
       atlas_points: 2
-      notes: No evidence should claim docs/agents pre-exists.
+      notes: >
+        Both forbidden_claim entries (F1, F2) reframed as positive named
+        behaviors below. F1 → "answer must acknowledge docs/agents
+        absence" (q13). F2 → "answer must label Claude Code docs as
+        external context" (q8). Parent points_possible unchanged at 2.
+        Both actors scored 2/2 in the original; no change here.
+      subcriteria:
+        - id: forbidden_claims.docs_agents_absence_acknowledged
+          text: >
+            Answer must state that `docs/agents/` does not yet exist
+            (i.e., the directory is being introduced by this pattern,
+            not described as pre-existing). Positive rewrite of F1.
+          points: 1
+          supporting_qids: [q13]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+        - id: forbidden_claims.external_claude_docs_labeled_context
+          text: >
+            Answer must label Claude Code tool documentation as
+            external/non-retrievable context (i.e., distinct from
+            in-repo evidence). Positive rewrite of F2. Overlaps in
+            intent with `required_points.treat_external_user_as_context`
+            but tests narrower scope (Claude Code specifically vs all
+            context-only evidence) and is preserved for audit-trail
+            continuity with the original F2.
+          points: 1
+          supporting_qids: [q8]
+          required_point_id: S5
+          planner_status: covered
+          atlas_status: covered
+
     - id: uncertainty
       label: Uncertainty handled
-      points_possible: 1
-      planner_points: 1
-      atlas_points: 0.5
+      points_possible: 2
+      planner_points: 2
+      atlas_points: 1
       atlas_miss_class: evidence_present_answer_missed
-      notes: External tool-doc assumption should be caveated.
+      notes: >
+        EXPANDED from points_possible=1 to points_possible=2 to eliminate
+        the original 0.5/1 fractional atlas score (the only fractional
+        score in this rubric). The single U1 uncertainty note carries
+        two distinct caveats — (a) the restrictions are external and
+        (b) the restrictions need live verification — which are
+        decomposed into two binary subcriteria below. Atlas covered
+        the external-ness aspect but is preserved as missing the
+        live-verification caveat, matching the spirit of the original
+        0.5 (Atlas partially addressed U1). Should be re-validated
+        against a real synthesis answer.
+      subcriteria:
+        - id: uncertainty.external_restrictions_caveat
+          text: >
+            Answer must caveat that Claude Code subagent tool
+            restrictions live OUTSIDE this repo's verifiable state —
+            i.e., explicitly labels the source-of-truth as external
+            (vendor docs / live CLI) rather than as something Atlas
+            could retrieve from the corpus.
+          points: 1
+          supporting_qids: [q8]
+          required_point_id: S5
+          planner_status: covered
+          atlas_status: covered
+        - id: uncertainty.live_verification_caveat
+          text: >
+            Answer must caveat that the assumed Claude Code subagent
+            tool restrictions need LIVE VERIFICATION (e.g., running
+            the Claude Code CLI against a probe prompt) before the
+            pattern is treated as production-ready — i.e., the
+            assumption is not just "external" but specifically
+            "unverified-by-this-packet."
+          points: 1
+          supporting_qids: [q8]
+          required_point_id: S5
+          planner_status: covered
+          atlas_status: missed
+          atlas_miss_class: evidence_present_answer_missed
