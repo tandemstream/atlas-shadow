@@ -531,6 +531,31 @@ def shadow_layered_batch(
     click.echo(f"layered_packets={len(reports)}{suffix}")
 
 
+@main.command("shadow-validate-layered-oracles")
+@click.option(
+    "--oracle-dir",
+    "oracle_dir",
+    default=Path("docs/pilots"),
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directory containing <packet>-layered-oracle.yaml specs.",
+)
+def shadow_validate_layered_oracles(oracle_dir: Path) -> None:
+    """Validate strict-subcriteria layered oracle specs."""
+    paths = sorted(oracle_dir.glob("*-layered-oracle.yaml"))
+    if not paths:
+        raise click.ClickException(f"no layered oracle specs found under {oracle_dir}")
+    failures: list[str] = []
+    for path in paths:
+        errors = layered_report_mod.validate_spec(path)
+        for error in errors:
+            failures.append(f"{path}: {error}")
+    if failures:
+        raise click.ClickException(
+            "layered oracle validation failed:\n" + "\n".join(failures)
+        )
+    click.echo(f"validated_layered_oracles={len(paths)}")
+
+
 def _filter_packet_paths_by_slice(
     packet_paths: list[Path],
     *,
