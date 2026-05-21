@@ -93,6 +93,10 @@ class ReceiptGradingRow:
     command_snapshot_head: Optional[str] = None
     command_snapshot_exit_code: Optional[int] = None
     atlas_answer_len: int = 0
+    # Capped head of Atlas's answer text. This is intentionally not the
+    # full answer: it gives synthesis/debug audits enough shape to
+    # inspect what Atlas said without bloating packet artifacts.
+    atlas_answer_excerpt: Optional[str] = None
     atlas_returncode: Optional[int] = None
     atlas_exception: Optional[str] = None
     atlas_stderr_head: Optional[str] = None

@@ -750,6 +750,7 @@ def test_grade_one_preserves_atlas_diagnostics_when_grader_fails(daemon_config):
     assert row.tool == "scan_search"
     assert "grading_error" in row.rationale
     assert row.atlas_answer_len == len("stub atlas response")
+    assert row.atlas_answer_excerpt == "stub atlas response"
     assert row.atlas_returncode == 0
     assert "exception:RuntimeError" in row.warnings
     assert row.source_snapshot_status == "git_source_missing"
@@ -2912,6 +2913,31 @@ def test_serialize_row_includes_pr16_fields():
     assert out["atlas_citation_count"] == 2
     assert out["atlas_reranker_candidates_considered"] == 10
     assert out["atlas_reranker_top_k_count"] == 5
+
+
+def test_serialize_row_includes_capped_atlas_answer_excerpt():
+    from atlas_shadow.ingest_daemon import pr_comment as pr_comment_mod
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    row = pr_comment_mod.ReceiptGradingRow(
+        question_id="q1", question="q1", grade="full_match",
+        confidence=0.9, rationale="r", tool="find_code",
+        atlas_answer_len=2505,
+        atlas_answer_excerpt="answer head",
+    )
+
+    out = gs._serialize_row(row)
+
+    assert out["atlas_answer_len"] == 2505
+    assert out["atlas_answer_excerpt"] == "answer head"
+
+
+def test_answer_excerpt_truncates_long_answers():
+    from atlas_shadow.ingest_daemon import grader_service as gs
+
+    excerpt = gs._answer_excerpt("x" * 2010, limit=2000)
+
+    assert excerpt == ("x" * 2000) + "\n[...truncated...]"
 
 
 def test_serialize_row_includes_pr14_fields():
