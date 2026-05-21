@@ -2,6 +2,55 @@ schema_version: 1
 packet_id: 2026-05-14-atlas-canonical-evidence-v1
 title: 2026 05 14 Atlas Canonical Evidence V1
 migration_status: hand_authored_synthesis
+strict_subcriteria_pilot:
+  status: pilot_v1
+  applied_2026_05_21: true
+  note: >
+    Third packet converted to the strict-subcriteria shape (after PR #38
+    + PR #42). Synthesis criteria decomposed into binary (1pt) named
+    subcriteria, each anchored to one or more supporting qids OR
+    explicitly marked `scoreable: context_only` (no instance of the
+    latter in this pilot — every subcriterion is qid-anchored). Negative
+    bars (F1, F2) rewritten as positive required behaviors with
+    `rewritten_as` audit-trail pointers.
+    READINESS REPAIR: the pre-pilot rubric had `required_point_id` tags
+    only on S1 — every row that referenced a required point referenced
+    S1. S2, S3, S4 had zero supporting rows (readiness 1/4 = 25%, three
+    `no_supporting_rows` warnings). This is repaired by extending
+    existing rows' `required_point_ids` arrays to also reference S2/S3/S4
+    where the row's notes directly describe what the required point
+    asks for — NO new evidence is invented; only existing rows get
+    additional point tags where their existing notes already substantiate
+    the point. Specifically:
+      q1  += S3   (q1 already describes "query-side identifier extraction
+                   today — only structured anchors, no Q-ID / err-msg
+                   sweep" — exactly S3's "limits of query-side identifier
+                   extraction")
+      q5  += S2   (q5 already describes "synthesis prompt path —
+                   core/ai.py:synthesize builds user_content" — exactly
+                   S2's "synthesis prompt construction preserves evidence
+                   sections")
+      q9  += S2   (q9 already describes "synthesis prompt template —
+                   _SYNTH_SYSTEM is a single multi-line constant" —
+                   prompt-template anchor for S2)
+      q14 += S4   (q14 already describes "sweep mechanism — git grep
+                   style not used today; must use DB-backed
+                   artifact_chunks.raw_text scan" — exactly S4's "DB-
+                   backed artifact/chunk reads vs whole-file line
+                   scanning". Note: q14 is `oracle_bucket: command` so
+                   readiness would report `command_only_support` for S4
+                   if q14 were the sole supporter; q20 below provides
+                   verified evidence support so S4 lands as fully
+                   supported.)
+      q20 += S4   (q20 already describes "non-code DB read shape —
+                   artifact_chunks ac JOIN artifacts a... filter via
+                   a.doc_id / a.source_channel" — exactly the DB-read
+                   shape for S4)
+    Parent-criterion fields (`points_possible`, `planner_points`,
+    `atlas_points`) remain populated for backward-compat with
+    `atlas_shadow/ingest_daemon/layered_report.py`; subcriteria are
+    silently ignored by the existing reader.
+
 migration_source:
   run_dir: shadow-runs/baseline-2026-05-20-post28-post473
   packet_json: shadow-runs/baseline-2026-05-20-post28-post473/packets/2026-05-14-atlas-canonical-evidence-v1.json
@@ -25,7 +74,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "query-side identifier extraction today \u2014 only structured anchors, no Q-ID / err-msg\
+    - S3
+    notes: "query-side identifier extraction today — only structured anchors, no Q-ID / err-msg\
       \ sweep"
     planner_failure_type: receipt_hash_mismatch
   - qid: q2
@@ -36,7 +86,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "find_code scope \u2014 symbol-graph + lexical chunks, not whole-file line scan"
+    notes: "find_code scope — symbol-graph + lexical chunks, not whole-file line scan"
     oracle_failure_type: receipt_source_missing
   - qid: q3
     claim_type: doc_structure
@@ -46,7 +96,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "corpus shape \u2014 sweep target artifact types are `code` + `doc` + `proposal` (chunked\
+    notes: "corpus shape — sweep target artifact types are `code` + `doc` + `proposal` (chunked\
       \ text in `artifact_chunks`)"
     oracle_failure_type: receipt_source_missing
   - qid: q4
@@ -57,7 +107,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "v3-a04 retrieval miss confirmed \u2014 BACKLOG:1089 absent from all 3 surfaces"
+    notes: "v3-a04 retrieval miss confirmed — BACKLOG:1089 absent from all 3 surfaces"
     oracle_failure_type: unavailable_source_ref
   - qid: q5
     claim_type: current_behavior
@@ -68,7 +118,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "synthesis prompt path \u2014 `core/ai.py:synthesize` builds `user_content` then sends\
+    - S2
+    notes: "synthesis prompt path — `core/ai.py:synthesize` builds `user_content` then sends\
       \ to Claude"
     planner_failure_type: receipt_hash_mismatch
   - qid: q6
@@ -80,7 +131,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "synthesis envelope shape \u2014 `answer` is free-form prose; cites embedded inline"
+    notes: "synthesis envelope shape — `answer` is free-form prose; cites embedded inline"
     planner_failure_type: receipt_hash_mismatch
   - qid: q7
     claim_type: current_behavior
@@ -90,7 +141,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "verifiable evidence spans \u2014 retrieved chunk + expanded block + sweep hit, three sources"
+    notes: "verifiable evidence spans — retrieved chunk + expanded block + sweep hit, three sources"
     oracle_failure_type: receipt_source_missing
   - qid: q8
     claim_type: doc_structure
@@ -100,7 +151,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "v3-a01 post-packet-4 baseline \u2014 the fabrication signal HAS resolved; 10/12 dock is\
+    notes: "v3-a01 post-packet-4 baseline — the fabrication signal HAS resolved; 10/12 dock is\
       \ now under-enumeration"
     oracle_failure_type: unavailable_source_ref
   - qid: q9
@@ -112,7 +163,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "synthesis prompt template \u2014 `_SYNTH_SYSTEM` is a single multi-line constant; precedence\
+    - S2
+    notes: "synthesis prompt template — `_SYNTH_SYSTEM` is a single multi-line constant; precedence\
       \ rules go here"
     planner_failure_type: receipt_hash_mismatch
   - qid: q10
@@ -123,7 +175,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "v3-b03 framing trace \u2014 atlas frames as \"no real contradiction\" instead of within-spec\
+    notes: "v3-b03 framing trace — atlas frames as \"no real contradiction\" instead of within-spec\
       \ evolution"
     oracle_failure_type: unavailable_source_ref
   - qid: q11
@@ -134,7 +186,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "prompt-template-test pattern \u2014 packet-4 `test_synth_trace.py` is the model"
+    notes: "prompt-template-test pattern — packet-4 `test_synth_trace.py` is the model"
     oracle_failure_type: unavailable_source_ref
   - qid: q12
     claim_type: current_behavior
@@ -145,7 +197,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "rollback knob \u2014 packet-4 `ATLAS_EVIDENCE_EXPANSION=off` checked in `_resolve_scan`"
+    notes: "rollback knob — packet-4 `ATLAS_EVIDENCE_EXPANSION=off` checked in `_resolve_scan`"
     planner_failure_type: current_benchmark_line_drift
   - qid: q13
     claim_type: current_behavior
@@ -156,7 +208,7 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "token-budget \u2014 `ExpansionCaps` dataclass body shows `total_expanded_chars: int =\
+    notes: "token-budget — `ExpansionCaps` dataclass body shows `total_expanded_chars: int =\
       \ 120_000` (default value)"
     planner_failure_type: current_benchmark_line_drift
   - qid: q14
@@ -168,7 +220,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "sweep mechanism \u2014 `git grep` style not used today; must use DB-backed `artifact_chunks.raw_text`\
+    - S4
+    notes: "sweep mechanism — `git grep` style not used today; must use DB-backed `artifact_chunks.raw_text`\
       \ scan"
   - qid: q15
     claim_type: current_behavior
@@ -178,7 +231,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "scan_synth pass-through pattern \u2014 additive kw-only args mirror packet-4 `expanded_context`"
+    notes: "scan_synth pass-through pattern — additive kw-only args mirror packet-4 `expanded_context`"
     oracle_failure_type: receipt_source_missing
   - qid: q16
     claim_type: current_behavior
@@ -188,7 +241,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "anchors already parsed by `_resolve_scan` \u2014 sweep extractor reuses, doesn't duplicate"
+    notes: "anchors already parsed by `_resolve_scan` — sweep extractor reuses, doesn't duplicate"
     oracle_failure_type: receipt_source_missing
   - qid: q17
     claim_type: current_behavior
@@ -198,7 +251,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "v3 ingest provenance \u2014 `aa41e37` is the corpus sha for the post-packet-4 run"
+    notes: "v3 ingest provenance — `aa41e37` is the corpus sha for the post-packet-4 run"
     oracle_failure_type: unavailable_source_ref
   - qid: q18
     claim_type: current_behavior
@@ -208,7 +261,7 @@ evidence_oracle:
     planner_evidence_status: not_scored
     synthesis_role: context_only
     required_point_ids: []
-    notes: "tests harness \u2014 `tests/test_scan_synth.py` is the integration site for verifier +\
+    notes: "tests harness — `tests/test_scan_synth.py` is the integration site for verifier +\
       \ scaffold tests"
     oracle_failure_type: unavailable_source_ref
   - qid: q19
@@ -220,7 +273,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "separator pattern in `user_content` \u2014 sweep + scaffold sections compose without new\
+    - S2
+    notes: "separator pattern in `user_content` — sweep + scaffold sections compose without new\
       \ prompt re-shape"
     planner_failure_type: receipt_hash_mismatch
   - qid: q20
@@ -232,7 +286,8 @@ evidence_oracle:
     synthesis_role: required_point
     required_point_ids:
     - S1
-    notes: "non-code DB read shape \u2014 `artifact_chunks ac JOIN artifacts a ON a.artifact_id =\
+    - S4
+    notes: "non-code DB read shape — `artifact_chunks ac JOIN artifacts a ON a.artifact_id =\
       \ ac.artifact_id`, filter via `a.doc_id` / `a.source_channel`"
     planner_failure_type: current_benchmark_line_drift
 synthesis_oracle:
@@ -253,8 +308,17 @@ synthesis_oracle:
   forbidden_claims:
   - id: F1
     text: Do not claim unresolved/context-only rows are verified Atlas evidence.
+    rewritten_as:
+      positive_subcriterion_id: caveats.unresolved_rows_marked_context
+      note: Inverted into "answer must label the unresolved/context-only rows AS unresolved/context-only,"
+        scoreable against q2/q3/q4 (representative unresolved-context rows).
   - id: F2
     text: Do not claim the system can prove canonical evidence by final answer prose alone.
+    rewritten_as:
+      positive_subcriterion_id: synthesis_path.separator_pattern
+      note: Inverted into "answer must identify the prompt structural pattern (separator sections in
+        user_content) that preserves multi-source provenance through synthesis," scoreable against
+        q19. The bar requires citing the structural machinery, not just the final prose.
   uncertainty_notes:
   - id: U1
     text: Several historical receipts are unresolved and should lower confidence, not Atlas correctness.
@@ -267,6 +331,18 @@ synthesis_oracle:
     planner_points: 1
     atlas_points: 1
     notes: Both should frame canonical evidence as provenance-preserving substrate.
+    subcriteria:
+    - id: conclusion.provenance_preserving_substrate
+      text: >
+        Answer must conclude that canonical evidence is a provenance-
+        preserving substrate (retrieved chunks + expanded blocks + sweep
+        hits + DB-backed artifact reads), NOT treating the final synthesis
+        answer prose as the only artifact.
+      points: 1
+      supporting_qids: [q5, q9, q14, q19, q20]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
   - id: evidence_surfaces
     label: Evidence surfaces named
     points_possible: 4
@@ -274,19 +350,138 @@ synthesis_oracle:
     atlas_points: 3
     planner_miss_class: current_benchmark_line_drift
     atlas_miss_class: evidence_missing
-    notes: Must cover retrieved chunks, expanded blocks, sweep hits, and DB-backed artifact reads.
+    notes: >
+      Decomposed from monolithic 4pt criterion into 4 binary subcriteria,
+      one per surface. The planner-2-of-4 / atlas-3-of-4 split follows the
+      original author's miss-class (planner failed on
+      `current_benchmark_line_drift` = expansion-specific surfaces; atlas
+      missed the newest surface, sweep_hits). Should be re-validated
+      against a real synthesis answer.
+    subcriteria:
+    - id: evidence_surfaces.retrieved_chunks
+      text: >
+        Answer must name retrieved chunks (output of `find_code` / scan
+        retrieval) as the first canonical evidence surface.
+      points: 1
+      supporting_qids: [q5, q6]
+      required_point_id: S1
+      planner_status: covered
+      atlas_status: covered
+    - id: evidence_surfaces.expanded_blocks
+      text: >
+        Answer must name expanded blocks (packet-4 evidence-expansion
+        mechanism with `ExpansionCaps` + `ATLAS_EVIDENCE_EXPANSION` knob)
+        as the second canonical evidence surface — distinct from raw
+        retrieved chunks.
+      points: 1
+      supporting_qids: [q12, q13]
+      required_point_id: S1
+      planner_status: missed
+      planner_miss_class: current_benchmark_line_drift
+      atlas_status: covered
+    - id: evidence_surfaces.sweep_hits
+      text: >
+        Answer must name sweep hits (the broader corpus-wide DB-backed
+        scan complementing retrieval) as the third canonical evidence
+        surface — distinct from the retrieval surfaces above.
+      points: 1
+      supporting_qids: [q14]
+      required_point_id: S1
+      planner_status: missed
+      planner_miss_class: current_benchmark_line_drift
+      atlas_status: missed
+      atlas_miss_class: evidence_missing
+    - id: evidence_surfaces.db_backed_artifact_reads
+      text: >
+        Answer must name DB-backed artifact/chunk reads (the
+        `artifact_chunks ac JOIN artifacts a` shape with
+        `a.doc_id` / `a.source_channel` filters) as the storage substrate
+        that all the above surfaces share — distinct from whole-file
+        line scans or git-grep style.
+      points: 1
+      supporting_qids: [q20]
+      required_point_id: S4
+      planner_status: covered
+      atlas_status: covered
   - id: synthesis_path
     label: Synthesis path preserved
     points_possible: 2
     planner_points: 1
     atlas_points: 2
     planner_miss_class: evidence_present_answer_missed
-    notes: Prompt construction and separator sections are the load-bearing synthesis points.
+    notes: >
+      Decomposed from monolithic 2pt criterion into 2 binary subcriteria:
+      prompt construction (the load-bearing seam) and separator pattern
+      (the structural mechanism that preserves provenance). Original
+      planner 1/2 preserved on the prompt_construction sub (covered);
+      separator_pattern missed (per the author's
+      `evidence_present_answer_missed` note + the F2 rewrite path that
+      makes this bar explicit).
+    subcriteria:
+    - id: synthesis_path.prompt_construction
+      text: >
+        Answer must name `core/ai.py:synthesize` (or equivalent prompt-
+        construction seam) as the load-bearing synthesis step that
+        builds `user_content` from evidence sections — i.e., identify
+        WHERE evidence-to-prompt translation lives.
+      points: 1
+      supporting_qids: [q5, q9]
+      required_point_id: S2
+      planner_status: covered
+      atlas_status: covered
+    - id: synthesis_path.separator_pattern
+      text: >
+        Answer must identify the separator pattern in `user_content`
+        (multiple evidence sections compose without new prompt re-shape)
+        as the structural mechanism that preserves multi-source
+        provenance through synthesis. Positive rewrite of F2 ("don't
+        claim canonical evidence is proven by final answer prose alone")
+        — the bar is naming the structural machinery, not just the prose.
+      points: 1
+      supporting_qids: [q19]
+      required_point_id: S2
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: covered
   - id: caveats
-    label: Drift and unresolved caveats
+    label: Drift and unresolved caveats (positive rewrite)
     points_possible: 2
     planner_points: 1
     atlas_points: 1
     planner_miss_class: evidence_present_answer_missed
     atlas_miss_class: evidence_present_answer_missed
-    notes: Both answers must avoid over-claiming unresolved historical rows.
+    notes: >
+      REWRITTEN. Original criterion: "Both answers must avoid over-
+      claiming unresolved historical rows" — negative bar. Reframed
+      into two positive named behaviors: (a) label unresolved/context-
+      only rows as such (replaces F1), and (b) separate planner's
+      line-drift evidence failures from real retrieval failures
+      (positive form of U2). Both actors covered (a) but missed (b)
+      per the original miss-class — line-drift-vs-retrieval-failure
+      distinction is subtler and easier to elide.
+    subcriteria:
+    - id: caveats.unresolved_rows_marked_context
+      text: >
+        Answer must label the packet's unresolved/context-only rows
+        (e.g., q2, q3, q4, q7, q8, q10) as context-only assumptions,
+        NOT as verified Atlas retrieval evidence. Positive rewrite of
+        F1.
+      points: 1
+      supporting_qids: [q2, q3, q4, q7]
+      required_point_id: S3
+      planner_status: covered
+      atlas_status: covered
+    - id: caveats.line_drift_separated_from_retrieval_failure
+      text: >
+        Answer must distinguish planner-side `current_benchmark_line_drift`
+        / `receipt_hash_mismatch` evidence failures (the receipt's
+        commit anchor drifted from the run-commit, NOT Atlas missing
+        the content) from real retrieval failures. Positive rewrite of
+        U2.
+      points: 1
+      supporting_qids: [q12, q13, q20]
+      required_point_id: S3
+      planner_status: missed
+      planner_miss_class: evidence_present_answer_missed
+      atlas_status: missed
+      atlas_miss_class: evidence_present_answer_missed
