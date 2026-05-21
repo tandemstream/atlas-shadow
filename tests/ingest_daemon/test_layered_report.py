@@ -125,6 +125,9 @@ def test_layered_report_builds_layered_scores(tmp_path):
     assert report.atlas_synthesis_points == 1.5
     assert report.synthesis_points_possible == 3
     assert report.synthesis_score_source == "authored_static"
+    assert report.synthesis_supported_required_points == 0
+    assert report.synthesis_required_points_total == 1
+    assert report.synthesis_readiness_pct == 0.0
     assert report.failure_counts["planner_evidence"]["stale_or_false_claim"] == 1
     assert report.failure_counts["oracle"]["unresolved_source_ref"] == 1
     assert report.failure_counts["synthesis"]["planner:evidence_present_answer_missed"] == 1
@@ -176,6 +179,11 @@ def test_layered_report_writes_markdown_and_json(tmp_path):
     assert payload["oracle"]["verified"] == 2
     assert payload["planner_synthesis"]["pct"] == 66.7
     assert payload["synthesis_score_source"] == "authored_static"
+    assert payload["synthesis_readiness"] == {
+        "supported_required_points": 0,
+        "required_points": 1,
+        "pct": 0.0,
+    }
 
 
 def test_shadow_layered_report_cli(tmp_path):
@@ -240,6 +248,8 @@ def test_write_run_summary_renders_aggregate_and_packets(tmp_path):
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["totals"]["packets"] == 1
     assert payload["totals"]["planner_evidence_pct"] == 50.0
+    assert payload["totals"]["synthesis_readiness_pct"] == 0.0
+    assert payload["packets"][0]["synthesis_readiness"]["required_points"] == 1
 
 
 def test_write_synthesis_audit_requires_classified_misses(tmp_path):
@@ -328,7 +338,59 @@ synthesis_oracle:
     ]
     rendered = lr.render_markdown(report)
     assert "Synthesis Support Warnings" in rendered
+    assert "Synthesis Readiness" in rendered
     assert "depends_on_unresolved_evidence" in rendered
+    assert report.synthesis_supported_required_points == 0
+    assert report.synthesis_required_points_total == 2
+
+
+def test_layered_report_counts_supported_required_points(tmp_path):
+    packet = _packet_json(
+        tmp_path,
+        [
+            {
+                "question_id": "q1",
+                "grade": "full_match",
+                "score_status": "counted",
+                "lane": "explicit_source_fast_path",
+            },
+        ],
+    )
+    spec = tmp_path / "oracle.yaml"
+    spec.write_text(
+        """
+schema_version: 1
+packet_id: packet-x
+title: Packet X
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1]
+synthesis_oracle:
+  ideal_conclusion: Do the thing.
+  required_points:
+    - id: S1
+      text: Point backed by verified evidence.
+    - id: S2
+      text: Point with no supporting rows.
+  forbidden_claims: []
+  uncertainty_notes: []
+  criteria: []
+""",
+        encoding="utf-8",
+    )
+
+    report = lr.build_report(spec_path=spec, packet_json_path=packet)
+
+    assert report.synthesis_supported_required_points == 1
+    assert report.synthesis_required_points_total == 2
+    assert report.synthesis_readiness_pct == 50.0
 
 
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
