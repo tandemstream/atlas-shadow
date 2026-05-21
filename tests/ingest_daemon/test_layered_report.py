@@ -265,6 +265,68 @@ def test_write_synthesis_audit_requires_classified_misses(tmp_path):
     assert payload["class_counts"]["grader_too_harsh"] == 1
 
 
+def test_layered_report_warns_when_required_point_has_no_verified_evidence(tmp_path):
+    packet = _packet_json(
+        tmp_path,
+        [
+            {
+                "question_id": "q1",
+                "grade": "full_match",
+                "score_status": "counted",
+                "lane": "explicit_source_fast_path",
+            },
+        ],
+    )
+    spec = tmp_path / "oracle.yaml"
+    spec.write_text(
+        """
+schema_version: 1
+packet_id: packet-x
+title: Packet X
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: unresolved
+      oracle_failure_type: legacy_receipt_defect
+      planner_evidence_status: fail
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1]
+synthesis_oracle:
+  ideal_conclusion: Do the thing.
+  required_points:
+    - id: S1
+      text: Point backed only by unresolved evidence.
+    - id: S2
+      text: Point with no supporting rows.
+  forbidden_claims: []
+  uncertainty_notes: []
+  criteria: []
+""",
+        encoding="utf-8",
+    )
+
+    report = lr.build_report(spec_path=spec, packet_json_path=packet)
+
+    assert report.synthesis_warnings == [
+        {
+            "required_point_id": "S1",
+            "warning": "depends_on_unresolved_evidence",
+            "qids": ["q1"],
+        },
+        {
+            "required_point_id": "S2",
+            "warning": "no_supporting_rows",
+            "qids": [],
+        },
+    ]
+    rendered = lr.render_markdown(report)
+    assert "Synthesis Support Warnings" in rendered
+    assert "depends_on_unresolved_evidence" in rendered
+
+
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
     run_dir = tmp_path / "run"
     packet_dir = run_dir / "packets"
