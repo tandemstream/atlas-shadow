@@ -513,6 +513,49 @@ synthesis_oracle:
     assert any("points_possible 2 != subcriteria sum 1" in e for e in errors)
 
 
+def test_validate_spec_can_require_required_point_support_tags(tmp_path):
+    spec = tmp_path / "oracle.yaml"
+    spec.write_text(
+        """
+schema_version: 1
+packet_id: packet-x
+title: Packet X
+evidence_oracle:
+  rows:
+    - qid: q1
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      required_point_ids: []
+synthesis_oracle:
+  required_points:
+    - id: S1
+      text: Point
+  criteria:
+    - id: required_points
+      label: Required points
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      subcriteria:
+        - id: required_points.first
+          text: First point.
+          points: 1
+          supporting_qids: [q1]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+""",
+        encoding="utf-8",
+    )
+
+    assert lr.validate_spec(spec) == []
+    errors = lr.validate_spec(spec, require_required_point_support=True)
+
+    assert any("no supporting_qids list required_point_id S1" in e for e in errors)
+    assert any("required_points.S1: no evidence_oracle row" in e for e in errors)
+
+
 def test_shadow_validate_layered_oracles_cli(tmp_path):
     oracle_dir = tmp_path / "oracles"
     oracle_dir.mkdir()
@@ -532,6 +575,49 @@ def test_shadow_validate_layered_oracles_cli(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "validated_layered_oracles=1" in result.output
+
+
+def test_shadow_validate_layered_oracles_cli_can_require_support_tags(tmp_path):
+    oracle_dir = tmp_path / "oracles"
+    oracle_dir.mkdir()
+    spec = _spec_yaml(tmp_path).read_text(encoding="utf-8").replace(
+        "required_points:\n    - id: S1\n      text: Required point",
+        "required_points:\n    - id: S1\n      text: Required point",
+    ).replace(
+        "criteria:\n    - id: conclusion",
+        """criteria:
+    - id: strict
+      label: Strict
+      points_possible: 1
+      planner_points: 1
+      atlas_points: 1
+      subcriteria:
+        - id: strict.first
+          text: First point.
+          points: 1
+          supporting_qids: [q1]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+    - id: conclusion""",
+    )
+    (oracle_dir / "packet-x-layered-oracle.yaml").write_text(
+        spec,
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "shadow-validate-layered-oracles",
+            "--oracle-dir",
+            str(oracle_dir),
+            "--require-required-point-support",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "no supporting_qids list required_point_id S1" in result.output
 
 
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
@@ -639,3 +725,80 @@ slices:
     assert (run_dir / "_layered-only-x" / "packet-x").exists()
     assert not (run_dir / "_layered-only-x" / "packet-y").exists()
     assert "layered_packets=1 packet_slice=only-x" in result.output
+
+
+def test_shadow_gold_slice_scoreboard_cli(tmp_path):
+    run_dir = tmp_path / "run"
+    packet_dir = run_dir / "packets"
+    packet_dir.mkdir(parents=True)
+    for slug in ("packet-x", "packet-y"):
+        (packet_dir / f"{slug}.json").write_text(
+            _packet_json(
+                tmp_path,
+                [
+                    {
+                        "question_id": "q1",
+                        "grade": "full_match",
+                        "score_status": "counted",
+                        "lane": "explicit_source_fast_path",
+                    },
+                ],
+            ).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    oracle_dir = tmp_path / "oracles"
+    oracle_dir.mkdir()
+    for slug in ("packet-x", "packet-y"):
+        text = _spec_yaml(tmp_path).read_text(encoding="utf-8").replace(
+            "packet_id: packet-x",
+            f"packet_id: {slug}",
+        )
+        (oracle_dir / f"{slug}-layered-oracle.yaml").write_text(
+            text,
+            encoding="utf-8",
+        )
+    slice_config = tmp_path / "slices.yaml"
+    slice_config.write_text(
+        """
+schema_version: 1
+slices:
+  both:
+    description: Both packets.
+    packets:
+      - packet-x
+      - packet-y
+  one-missing:
+    description: Missing packet is surfaced, not hidden.
+    packets:
+      - packet-missing
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "shadow-gold-slice-scoreboard",
+            "--run-dir",
+            str(run_dir),
+            "--oracle-dir",
+            str(oracle_dir),
+            "--slice-config",
+            str(slice_config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "gold_slices=2" in result.output
+    md = (run_dir / "_gold_slices" / "gold-slice-scoreboard.md").read_text(
+        encoding="utf-8"
+    )
+    payload = json.loads(
+        (run_dir / "_gold_slices" / "gold-slice-scoreboard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "`both`" in md
+    assert "2/2" in md
+    assert payload["slices"][0]["slice"] == "both"
+    assert payload["slices"][1]["missing_packets"] == ["packet-missing"]

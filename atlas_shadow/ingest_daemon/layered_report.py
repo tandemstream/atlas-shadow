@@ -220,7 +220,11 @@ def load_spec(path: Path) -> LayeredSpec:
     )
 
 
-def validate_spec(path: Path) -> list[str]:
+def validate_spec(
+    path: Path,
+    *,
+    require_required_point_support: bool = False,
+) -> list[str]:
     """Return strict-subcriteria validation errors for one oracle spec.
 
     Legacy criteria without ``subcriteria`` remain valid; this validator
@@ -234,6 +238,14 @@ def validate_spec(path: Path) -> list[str]:
     evidence_rows = raw.get("evidence_oracle", {}).get("rows", []) or []
     qids = {
         str(row.get("qid"))
+        for row in evidence_rows
+        if isinstance(row, dict) and row.get("qid") is not None
+    }
+    required_point_ids_by_qid = {
+        str(row.get("qid")): {
+            str(value)
+            for value in (row.get("required_point_ids") or [])
+        }
         for row in evidence_rows
         if isinstance(row, dict) and row.get("qid") is not None
     }
@@ -262,9 +274,24 @@ def validate_spec(path: Path) -> list[str]:
                 subcriteria=subcriteria,
                 qids=qids,
                 required_ids=required_ids,
+                required_point_ids_by_qid=required_point_ids_by_qid,
+                require_required_point_support=require_required_point_support,
                 subcriterion_ids=subcriterion_ids,
             )
         )
+
+    if require_required_point_support and any(
+        isinstance(criterion, dict) and (criterion.get("subcriteria") or [])
+        for criterion in criteria
+    ):
+        referenced_required_ids = set().union(
+            *required_point_ids_by_qid.values()
+        ) if required_point_ids_by_qid else set()
+        for required_id in sorted(required_ids - referenced_required_ids):
+            errors.append(
+                f"required_points.{required_id}: no evidence_oracle row "
+                "lists this id in required_point_ids"
+            )
 
     for forbidden in synth.get("forbidden_claims") or []:
         if not isinstance(forbidden, dict):
@@ -288,6 +315,8 @@ def _validate_subcriteria(
     subcriteria: list[Any],
     qids: set[str],
     required_ids: set[str],
+    required_point_ids_by_qid: dict[str, set[str]],
+    require_required_point_support: bool,
     subcriterion_ids: set[str],
 ) -> list[str]:
     errors: list[str] = []
@@ -345,10 +374,32 @@ def _validate_subcriteria(
                 f"{criterion_id}.{sub_id}: unknown required_point_id "
                 f"{required_point_id}"
             )
+        supporting_qids = [
+            str(qid)
+            for qid in (item.get("supporting_qids") or [])
+        ]
+        tagged_supporting_qids = [
+            qid
+            for qid in supporting_qids
+            if required_point_id is not None
+            and str(required_point_id) in required_point_ids_by_qid.get(qid, set())
+        ]
         if item.get("scoreable") != "context_only":
             for qid in item.get("supporting_qids") or []:
-                if str(qid) not in qids:
+                qid_text = str(qid)
+                if qid_text not in qids:
                     errors.append(f"{criterion_id}.{sub_id}: unknown qid {qid}")
+            if (
+                require_required_point_support
+                and required_point_id is not None
+                and supporting_qids
+                and not tagged_supporting_qids
+            ):
+                errors.append(
+                    f"{criterion_id}.{sub_id}: no supporting_qids list "
+                    f"required_point_id {required_point_id} in "
+                    "evidence_oracle.rows[].required_point_ids"
+                )
 
     expected_total = float(criterion.get("points_possible") or 0)
     expected_planner = float(criterion.get("planner_points") or 0)
@@ -624,6 +675,139 @@ def write_synthesis_audit(
     )
     md_path.write_text(render_synthesis_audit_markdown(payload), encoding="utf-8")
     return md_path, json_path
+
+
+def build_gold_slice_scoreboard(
+    *,
+    run_dir: Path,
+    oracle_dir: Path,
+    slice_config: Path,
+) -> dict[str, Any]:
+    """Build a compact scorecard for every named packet slice.
+
+    Unlike ``shadow-layered-batch --packet-slice``, this does not write
+    per-packet reports. It is a fast operator view over the gold-set slices:
+    what is in the slice, how much of it scored, and which headline layered
+    metrics moved.
+    """
+    packet_dir = run_dir / "packets"
+    packet_paths = {path.stem: path for path in sorted(packet_dir.glob("*.json"))}
+    raw = yaml.safe_load(slice_config.read_text(encoding="utf-8")) or {}
+    slices = raw.get("slices") if isinstance(raw, dict) else None
+    if not isinstance(slices, dict):
+        raise ValueError(f"slice config has no 'slices' mapping: {slice_config}")
+
+    slice_rows: list[dict[str, Any]] = []
+    for slice_name, slice_def in sorted(slices.items()):
+        if not isinstance(slice_def, dict):
+            continue
+        packet_names = [str(name) for name in (slice_def.get("packets") or [])]
+        reports: list[LayeredReport] = []
+        missing_packets: list[str] = []
+        missing_specs: list[str] = []
+        for packet_name in packet_names:
+            packet_path = packet_paths.get(packet_name)
+            if packet_path is None:
+                missing_packets.append(packet_name)
+                continue
+            spec_path = oracle_dir / f"{packet_name}-layered-oracle.yaml"
+            if not spec_path.exists():
+                missing_specs.append(str(spec_path))
+                continue
+            reports.append(build_report(spec_path=spec_path, packet_json_path=packet_path))
+
+        summary = run_summary_json(reports) if reports else {
+            "totals": _empty_run_totals(),
+            "packets": [],
+        }
+        slice_rows.append(
+            {
+                "slice": str(slice_name),
+                "description": str(slice_def.get("description") or ""),
+                "configured_packets": packet_names,
+                "scored_packets": [report.packet_id for report in reports],
+                "missing_packets": missing_packets,
+                "missing_specs": missing_specs,
+                "totals": summary["totals"],
+                "packets": summary["packets"],
+            }
+        )
+    return {
+        "run_dir": str(run_dir),
+        "oracle_dir": str(oracle_dir),
+        "slice_config": str(slice_config),
+        "slices": slice_rows,
+    }
+
+
+def write_gold_slice_scoreboard(
+    payload: dict[str, Any],
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    md_path = output_dir / "gold-slice-scoreboard.md"
+    json_path = output_dir / "gold-slice-scoreboard.json"
+    json_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(render_gold_slice_scoreboard_markdown(payload), encoding="utf-8")
+    return md_path, json_path
+
+
+def render_gold_slice_scoreboard_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Gold Slice Scoreboard",
+        "",
+        f"- **Run:** `{payload.get('run_dir')}`",
+        f"- **Oracle dir:** `{payload.get('oracle_dir')}`",
+        f"- **Slice config:** `{payload.get('slice_config')}`",
+        "",
+        "| Slice | Packets | Oracle Coverage | Planner Evidence | Atlas Evidence | Planner Synthesis | Atlas Synthesis | Readiness | Missing |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in payload.get("slices") or []:
+        totals = row.get("totals") or {}
+        missing_count = len(row.get("missing_packets") or []) + len(row.get("missing_specs") or [])
+        lines.append(
+            f"| `{row.get('slice')}` | "
+            f"{len(row.get('scored_packets') or [])}/{len(row.get('configured_packets') or [])} | "
+            f"{totals.get('oracle_verified', 0)} evidence + "
+            f"{totals.get('context_verified', 0)} context + "
+            f"{totals.get('command_verified', 0)} command + "
+            f"{totals.get('oracle_unresolved', 0)} unresolved | "
+            f"{_ratio(totals.get('planner_evidence_pass', 0), totals.get('planner_evidence_total', 0))} | "
+            f"{_ratio(totals.get('atlas_evidence_pass', 0), totals.get('atlas_evidence_total', 0))} | "
+            f"{_points(totals.get('planner_synthesis_points', 0), totals.get('synthesis_points_possible', 0))} | "
+            f"{_points(totals.get('atlas_synthesis_points', 0), totals.get('synthesis_points_possible', 0))} | "
+            f"{_ratio(totals.get('synthesis_supported_required_points', 0), totals.get('synthesis_required_points_total', 0))} | "
+            f"{missing_count} |"
+        )
+
+    lines.extend(["", "## Slice Detail", ""])
+    for row in payload.get("slices") or []:
+        lines.extend(
+            [
+                f"### `{row.get('slice')}`",
+                "",
+                row.get("description") or "No description.",
+                "",
+                f"- **Configured packets:** {len(row.get('configured_packets') or [])}",
+                f"- **Scored packets:** {len(row.get('scored_packets') or [])}",
+            ]
+        )
+        if row.get("missing_packets"):
+            lines.append(
+                "- **Missing packets:** "
+                + ", ".join(f"`{name}`" for name in row["missing_packets"])
+            )
+        if row.get("missing_specs"):
+            lines.append(
+                "- **Missing specs:** "
+                + ", ".join(f"`{Path(name).name}`" for name in row["missing_specs"])
+            )
+        lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
@@ -927,6 +1111,32 @@ def run_summary_json(reports: list[LayeredReport]) -> dict[str, Any]:
             }
             for r in sorted(reports, key=lambda item: item.packet_id)
         ],
+    }
+
+
+def _empty_run_totals() -> dict[str, Any]:
+    return {
+        "packets": 0,
+        "oracle_verified": 0,
+        "context_verified": 0,
+        "command_verified": 0,
+        "oracle_unresolved": 0,
+        "planner_evidence_pass": 0,
+        "planner_evidence_total": 0,
+        "planner_evidence_pct": None,
+        "atlas_evidence_pass": 0,
+        "atlas_evidence_total": 0,
+        "atlas_evidence_pct": None,
+        "planner_synthesis_points": 0,
+        "atlas_synthesis_points": 0,
+        "synthesis_points_possible": 0,
+        "planner_synthesis_pct": None,
+        "atlas_synthesis_pct": None,
+        "synthesis_score_sources": {},
+        "synthesis_support_warning_count": 0,
+        "synthesis_supported_required_points": 0,
+        "synthesis_required_points_total": 0,
+        "synthesis_readiness_pct": None,
     }
 
 

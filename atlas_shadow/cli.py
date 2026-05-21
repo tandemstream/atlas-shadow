@@ -539,14 +539,28 @@ def shadow_layered_batch(
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Directory containing <packet>-layered-oracle.yaml specs.",
 )
-def shadow_validate_layered_oracles(oracle_dir: Path) -> None:
+@click.option(
+    "--require-required-point-support",
+    is_flag=True,
+    help=(
+        "Fail strict-subcriteria specs when required points are not "
+        "backed by evidence_oracle.rows[].required_point_ids."
+    ),
+)
+def shadow_validate_layered_oracles(
+    oracle_dir: Path,
+    require_required_point_support: bool,
+) -> None:
     """Validate strict-subcriteria layered oracle specs."""
     paths = sorted(oracle_dir.glob("*-layered-oracle.yaml"))
     if not paths:
         raise click.ClickException(f"no layered oracle specs found under {oracle_dir}")
     failures: list[str] = []
     for path in paths:
-        errors = layered_report_mod.validate_spec(path)
+        errors = layered_report_mod.validate_spec(
+            path,
+            require_required_point_support=require_required_point_support,
+        )
         for error in errors:
             failures.append(f"{path}: {error}")
     if failures:
@@ -554,6 +568,57 @@ def shadow_validate_layered_oracles(oracle_dir: Path) -> None:
             "layered oracle validation failed:\n" + "\n".join(failures)
         )
     click.echo(f"validated_layered_oracles={len(paths)}")
+
+
+@main.command("shadow-gold-slice-scoreboard")
+@click.option(
+    "--run-dir",
+    "run_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Run directory containing packets/*.json.",
+)
+@click.option(
+    "--oracle-dir",
+    "oracle_dir",
+    default=Path("docs/pilots"),
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Directory containing <packet>-layered-oracle.yaml specs.",
+)
+@click.option(
+    "--slice-config",
+    "slice_config",
+    default=Path("docs/pilots/gold-slices-v0.yaml"),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="YAML file defining named packet slices.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Directory to write gold-slice-scoreboard.{md,json}. Defaults to <run-dir>/_gold_slices/.",
+)
+def shadow_gold_slice_scoreboard(
+    run_dir: Path,
+    oracle_dir: Path,
+    slice_config: Path,
+    output_dir: Optional[Path],
+) -> None:
+    """Write a compact scoreboard for every named gold packet slice."""
+    if output_dir is None:
+        output_dir = run_dir / "_gold_slices"
+    payload = layered_report_mod.build_gold_slice_scoreboard(
+        run_dir=run_dir,
+        oracle_dir=oracle_dir,
+        slice_config=slice_config,
+    )
+    md_path, json_path = layered_report_mod.write_gold_slice_scoreboard(
+        payload,
+        output_dir,
+    )
+    click.echo(f"[atlas-shadow] wrote {md_path} and {json_path}", err=True)
+    click.echo(f"gold_slices={len(payload.get('slices') or [])}")
 
 
 def _filter_packet_paths_by_slice(
