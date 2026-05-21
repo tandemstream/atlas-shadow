@@ -51,6 +51,20 @@ class OracleRow:
 
 
 @dataclass(frozen=True)
+class SynthesisSubcriterion:
+    id: str
+    text: str
+    points: float
+    supporting_qids: tuple[str, ...]
+    required_point_id: Optional[str]
+    planner_status: str
+    atlas_status: str
+    scoreable: Optional[str] = None
+    planner_miss_class: Optional[str] = None
+    atlas_miss_class: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class SynthesisCriterion:
     id: str
     label: str
@@ -60,6 +74,7 @@ class SynthesisCriterion:
     notes: str = ""
     planner_miss_class: Optional[str] = None
     atlas_miss_class: Optional[str] = None
+    subcriteria: tuple[SynthesisSubcriterion, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -156,6 +171,24 @@ def load_spec(path: Path) -> LayeredSpec:
     synth = raw.get("synthesis_oracle") or {}
     criteria = []
     for item in synth.get("criteria", []):
+        subcriteria = []
+        for sub in item.get("subcriteria", []) or []:
+            subcriteria.append(
+                SynthesisSubcriterion(
+                    id=str(sub["id"]),
+                    text=str(sub.get("text", "")),
+                    points=float(sub.get("points", 0)),
+                    supporting_qids=tuple(
+                        str(v) for v in sub.get("supporting_qids", []) or []
+                    ),
+                    required_point_id=_optional_str(sub.get("required_point_id")),
+                    planner_status=str(sub.get("planner_status", "not_scored")),
+                    atlas_status=str(sub.get("atlas_status", "not_scored")),
+                    scoreable=_optional_str(sub.get("scoreable")),
+                    planner_miss_class=_optional_str(sub.get("planner_miss_class")),
+                    atlas_miss_class=_optional_str(sub.get("atlas_miss_class")),
+                )
+            )
         criteria.append(
             SynthesisCriterion(
                 id=str(item["id"]),
@@ -166,6 +199,7 @@ def load_spec(path: Path) -> LayeredSpec:
                 notes=str(item.get("notes", "")),
                 planner_miss_class=_optional_str(item.get("planner_miss_class")),
                 atlas_miss_class=_optional_str(item.get("atlas_miss_class")),
+                subcriteria=tuple(subcriteria),
             )
         )
 
@@ -333,6 +367,21 @@ def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
                     "notes": c.notes,
                     "planner_miss_class": c.planner_miss_class,
                     "atlas_miss_class": c.atlas_miss_class,
+                    "subcriteria": [
+                        {
+                            "id": s.id,
+                            "text": s.text,
+                            "points": s.points,
+                            "supporting_qids": list(s.supporting_qids),
+                            "required_point_id": s.required_point_id,
+                            "planner_status": s.planner_status,
+                            "atlas_status": s.atlas_status,
+                            "scoreable": s.scoreable,
+                            "planner_miss_class": s.planner_miss_class,
+                            "atlas_miss_class": s.atlas_miss_class,
+                        }
+                        for s in c.subcriteria
+                    ],
                 }
                 for c in spec.synthesis_criteria
             ],
@@ -393,30 +442,12 @@ def write_synthesis_audit(
                 **warning,
             })
         for criterion in report.synthesis_oracle.get("criteria", []):
-            possible = float(criterion.get("points_possible") or 0)
-            if possible <= 0:
-                continue
-            for actor in ("planner", "atlas"):
-                points = float(criterion.get(f"{actor}_points") or 0)
-                if points >= possible:
-                    continue
-                miss_class = str(
-                    criterion.get(f"{actor}_miss_class")
-                    or "unclassified"
-                )
-                row = {
-                    "packet_id": report.packet_id,
-                    "actor": actor,
-                    "criterion_id": criterion.get("id"),
-                    "criterion_label": criterion.get("label"),
-                    "points": points,
-                    "points_possible": possible,
-                    "miss_class": miss_class,
-                    "notes": criterion.get("notes") or "",
-                    "manual_review": miss_class == "answer_shape_without_evidence",
-                }
+            for row in _synthesis_miss_rows_for_criterion(
+                packet_id=report.packet_id,
+                criterion=criterion,
+            ):
                 rows.append(row)
-                class_counts[miss_class] += 1
+                class_counts[str(row.get("miss_class") or "unclassified")] += 1
 
     miss_rows = [row for row in rows if row.get("actor")]
     payload = {
@@ -478,7 +509,7 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
             lines.append(
                 f"| `{row.get('packet_id')}` | {row.get('actor')} | "
                 f"{row.get('criterion_id')} | `{row.get('miss_class')}` | "
-                f"{row.get('notes') or ''} |"
+                f"{_md_cell(row.get('notes') or '')} |"
             )
     else:
         lines.append("| - | - | - | - | None |")
@@ -498,7 +529,7 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
             qids = ", ".join(row.get("qids") or []) or "-"
             lines.append(
                 f"| `{row.get('packet_id')}` | {row.get('required_point_id')} | "
-                f"`{row.get('warning')}` | {qids} |"
+                f"`{row.get('warning')}` | {_md_cell(qids)} |"
             )
     else:
         lines.append("| - | - | - | None |")
@@ -517,7 +548,7 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
         for row in repair_rows:
             lines.append(
                 f"| `{row.get('packet_id')}` | {row.get('required_point_id')} | "
-                f"`{row.get('warning')}` | {row.get('recommended_action')} |"
+                f"`{row.get('warning')}` | {_md_cell(row.get('recommended_action'))} |"
             )
     else:
         lines.append("| - | - | - | None |")
@@ -538,14 +569,82 @@ def render_synthesis_audit_markdown(payload: dict[str, Any]) -> str:
                 float(row.get("points") or 0),
                 float(row.get("points_possible") or 0),
             )
+            criterion = row.get("criterion_id")
+            if row.get("subcriterion_id"):
+                criterion = row.get("subcriterion_id")
             lines.append(
                 f"| `{row.get('packet_id')}` | {row.get('actor')} | "
-                f"{row.get('criterion_id')} | {points} | "
-                f"`{row.get('miss_class')}` | {row.get('notes') or ''} |"
+                f"{criterion} | {points} | "
+                f"`{row.get('miss_class')}` | {_md_cell(row.get('notes') or '')} |"
             )
     else:
         lines.append("| - | - | - | - | - | No synthesis misses |")
     return "\n".join(lines) + "\n"
+
+
+def _synthesis_miss_rows_for_criterion(
+    *,
+    packet_id: str,
+    criterion: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    subcriteria = criterion.get("subcriteria") or []
+    if isinstance(subcriteria, list) and subcriteria:
+        for sub in subcriteria:
+            if not isinstance(sub, dict):
+                continue
+            possible = float(sub.get("points") or 0)
+            if possible <= 0:
+                continue
+            for actor in ("planner", "atlas"):
+                status = str(sub.get(f"{actor}_status") or "not_scored")
+                if status == "covered":
+                    continue
+                miss_class = str(
+                    sub.get(f"{actor}_miss_class")
+                    or criterion.get(f"{actor}_miss_class")
+                    or "unclassified"
+                )
+                rows.append({
+                    "packet_id": packet_id,
+                    "actor": actor,
+                    "criterion_id": criterion.get("id"),
+                    "criterion_label": criterion.get("label"),
+                    "subcriterion_id": sub.get("id"),
+                    "subcriterion_text": sub.get("text") or "",
+                    "supporting_qids": list(sub.get("supporting_qids") or []),
+                    "required_point_id": sub.get("required_point_id"),
+                    "points": 0.0,
+                    "points_possible": possible,
+                    "miss_class": miss_class,
+                    "notes": sub.get("notes") or criterion.get("notes") or "",
+                    "manual_review": miss_class == "answer_shape_without_evidence",
+                })
+        return rows
+
+    possible = float(criterion.get("points_possible") or 0)
+    if possible <= 0:
+        return rows
+    for actor in ("planner", "atlas"):
+        points = float(criterion.get(f"{actor}_points") or 0)
+        if points >= possible:
+            continue
+        miss_class = str(
+            criterion.get(f"{actor}_miss_class")
+            or "unclassified"
+        )
+        rows.append({
+            "packet_id": packet_id,
+            "actor": actor,
+            "criterion_id": criterion.get("id"),
+            "criterion_label": criterion.get("label"),
+            "points": points,
+            "points_possible": possible,
+            "miss_class": miss_class,
+            "notes": criterion.get("notes") or "",
+            "manual_review": miss_class == "answer_shape_without_evidence",
+        })
+    return rows
 
 
 def to_json(report: LayeredReport) -> dict[str, Any]:
@@ -1127,6 +1226,11 @@ def _score_source_summary(score_sources: dict[str, int]) -> str:
         f"{name} ({count})"
         for name, count in sorted(score_sources.items())
     )
+
+
+def _md_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return " ".join(text.split()).replace("|", "\\|")
 
 
 def _takeaway(report: LayeredReport) -> str:

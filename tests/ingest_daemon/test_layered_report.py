@@ -397,6 +397,79 @@ synthesis_oracle:
     assert report.synthesis_readiness_pct == 50.0
 
 
+def test_synthesis_audit_uses_subcriterion_miss_rows(tmp_path):
+    packet = _packet_json(
+        tmp_path,
+        [
+            {
+                "question_id": "q1",
+                "grade": "full_match",
+                "score_status": "counted",
+                "lane": "explicit_source_fast_path",
+            },
+        ],
+    )
+    spec = tmp_path / "oracle.yaml"
+    spec.write_text(
+        """
+schema_version: 1
+packet_id: packet-x
+title: Packet X
+evidence_oracle:
+  rows:
+    - qid: q1
+      claim_type: current_behavior
+      evidence_type: source_excerpt
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+      synthesis_role: required_point
+      required_point_ids: [S1]
+synthesis_oracle:
+  ideal_conclusion: Do the thing.
+  required_points:
+    - id: S1
+      text: Point backed by verified evidence.
+  forbidden_claims: []
+  uncertainty_notes: []
+  criteria:
+    - id: required_points
+      label: Required points
+      points_possible: 2
+      planner_points: 2
+      atlas_points: 1
+      atlas_miss_class: evidence_missing
+      subcriteria:
+        - id: required_points.first
+          text: First point.
+          points: 1
+          supporting_qids: [q1]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: covered
+        - id: required_points.second
+          text: Second point.
+          points: 1
+          supporting_qids: [q1]
+          required_point_id: S1
+          planner_status: covered
+          atlas_status: missed
+          atlas_miss_class: evidence_missing
+""",
+        encoding="utf-8",
+    )
+    report = lr.build_report(spec_path=spec, packet_json_path=packet)
+
+    md_path, json_path = lr.write_synthesis_audit([report], tmp_path / "audit")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    md = md_path.read_text(encoding="utf-8")
+
+    assert payload["total_misses"] == 1
+    assert payload["rows"][0]["subcriterion_id"] == "required_points.second"
+    assert payload["rows"][0]["supporting_qids"] == ["q1"]
+    assert "required_points.second" in md
+
+
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
     run_dir = tmp_path / "run"
     packet_dir = run_dir / "packets"
