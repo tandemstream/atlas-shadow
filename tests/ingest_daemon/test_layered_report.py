@@ -439,3 +439,66 @@ def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path
     assert (run_dir / "_layered" / "layered-summary.md").exists()
     assert (run_dir / "_layered" / "synthesis-audit.md").exists()
     assert "layered_packets=1" in result.output
+
+
+def test_shadow_layered_batch_cli_filters_named_packet_slice(tmp_path):
+    run_dir = tmp_path / "run"
+    packet_dir = run_dir / "packets"
+    packet_dir.mkdir(parents=True)
+    for slug in ("packet-x", "packet-y"):
+        (packet_dir / f"{slug}.json").write_text(
+            _packet_json(
+                tmp_path,
+                [
+                    {
+                        "question_id": "q1",
+                        "grade": "full_match",
+                        "score_status": "counted",
+                        "lane": "explicit_source_fast_path",
+                    },
+                ],
+            ).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    oracle_dir = tmp_path / "oracles"
+    oracle_dir.mkdir()
+    for slug in ("packet-x", "packet-y"):
+        text = _spec_yaml(tmp_path).read_text(encoding="utf-8").replace(
+            "packet_id: packet-x",
+            f"packet_id: {slug}",
+        )
+        (oracle_dir / f"{slug}-layered-oracle.yaml").write_text(
+            text,
+            encoding="utf-8",
+        )
+    slice_config = tmp_path / "slices.yaml"
+    slice_config.write_text(
+        """
+schema_version: 1
+slices:
+  only-x:
+    packets:
+      - packet-x
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "shadow-layered-batch",
+            "--run-dir",
+            str(run_dir),
+            "--oracle-dir",
+            str(oracle_dir),
+            "--packet-slice",
+            "only-x",
+            "--slice-config",
+            str(slice_config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (run_dir / "_layered-only-x" / "packet-x").exists()
+    assert not (run_dir / "_layered-only-x" / "packet-y").exists()
+    assert "layered_packets=1 packet_slice=only-x" in result.output

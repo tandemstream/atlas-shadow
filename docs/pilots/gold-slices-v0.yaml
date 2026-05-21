@@ -1,0 +1,27 @@
+schema_version: 1
+source: docs/pilots/gold-set-v0-proposal.md
+slices:
+  gold_evidence_v0:
+    description: Verified evidence packets spanning lookup, docs, code-pack, and document authority tasks.
+    packets:
+      - 2026-05-13-lookup-subagent-pattern-v1
+      - 2026-05-14-atlas-doc-section-expansion-v1
+      - 2026-05-14-mattergraph-document-pack-v1
+      - 2026-05-14-mattergraph-code-pack-corpus-v1
+      - 2026-05-15-atlas-document-authority-staleness-v1
+  gold_synthesis_pilot_v0:
+    description: Packets with strict-subcriteria synthesis rubrics under active hand review.
+    packets:
+      - 2026-05-13-lookup-subagent-pattern-v1
+      - 2026-05-14-atlas-doc-section-expansion-v1
+  workflow_command_gold_v0:
+    description: Command-heavy workflow packets that test implementation discipline rather than Atlas retrieval.
+    packets:
+      - 2026-05-14-personas-codex-impl-loop-v1
+      - 2026-05-15-codepack-document-semantics-v1
+  synthesis_candidate_v0:
+    description: Broad synthesis candidates that need strict-rubric repair before graduation.
+    packets:
+      - 2026-05-14-atlas-canonical-evidence-v1
+      - 2026-05-13-atlas-evidence-expansion-v1
+      - 2026-05-15-atlas-content-dedup-retrieval-v1
