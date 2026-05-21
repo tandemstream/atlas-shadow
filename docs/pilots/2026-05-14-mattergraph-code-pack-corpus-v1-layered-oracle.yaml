@@ -57,7 +57,8 @@ evidence_oracle:
     oracle_status: verified
     planner_evidence_status: not_scored
     synthesis_role: context_only
-    required_point_ids: []
+    required_point_ids:
+    - S3
     notes: Current checkout is core
   - qid: q2
     claim_type: current_behavior
@@ -118,7 +119,8 @@ evidence_oracle:
     oracle_status: verified
     planner_evidence_status: not_scored
     synthesis_role: context_only
-    required_point_ids: []
+    required_point_ids:
+    - S1
     notes: v2 no-gold smoke completed without provider calls
   - qid: q8
     claim_type: current_behavior
