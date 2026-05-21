@@ -220,6 +220,157 @@ def load_spec(path: Path) -> LayeredSpec:
     )
 
 
+def validate_spec(path: Path) -> list[str]:
+    """Return strict-subcriteria validation errors for one oracle spec.
+
+    Legacy criteria without ``subcriteria`` remain valid; this validator
+    only enforces the stricter shape once a packet opts into it.
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        return [f"{path}: spec must be a YAML mapping"]
+
+    errors: list[str] = []
+    evidence_rows = raw.get("evidence_oracle", {}).get("rows", []) or []
+    qids = {
+        str(row.get("qid"))
+        for row in evidence_rows
+        if isinstance(row, dict) and row.get("qid") is not None
+    }
+    synth = raw.get("synthesis_oracle") or {}
+    required_ids = {
+        str(row.get("id"))
+        for row in (synth.get("required_points") or [])
+        if isinstance(row, dict) and row.get("id") is not None
+    }
+    subcriterion_ids: set[str] = set()
+    criteria = synth.get("criteria") or []
+    for criterion in criteria:
+        if not isinstance(criterion, dict):
+            continue
+        criterion_id = str(criterion.get("id") or "<unknown>")
+        subcriteria = criterion.get("subcriteria") or []
+        if not subcriteria:
+            continue
+        if not isinstance(subcriteria, list):
+            errors.append(f"{criterion_id}: subcriteria must be a list")
+            continue
+        errors.extend(
+            _validate_subcriteria(
+                criterion_id=criterion_id,
+                criterion=criterion,
+                subcriteria=subcriteria,
+                qids=qids,
+                required_ids=required_ids,
+                subcriterion_ids=subcriterion_ids,
+            )
+        )
+
+    for forbidden in synth.get("forbidden_claims") or []:
+        if not isinstance(forbidden, dict):
+            continue
+        rewritten = forbidden.get("rewritten_as") or {}
+        if not isinstance(rewritten, dict):
+            continue
+        pointer = rewritten.get("positive_subcriterion_id")
+        if pointer and str(pointer) not in subcriterion_ids:
+            errors.append(
+                f"forbidden_claims.{forbidden.get('id')}: "
+                f"rewritten_as points to unknown subcriterion {pointer}"
+            )
+    return errors
+
+
+def _validate_subcriteria(
+    *,
+    criterion_id: str,
+    criterion: dict[str, Any],
+    subcriteria: list[Any],
+    qids: set[str],
+    required_ids: set[str],
+    subcriterion_ids: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    required_fields = {
+        "id",
+        "text",
+        "points",
+        "supporting_qids",
+        "required_point_id",
+        "planner_status",
+        "atlas_status",
+    }
+    total = 0.0
+    planner = 0.0
+    atlas = 0.0
+    for item in subcriteria:
+        if not isinstance(item, dict):
+            errors.append(f"{criterion_id}: subcriterion must be a mapping")
+            continue
+        sub_id = str(item.get("id") or "<unknown>")
+        subcriterion_ids.add(sub_id)
+        missing = sorted(required_fields - set(item))
+        if missing:
+            errors.append(f"{criterion_id}.{sub_id}: missing fields {missing}")
+        points = float(item.get("points") or 0)
+        total += points
+        for actor in ("planner", "atlas"):
+            status = str(item.get(f"{actor}_status") or "")
+            miss_class = item.get(f"{actor}_miss_class")
+            if status == "covered":
+                if miss_class:
+                    errors.append(
+                        f"{criterion_id}.{sub_id}: {actor}_miss_class "
+                        "present while status is covered"
+                    )
+                if actor == "planner":
+                    planner += points
+                else:
+                    atlas += points
+            elif status == "missed":
+                if not miss_class:
+                    errors.append(
+                        f"{criterion_id}.{sub_id}: {actor}_status=missed "
+                        f"requires {actor}_miss_class"
+                    )
+            elif status:
+                errors.append(
+                    f"{criterion_id}.{sub_id}: unsupported {actor}_status "
+                    f"{status!r}"
+                )
+
+        required_point_id = item.get("required_point_id")
+        if required_point_id is not None and str(required_point_id) not in required_ids:
+            errors.append(
+                f"{criterion_id}.{sub_id}: unknown required_point_id "
+                f"{required_point_id}"
+            )
+        if item.get("scoreable") != "context_only":
+            for qid in item.get("supporting_qids") or []:
+                if str(qid) not in qids:
+                    errors.append(f"{criterion_id}.{sub_id}: unknown qid {qid}")
+
+    expected_total = float(criterion.get("points_possible") or 0)
+    expected_planner = float(criterion.get("planner_points") or 0)
+    expected_atlas = float(criterion.get("atlas_points") or 0)
+    if total != expected_total:
+        errors.append(
+            f"{criterion_id}: points_possible {expected_total:g} != "
+            f"subcriteria sum {total:g}"
+        )
+    if planner != expected_planner:
+        errors.append(
+            f"{criterion_id}: planner_points {expected_planner:g} != "
+            f"covered subcriteria sum {planner:g}"
+        )
+    if atlas != expected_atlas:
+        errors.append(
+            f"{criterion_id}: atlas_points {expected_atlas:g} != "
+            f"covered subcriteria sum {atlas:g}"
+        )
+    return errors
+
+
 def build_report(*, spec_path: Path, packet_json_path: Path) -> LayeredReport:
     spec = load_spec(spec_path)
     packet = json.loads(packet_json_path.read_text(encoding="utf-8"))

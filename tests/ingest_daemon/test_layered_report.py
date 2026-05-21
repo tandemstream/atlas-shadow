@@ -470,6 +470,70 @@ synthesis_oracle:
     assert "required_points.second" in md
 
 
+def test_validate_spec_catches_strict_subcriteria_errors(tmp_path):
+    spec = tmp_path / "oracle.yaml"
+    spec.write_text(
+        """
+schema_version: 1
+packet_id: packet-x
+title: Packet X
+evidence_oracle:
+  rows:
+    - qid: q1
+      oracle_status: verified
+      planner_evidence_status: pass
+      oracle_bucket: evidence
+synthesis_oracle:
+  required_points:
+    - id: S1
+      text: Point
+  criteria:
+    - id: required_points
+      label: Required points
+      points_possible: 2
+      planner_points: 1
+      atlas_points: 1
+      subcriteria:
+        - id: required_points.first
+          text: First point.
+          points: 1
+          supporting_qids: [q-missing]
+          required_point_id: S-missing
+          planner_status: covered
+          atlas_status: missed
+""",
+        encoding="utf-8",
+    )
+
+    errors = lr.validate_spec(spec)
+
+    assert any("atlas_status=missed requires atlas_miss_class" in e for e in errors)
+    assert any("unknown qid q-missing" in e for e in errors)
+    assert any("unknown required_point_id S-missing" in e for e in errors)
+    assert any("points_possible 2 != subcriteria sum 1" in e for e in errors)
+
+
+def test_shadow_validate_layered_oracles_cli(tmp_path):
+    oracle_dir = tmp_path / "oracles"
+    oracle_dir.mkdir()
+    (oracle_dir / "packet-x-layered-oracle.yaml").write_text(
+        _spec_yaml(tmp_path).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "shadow-validate-layered-oracles",
+            "--oracle-dir",
+            str(oracle_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "validated_layered_oracles=1" in result.output
+
+
 def test_shadow_layered_batch_cli_writes_all_packet_reports_and_summary(tmp_path):
     run_dir = tmp_path / "run"
     packet_dir = run_dir / "packets"
